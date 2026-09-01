@@ -1,0 +1,19 @@
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# 运行时数据：数据库与上传的图片
+data/
+
+.env
+.env.local
+.env*.local
+
+.DS_Store
+*.log
+
+# 鏈湴 IDE 鏁版嵁
+.codebuddy/

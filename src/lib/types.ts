@@ -1,0 +1,107 @@
+export type User = {
+  id: number;
+  username: string;
+  created_at: string;
+};
+
+/** 图库中的一张图片（素材） */
+export type Asset = {
+  id: number;
+  owner_id: number;
+  filename: string;
+  thumb_filename: string | null;
+  original_name: string | null;
+  mime_type: string;
+  width: number | null;
+  height: number | null;
+  size_bytes: number;
+  title: string | null;
+  /** 预留：X API 采集器写入 */
+  source_url: string | null;
+  source_author: string | null;
+  source_post_id: string | null;
+  /** private: 仅自己可见；shared: 所有登录用户可见（共享图库） */
+  visibility: 'private' | 'shared';
+  created_at: string;
+  /** 联表查询时附带：素材上传者 */
+  owner_username?: string;
+};
+
+export type SpaceVisibility = 'private' | 'public';
+
+export type Space = {
+  id: number;
+  owner_id: number;
+  name: string;
+  description: string | null;
+  visibility: SpaceVisibility;
+  created_at: string;
+  updated_at: string;
+};
+
+/** owner 可增删改并管理成员；editor 可增删改；viewer 只读 */
+export type SpaceRole = 'owner' | 'editor' | 'viewer';
+
+export type SpaceMember = {
+  id: number;
+  space_id: number;
+  user_id: number;
+  role: SpaceRole;
+  created_at: string;
+  /** 联表查询时附带 */
+  username?: string;
+};
+
+export type SpaceAccess = {
+  role: SpaceRole;
+  /** 通过成员表或所有权获得权限；公开空间的旁观者为 false */
+  isMember: boolean;
+  canEdit: boolean;
+  /** 仅 owner：管理成员、修改空间信息、删除空间 */
+  canManage: boolean;
+};
+
+/** 空间内的一张图片，带有在该空间内的命名 */
+export type SpaceItem = {
+  id: number;
+  space_id: number;
+  asset_id: number;
+  title: string | null;
+  sort_order: number;
+  created_at: string;
+  /** 联表查询时附带 */
+  asset?: Asset;
+  annotation_count?: number;
+};
+
+/** 框选标注。所有坐标均为相对图片宽高的归一化值（0~1） */
+export type Annotation = {
+  id: number;
+  item_id: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  /** 字号 = font_size_ratio * 图片高度（像素） */
+  font_size_ratio: number;
+  color: string;
+  bg_color: string;
+  align: 'left' | 'center' | 'right';
+  font_weight: number;
+  order_index: number;
+};
+
+export type SpaceWithCounts = Space & {
+  item_count: number;
+  annotation_count: number;
+  cover_item_id: number | null;
+  /** 封面缩略图，用于列表卡片展示 */
+  cover_thumb: string | null;
+  cover_filename: string | null;
+  member_count: number;
+  /** 当前用户在该空间的角色 */
+  role: SpaceRole;
+  can_edit: boolean;
+  is_owner: boolean;
+};
