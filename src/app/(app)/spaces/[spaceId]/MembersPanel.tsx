@@ -17,9 +17,9 @@ export const ROLE_HINT: Record<SpaceRole, string> = {
 };
 
 const ROLE_STYLE: Record<SpaceRole, string> = {
-  owner: 'bg-brand-500/15 text-brand-400',
-  editor: 'bg-emerald-500/15 text-emerald-400',
-  viewer: 'bg-ink-700/60 text-ink-300',
+  owner: 'bg-sky/15 text-sky-deep',
+  editor: 'bg-emerald-500/15 text-emerald-700',
+  viewer: 'bg-ink-800 text-ink-400',
 };
 
 export default function MembersPanel({
@@ -142,16 +142,14 @@ export default function MembersPanel({
       >
         <div className="space-y-4">
           {error && (
-            <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">
-              {error}
-            </p>
+            <p className="notice-error">{error}</p>
           )}
 
           <div>
             <h3 className="label">权限说明</h3>
             <div className="grid gap-2 sm:grid-cols-3">
               {(['owner', 'editor', 'viewer'] as SpaceRole[]).map((item) => (
-                <div key={item} className="rounded-lg border border-ink-800 bg-ink-950/50 p-2.5">
+                <div key={item} className="rounded-lg border border-ink-700 bg-paper p-2.5">
                   <span className={`rounded px-1.5 py-0.5 text-[11px] ${ROLE_STYLE[item]}`}>
                     {ROLE_LABEL[item]}
                   </span>
@@ -185,11 +183,11 @@ export default function MembersPanel({
               </div>
 
               {results.length > 0 && (
-                <div className="mt-2 overflow-hidden rounded-lg border border-ink-800">
+                <div className="mt-2 overflow-hidden rounded-lg border border-ink-700">
                   {results.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-center justify-between border-b border-ink-800 px-3 py-2 last:border-b-0"
+                      className="flex items-center justify-between border-b border-ink-700 px-3 py-2 last:border-b-0"
                     >
                       <span className="text-sm text-ink-200">{item.username}</span>
                       {memberIds.has(item.id) ? (
@@ -215,11 +213,11 @@ export default function MembersPanel({
             {loading ? (
               <p className="py-6 text-center text-sm text-ink-500">加载中…</p>
             ) : (
-              <div className="max-h-64 overflow-y-auto rounded-lg border border-ink-800">
+              <div className="max-h-64 overflow-y-auto rounded-lg border border-ink-700">
                 {members.map((member) => (
                   <div
                     key={member.id}
-                    className="flex items-center gap-3 border-b border-ink-800 px-3 py-2.5 last:border-b-0"
+                    className="flex items-center gap-3 border-b border-ink-700 px-3 py-2.5 last:border-b-0"
                   >
                     <span className="flex-1 truncate text-sm text-ink-200">
                       {member.username ?? `用户 #${member.user_id}`}
@@ -241,7 +239,7 @@ export default function MembersPanel({
                         </select>
                         <button
                           type="button"
-                          className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-950/60"
+                          className="rounded px-1.5 py-0.5 text-xs text-blush hover:bg-blush/15"
                           onClick={() => void removeMember(member.user_id)}
                         >
                           移除

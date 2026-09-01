@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { formatBytes, formatDate, thumbUrl } from '@/lib/media';
 import type { Asset } from '@/lib/types';
@@ -200,7 +201,7 @@ export default function LibraryClient() {
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center gap-3">
-        <div className="flex rounded-lg bg-ink-900 p-1">
+        <div className="seg">
           {(
             [
               ['my', '我的图库'],
@@ -214,9 +215,7 @@ export default function LibraryClient() {
                 setScope(value);
                 setSelected(new Set());
               }}
-              className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
-                scope === value ? 'bg-ink-800 text-white' : 'text-ink-400 hover:text-ink-200'
-              }`}
+              className={`seg-btn ${scope === value ? 'seg-btn-on' : ''}`}
             >
               {label}
             </button>
@@ -257,7 +256,7 @@ export default function LibraryClient() {
             type="checkbox"
             checked={shareOnUpload}
             onChange={(e) => setShareOnUpload(e.target.checked)}
-            className="h-4 w-4 rounded border-ink-600 bg-ink-900"
+            className="h-4 w-4 rounded border-ink-700 bg-white accent-sky"
           />
           共享到公共图库
         </label>
@@ -288,7 +287,7 @@ export default function LibraryClient() {
               onChange={(e) =>
                 setSelected(e.target.checked ? new Set(assets.map((a) => a.id)) : new Set())
               }
-              className="h-4 w-4 rounded border-ink-600 bg-ink-900"
+              className="h-4 w-4 rounded border-ink-700 bg-white accent-sky"
             />
             全选
           </label>
@@ -296,13 +295,7 @@ export default function LibraryClient() {
       </div>
 
       {notice && (
-        <div
-          className={`rounded-lg border px-3 py-2 text-sm ${
-            notice.type === 'error'
-              ? 'border-red-900/60 bg-red-950/40 text-red-300'
-              : 'border-emerald-900/60 bg-emerald-950/30 text-emerald-300'
-          }`}
-        >
+        <div className={notice.type === 'error' ? 'notice-error' : 'notice-ok'}>
           {notice.text}
         </div>
       )}
@@ -319,27 +312,28 @@ export default function LibraryClient() {
           void upload(Array.from(e.dataTransfer.files));
         }}
         className={`rounded-xl border-2 border-dashed transition-colors ${
-          dragging ? 'border-brand-500 bg-brand-500/5' : 'border-ink-800'
+          dragging ? 'border-sky bg-sky/5' : 'border-ink-700'
         }`}
       >
         {loading ? (
           <p className="py-20 text-center text-sm text-ink-500">加载中…</p>
         ) : assets.length === 0 ? (
-          <div className="py-20 text-center">
-            <p className="text-sm text-ink-400">
-              {debounced
-                ? '没有匹配的图片'
-                : isMine
-                  ? '图库还是空的'
-                  : '共享图库还是空的'}
-            </p>
-            <p className="mt-1.5 text-xs text-ink-500">
-              点击「上传图片」，把文件拖到这里，或直接
-              <kbd className="mx-1 rounded bg-ink-800 px-1 py-0.5 text-ink-300">Ctrl</kbd>+
-              <kbd className="mx-1 rounded bg-ink-800 px-1 py-0.5 text-ink-300">V</kbd>
-              粘贴
-            </p>
-          </div>
+          <EmptyState
+            padded={false}
+            showMascot={!debounced}
+            kaomoji={debounced ? '(・・?)' : '(´∀｀)♡'}
+            title={
+              debounced ? '没有匹配的图片' : isMine ? '图库还是空的' : '共享图库还是空的'
+            }
+            hint={
+              <>
+                点击「上传图片」，把文件拖到这里，或直接
+                <kbd className="mx-1 rounded bg-paper px-1 py-0.5 text-ink-300">Ctrl</kbd>+
+                <kbd className="mx-1 rounded bg-paper px-1 py-0.5 text-ink-300">V</kbd>
+                粘贴
+              </>
+            }
+          />
         ) : (
           <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
             {assets.map((asset) => {
@@ -347,8 +341,8 @@ export default function LibraryClient() {
               return (
                 <div
                   key={asset.id}
-                  className={`group relative overflow-hidden rounded-lg border bg-ink-900 transition-all ${
-                    active ? 'border-brand-500 ring-1 ring-brand-500' : 'border-ink-800'
+                  className={`group relative overflow-hidden rounded-lg border bg-cloud transition-all ${
+                    active ? 'border-sky ring-1 ring-sky' : 'border-ink-700'
                   }`}
                 >
                   <button
@@ -357,7 +351,7 @@ export default function LibraryClient() {
                     className="block w-full"
                     title={asset.original_name ?? undefined}
                   >
-                    <div className="aspect-square w-full overflow-hidden bg-ink-950">
+                    <div className="aspect-square w-full overflow-hidden bg-paper">
                       <img
                         src={thumbUrl(asset.thumb_filename, asset.filename)}
                         alt={asset.title ?? asset.original_name ?? ''}
@@ -372,7 +366,7 @@ export default function LibraryClient() {
                       type="checkbox"
                       checked={active}
                       onChange={() => toggleSelect(asset.id)}
-                      className="h-4 w-4 rounded border-ink-600 bg-ink-950/80"
+                      className="h-4 w-4 rounded border-ink-700 bg-white/80 accent-sky"
                     />
                   </label>
 
@@ -380,7 +374,7 @@ export default function LibraryClient() {
                     <button
                       type="button"
                       onClick={() => setPendingDelete([asset.id])}
-                      className="absolute right-2 top-2 hidden rounded-md bg-ink-950/85 px-1.5 py-0.5 text-xs text-red-300 hover:bg-red-950 group-hover:block"
+                      className="absolute right-2 top-2 hidden rounded-md bg-cloud/90 px-1.5 py-0.5 text-xs text-blush hover:bg-blush/15 group-hover:block"
                     >
                       删除
                     </button>
@@ -409,7 +403,7 @@ export default function LibraryClient() {
                           setEditingTitle(asset.title ?? '');
                         }}
                         className={`block w-full truncate text-left text-xs ${
-                          isMine ? 'text-ink-200 hover:text-white' : 'cursor-default text-ink-300'
+                          isMine ? 'text-ink-200 hover:text-sky-deep' : 'cursor-default text-ink-400'
                         }`}
                         title={isMine ? '点击重命名' : '只有上传者可以重命名'}
                       >
@@ -421,7 +415,7 @@ export default function LibraryClient() {
                       {formatBytes(asset.size_bytes)}
                       {!isMine && asset.owner_username ? ` · ${asset.owner_username}` : ''}
                     </p>
-                    <p className="truncate text-[11px] text-ink-600">{formatDate(asset.created_at)}</p>
+                    <p className="truncate text-[11px] text-ink-400">{formatDate(asset.created_at)}</p>
                   </div>
                 </div>
               );
@@ -445,7 +439,7 @@ export default function LibraryClient() {
           </>
         }
       >
-        <p className="text-sm text-ink-300">
+        <p className="text-sm text-ink-200">
           将删除 {pendingDelete?.length ?? 0} 张图片。若这些图片已加入空间，会连同其标注一起移除；
           此操作不可撤销。
         </p>
@@ -473,7 +467,7 @@ export default function LibraryClient() {
         }
       >
         <p className="mb-3 text-xs leading-relaxed text-ink-400">
-          在推特上右键图片选择「复制图片地址」，把 <code className="text-ink-300">pbs.twimg.com</code>{' '}
+          在推特上右键图片选择「复制图片地址」，把 <code className="text-ink-200">pbs.twimg.com</code>{' '}
           链接粘贴到下面，一行一个或空格分隔，最多 20 个。
           服务器会直接下载图片，不经过 X API，不产生任何接口费用。
         </p>
@@ -484,7 +478,7 @@ export default function LibraryClient() {
           onChange={(e) => setUrlText(e.target.value)}
           autoFocus
         />
-        <p className="mt-2 text-[11px] text-ink-600">
+        <p className="mt-2 text-[11px] text-ink-400">
           仅支持 http/https 直链，单张不超过 20MB，单次最多 20 个链接。
         </p>
       </Modal>

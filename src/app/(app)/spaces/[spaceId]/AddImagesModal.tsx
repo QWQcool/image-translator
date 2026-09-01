@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { thumbUrl } from '@/lib/media';
 import type { Asset } from '@/lib/types';
@@ -99,7 +100,7 @@ export default function AddImagesModal({
         </>
       }
     >
-      <div className="mb-3 flex rounded-lg bg-ink-950 p-1">
+      <div className="seg mb-3">
         {(
           [
             ['my', '我的图库'],
@@ -110,9 +111,7 @@ export default function AddImagesModal({
             key={value}
             type="button"
             onClick={() => setScope(value)}
-            className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
-              scope === value ? 'bg-ink-800 text-white' : 'text-ink-400 hover:text-ink-200'
-            }`}
+            className={`seg-btn flex-1 ${scope === value ? 'seg-btn-on' : ''}`}
           >
             {label}
           </button>
@@ -129,9 +128,12 @@ export default function AddImagesModal({
       {loading ? (
         <p className="py-16 text-center text-sm text-ink-500">加载中…</p>
       ) : assets.length === 0 ? (
-        <p className="py-16 text-center text-sm text-ink-500">
-          {scope === 'shared' ? '共享图库还没有内容' : '图库为空，请先到「图库」上传图片'}
-        </p>
+        <EmptyState
+          padded={false}
+          kaomoji="(・・?)"
+          title={scope === 'shared' ? '共享图库还没有内容' : '图库还是空的'}
+          hint="请先到「图库」上传图片"
+        />
       ) : (
         <div className="max-h-[55vh] overflow-y-auto pr-1">
           <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-5">
@@ -153,13 +155,13 @@ export default function AddImagesModal({
                   }
                   className={`relative overflow-hidden rounded-lg border transition-all ${
                     already
-                      ? 'cursor-not-allowed border-ink-800 opacity-35'
+                      ? 'cursor-not-allowed border-ink-700 opacity-35'
                       : active
-                        ? 'border-brand-500 ring-1 ring-brand-500'
-                        : 'border-ink-800 hover:border-ink-600'
+                        ? 'border-sky ring-1 ring-sky'
+                        : 'border-ink-700 hover:border-sky/40'
                   }`}
                 >
-                  <div className="aspect-square w-full overflow-hidden bg-ink-950">
+                  <div className="aspect-square w-full overflow-hidden bg-paper">
                     <img
                       src={thumbUrl(asset.thumb_filename, asset.filename)}
                       alt=""
@@ -168,7 +170,7 @@ export default function AddImagesModal({
                     />
                   </div>
                   {already && (
-                    <span className="absolute inset-0 flex items-center justify-center bg-ink-950/70 text-[11px] text-ink-300">
+                    <span className="absolute inset-0 flex items-center justify-center bg-cloud/80 text-[11px] text-ink-400">
                       已在空间
                     </span>
                   )}

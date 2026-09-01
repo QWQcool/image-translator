@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import HaloMark from './HaloMark';
 
 const NAV = [
   { href: '/spaces', label: '空间' },
@@ -19,11 +20,11 @@ export default function TopBar({ username }: { username: string }) {
   }
 
   return (
-    <header className="sticky top-0 z-40 border-b border-ink-800 bg-ink-950/85 backdrop-blur">
+    <header className="sticky top-0 z-40 border-b border-sky/10 bg-cloud/80 shadow-glass backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-[1500px] items-center gap-6 px-6">
-        <Link href="/spaces" className="flex items-center gap-2 font-semibold text-white">
-          <span className="text-lg">🖼️</span>
-          <span>图译空间</span>
+        <Link href="/spaces" className="flex items-center gap-2 text-ink-100">
+          <HaloMark className="h-7 w-7 shrink-0" />
+          <span className="font-display text-lg tracking-wide">图译空间</span>
         </Link>
 
         <nav className="flex items-center gap-1">
@@ -34,7 +35,9 @@ export default function TopBar({ username }: { username: string }) {
                 key={item.href}
                 href={item.href}
                 className={`rounded-lg px-3 py-1.5 text-sm transition-colors ${
-                  active ? 'bg-ink-800 text-white' : 'text-ink-400 hover:bg-ink-900 hover:text-ink-200'
+                  active
+                    ? 'bg-sky/10 text-sky-deep'
+                    : 'text-ink-400 hover:bg-paper hover:text-ink-200'
                 }`}
               >
                 {item.label}

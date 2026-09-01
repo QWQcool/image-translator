@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 html,
@@ -12,35 +12,102 @@ body {
 }
 
 body {
-  @apply bg-ink-950 text-ink-100;
-  font-family:
-    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
-    'Helvetica Neue', sans-serif;
+  @apply bg-paper text-ink-100 antialiased;
+  font-family: var(--font-nunito), var(--font-noto), ui-sans-serif, system-ui, sans-serif;
+}
+
+.font-display {
+  font-family: var(--font-display), var(--font-noto), serif;
+}
+
+/* Signature: faint halo geometry + corner kaomoji. Never intercepts clicks. */
+body::before {
+  content: '';
+  position: fixed;
+  right: -7rem;
+  bottom: -9rem;
+  width: 26rem;
+  height: 26rem;
+  border-radius: 50%;
+  border: 2px solid rgba(232, 197, 71, 0.22);
+  box-shadow:
+    0 0 0 16px rgba(232, 197, 71, 0.07),
+    0 0 0 36px rgba(59, 139, 224, 0.06),
+    inset 0 0 0 10px rgba(247, 251, 255, 0.35);
+  pointer-events: none;
+  z-index: 0;
+}
+
+body::after {
+  content: '(´∀｀)♡';
+  position: fixed;
+  right: 1.1rem;
+  bottom: 0.7rem;
+  font-family: var(--font-display), serif;
+  font-size: 0.92rem;
+  letter-spacing: 0.04em;
+  color: rgba(36, 48, 68, 0.22);
+  pointer-events: none;
+  z-index: 30;
+}
+
+/* Login is outside .app-shell; keep the second corner mark on html so every page has both. */
+html::after {
+  content: '(๑•̀ㅂ•́)و✧';
+  position: fixed;
+  left: 1.1rem;
+  bottom: 0.7rem;
+  font-family: var(--font-display), serif;
+  font-size: 0.82rem;
+  color: rgba(31, 100, 184, 0.28);
+  pointer-events: none;
+  z-index: 30;
+}
+
+.app-shell {
+  position: relative;
+  z-index: 1;
 }
 
 @layer components {
   .btn {
     @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium
-      transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+      transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky/40
+      disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-primary {
-    @apply btn bg-brand-500 text-white hover:bg-brand-600;
+    @apply btn bg-sky text-white hover:bg-sky-deep;
   }
   .btn-ghost {
-    @apply btn border border-ink-700 bg-ink-900/60 text-ink-200 hover:border-ink-600 hover:bg-ink-800;
+    @apply btn border border-ink-700 bg-cloud/80 text-ink-200 hover:border-sky/35 hover:bg-white hover:text-sky-deep;
   }
   .btn-danger {
-    @apply btn border border-red-900/70 bg-red-950/50 text-red-300 hover:bg-red-900/50;
+    @apply btn border border-blush/35 bg-blush/10 text-blush hover:bg-blush/20;
   }
   .input {
-    @apply w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-sm text-ink-100
-      placeholder:text-ink-500 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500;
+    @apply w-full rounded-lg border border-ink-700 bg-white px-3 py-2 text-sm text-ink-100
+      placeholder:text-ink-500 focus:border-sky focus:outline-none focus:ring-1 focus:ring-sky;
   }
   .card {
-    @apply rounded-xl border border-ink-800 bg-ink-900/60;
+    @apply rounded-xl border border-ink-700 bg-cloud shadow-card;
   }
   .label {
-    @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-ink-400;
+    @apply mb-1.5 block text-xs font-medium tracking-wide text-ink-400;
+  }
+  .notice-error {
+    @apply rounded-lg border border-blush/30 bg-blush/10 px-3 py-2 text-sm text-blush;
+  }
+  .notice-ok {
+    @apply rounded-lg border border-emerald-600/20 bg-emerald-50 px-3 py-2 text-sm text-emerald-800;
+  }
+  .seg {
+    @apply flex rounded-xl bg-paper p-1 ring-1 ring-ink-700;
+  }
+  .seg-btn {
+    @apply rounded-lg px-3 py-1.5 text-sm font-medium text-ink-400 transition-colors hover:text-ink-200;
+  }
+  .seg-btn-on {
+    @apply bg-cloud text-sky-deep shadow-sm ring-1 ring-sky/15;
   }
 }
 

@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import EmptyState from '@/components/EmptyState';
 import { imageUrl } from '@/lib/media';
 import { newKey, type DraftAnnotation } from '@/lib/annotation';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
@@ -155,8 +156,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   if (!item || !asset) {
     return (
       <div className="card py-20 text-center">
-        <p className="text-sm text-ink-400">{error ?? '图片不存在或已被移除'}</p>
-        <Link href="/spaces" className="btn-ghost mt-4">
+        <EmptyState padded={false} kaomoji="(・・?)" title={error ?? '图片不存在或已被移除'} />
+        <Link href="/spaces" className="btn-ghost mt-2">
           返回空间列表
         </Link>
       </div>
@@ -169,7 +170,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   return (
     <div className="flex h-[calc(100vh-7rem)] flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
-        <Link href={`/spaces/${item.space_id}`} className="text-sm text-ink-400 hover:text-ink-200">
+        <Link href={`/spaces/${item.space_id}`} className="text-sm text-ink-400 hover:text-sky-deep">
           ← {spaceName || '返回空间'}
         </Link>
 
@@ -196,7 +197,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
             disabled={!canEdit}
             onClick={() => canEdit && setEditingTitle(true)}
             className={`text-sm font-medium ${
-              canEdit ? 'text-white hover:text-brand-400' : 'cursor-default text-ink-200'
+              canEdit ? 'text-ink-100 hover:text-sky-deep' : 'cursor-default text-ink-400'
             }`}
             title={canEdit ? '点击重命名' : undefined}
           >
@@ -220,15 +221,13 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               </button>
             </>
           ) : (
-            <span className="rounded bg-ink-800 px-2 py-1 text-xs text-ink-300">只读</span>
+            <span className="rounded bg-ink-800 px-2 py-1 text-xs text-ink-400">只读</span>
           )}
         </span>
       </div>
 
       {error && (
-        <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">
-          {error}
-        </p>
+        <p className="notice-error">{error}</p>
       )}
 
       <div className="flex min-h-0 flex-1 gap-5">
@@ -244,12 +243,12 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           readOnly={!canEdit}
         />
 
-        <aside className="flex w-[350px] shrink-0 flex-col">
+        <aside className="flex w-[350px] shrink-0 flex-col rounded-xl border border-ink-700 bg-cloud/80 p-3">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-medium text-ink-200">
+            <h2 className="text-sm font-medium text-ink-100">
               标注 <span className="text-ink-500">({annotations.length})</span>
             </h2>
-            <span className="text-[11px] text-ink-600">
+            <span className="text-[11px] text-ink-400">
               {canEdit ? 'Ctrl+S 保存 · Delete 删除' : '只读模式'}
             </span>
           </div>

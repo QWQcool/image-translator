@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
+import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { thumbUrl } from '@/lib/media';
 import type { Space, SpaceAccess, SpaceItem, SpaceVisibility } from '@/lib/types';
@@ -132,7 +133,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
 
   return (
     <div className="space-y-6">
-      <Link href="/spaces" className="inline-block text-sm text-ink-400 hover:text-ink-200">
+      <Link href="/spaces" className="inline-block text-sm text-ink-400 hover:text-sky-deep">
         ← 返回空间列表
       </Link>
 
@@ -171,8 +172,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                     onClick={() => setSpaceDraft((d) => ({ ...d, visibility: option.value }))}
                     className={`rounded-lg border p-2.5 text-left transition-colors ${
                       spaceDraft.visibility === option.value
-                        ? 'border-brand-500 bg-brand-500/10'
-                        : 'border-ink-700 hover:border-ink-600'
+                      ? 'border-sky bg-sky/10'
+                      : 'border-ink-700 hover:border-sky/30'
                     }`}
                   >
                     <div className="text-sm font-medium text-ink-100">{option.title}</div>
@@ -195,8 +196,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         ) : (
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="truncate text-xl font-semibold text-white">{space.name}</h1>
-              <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-ink-300">
+              <h1 className="font-display truncate text-2xl tracking-wide text-ink-100">{space.name}</h1>
+              <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-ink-400">
                 {ROLE_LABEL[access.role]}
               </span>
               {canManage && (
@@ -216,8 +217,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 </button>
               )}
             </div>
-            <p className="mt-1 text-sm text-ink-400">{space.description || '暂无描述'}</p>
-            <p className="mt-1.5 text-xs text-ink-600">
+            <p className="mt-1 text-sm text-ink-400">{space.description || '还没写简介'}</p>
+            <p className="mt-1.5 text-xs text-ink-400">
               {items.length} 张图片 · {totalAnnotations} 条标注 ·{' '}
               {space.visibility === 'public' ? '🌐 公开（非成员只读）' : '🔒 仅成员可见'}
             </p>
@@ -247,25 +248,23 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       </div>
 
       {!canEdit && (
-        <p className="rounded-lg border border-ink-800 bg-ink-900/50 px-3 py-2 text-xs text-ink-400">
-          你在该空间是<strong className="text-ink-200">只读</strong>权限，可以查看和导出标注，
+        <p className="rounded-lg border border-sky/20 bg-sky/5 px-3 py-2 text-xs text-ink-400">
+          你在该空间是<strong className="text-ink-100">只读</strong>权限，可以查看和导出标注，
           但不能添加、修改或删除内容。
         </p>
       )}
 
       {error && (
-        <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">
-          {error}
-        </p>
+        <p className="notice-error">{error}</p>
       )}
 
       {items.length === 0 ? (
-        <div className="card py-20 text-center">
-          <p className="text-sm text-ink-400">这个空间还没有图片</p>
-          <p className="mt-1.5 text-xs text-ink-500">
-            {canEdit ? '点击「添加图片」从图库中挑选' : '等待有编辑权限的成员添加'}
-          </p>
-        </div>
+        <EmptyState
+          showMascot
+          kaomoji="(๑•̀ㅂ•́)و✧"
+          title="这个空间还没有图片"
+          hint={canEdit ? '点击「添加图片」从图库中挑选' : '等待有编辑权限的成员添加'}
+        />
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
           {items.map((item) => (
@@ -277,7 +276,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                   if (!canEdit) event.preventDefault();
                 }}
               >
-                <div className="relative aspect-[4/3] w-full overflow-hidden bg-ink-950">
+                <div className="relative aspect-[4/3] w-full overflow-hidden bg-paper">
                   <img
                     src={thumbUrl(item.asset?.thumb_filename ?? null, item.asset?.filename ?? '')}
                     alt={item.title ?? ''}
@@ -287,7 +286,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                     }`}
                   />
                   {(item.annotation_count ?? 0) > 0 && (
-                    <span className="absolute right-2 top-2 rounded-md bg-brand-500/90 px-1.5 py-0.5 text-[11px] font-medium text-white">
+                    <span className="absolute right-2 top-2 rounded-md bg-sky/90 px-1.5 py-0.5 text-[11px] font-medium text-white">
                       {item.annotation_count} 标注
                     </span>
                   )}
@@ -316,7 +315,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                       setEditingTitle(item.title ?? '');
                     }}
                     className={`block w-full truncate text-left text-xs ${
-                      canEdit ? 'text-ink-200 hover:text-white' : 'cursor-default text-ink-300'
+                      canEdit ? 'text-ink-200 hover:text-sky-deep' : 'cursor-default text-ink-400'
                     }`}
                     title={canEdit ? '点击重命名' : undefined}
                   >
@@ -324,7 +323,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                   </button>
                 )}
 
-                <p className="mt-1 truncate text-[11px] text-ink-600">
+                <p className="mt-1 truncate text-[11px] text-ink-400">
                   {item.asset?.width && item.asset?.height
                     ? `${item.asset.width}×${item.asset.height}`
                     : ''}
@@ -381,7 +380,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           </>
         }
       >
-        <p className="text-sm text-ink-300">
+        <p className="text-sm text-ink-200">
           将把「{pendingDeleteItem?.title || '未命名'}」从本空间移除，其
           {pendingDeleteItem?.annotation_count ?? 0} 条标注会一并删除。
           图库中的原始素材保留，可重新加入其它空间。
@@ -407,7 +406,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           </>
         }
       >
-        <p className="text-sm text-ink-300">
+        <p className="text-sm text-ink-200">
           将删除空间「{space.name}」及其中全部 {items.length} 张图片与 {totalAnnotations} 条标注，
           所有协作者都会失去访问权；图库中的原始素材不会被删除。
         </p>

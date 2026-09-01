@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
+import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { formatDate, thumbUrl } from '@/lib/media';
 import type { SpaceRole, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
@@ -11,9 +12,9 @@ type Draft = { id?: number; name: string; description: string; visibility: Space
 const EMPTY_DRAFT: Draft = { name: '', description: '', visibility: 'private' };
 
 const ROLE_BADGE: Record<SpaceRole, { label: string; className: string }> = {
-  owner: { label: '所有者', className: 'bg-brand-500/15 text-brand-400' },
-  editor: { label: '可编辑', className: 'bg-emerald-500/15 text-emerald-400' },
-  viewer: { label: '只读', className: 'bg-ink-700/70 text-ink-300' },
+  owner: { label: '所有者', className: 'bg-sky/15 text-sky-deep' },
+  editor: { label: '可编辑', className: 'bg-emerald-500/15 text-emerald-700' },
+  viewer: { label: '只读', className: 'bg-ink-800 text-ink-400' },
 };
 
 export default function SpacesClient() {
@@ -108,36 +109,32 @@ export default function SpacesClient() {
         <span className="text-sm text-ink-500">共 {spaces.length} 个可见空间</span>
       </div>
 
-      {error && (
-        <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">
-          {error}
-        </p>
-      )}
+      {error && <p className="notice-error">{error}</p>}
 
       {loading ? (
         <p className="py-20 text-center text-sm text-ink-500">加载中…</p>
       ) : spaces.length === 0 ? (
-        <div className="card py-20 text-center">
-          <p className="text-sm text-ink-400">还没有空间</p>
-          <p className="mt-1.5 text-xs text-ink-500">
-            新建一个空间，然后去「图库」把图片加进来
-          </p>
-        </div>
+        <EmptyState
+          showMascot
+          kaomoji="(´∀｀)♡"
+          title="还没有空间"
+          hint="新建一个空间，然后去「图库」把图片加进来"
+        />
       ) : (
         groups.map((group) => (
           <section key={group.key}>
-            <h2 className="mb-3 text-sm font-medium text-ink-300">
+            <h2 className="mb-3 text-sm font-medium text-ink-200">
               {group.label}
-              <span className="ml-1.5 text-ink-600">{group.items.length}</span>
+              <span className="ml-1.5 text-ink-400">{group.items.length}</span>
             </h2>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
               {group.items.map((space) => (
                 <div
                   key={space.id}
-                  className="card group overflow-hidden transition-colors hover:border-ink-700"
+                  className="card group overflow-hidden transition-colors hover:border-sky/35"
                 >
                   <Link href={`/spaces/${space.id}`} className="block">
-                    <div className="aspect-[16/10] w-full overflow-hidden bg-ink-950">
+                    <div className="aspect-[16/10] w-full overflow-hidden bg-paper">
                       {space.cover_thumb || space.cover_filename ? (
                         <img
                           src={thumbUrl(space.cover_thumb, space.cover_filename ?? '')}
@@ -157,7 +154,7 @@ export default function SpacesClient() {
                     <div className="flex items-start justify-between gap-2">
                       <Link
                         href={`/spaces/${space.id}`}
-                        className="truncate text-sm font-medium text-ink-100 hover:text-white"
+                        className="truncate text-sm font-medium text-ink-100 hover:text-sky-deep"
                       >
                         {space.name}
                       </Link>
@@ -171,17 +168,17 @@ export default function SpacesClient() {
                     </div>
 
                     <p className="mt-1 line-clamp-2 min-h-[2.5rem] text-xs text-ink-500">
-                      {space.description || '暂无描述'}
+                      {space.description || '还没写简介'}
                     </p>
 
-                    <div className="mt-3 flex items-center justify-between text-[11px] text-ink-600">
+                    <div className="mt-3 flex items-center justify-between text-[11px] text-ink-400">
                       <span>
                         {space.item_count} 图 · {space.annotation_count} 标注
                       </span>
                       <span>{formatDate(space.updated_at)}</span>
                     </div>
 
-                    <div className="mt-2 flex items-center justify-between text-[11px] text-ink-600">
+                    <div className="mt-2 flex items-center justify-between text-[11px] text-ink-400">
                       <span>
                         {space.visibility === 'public' ? '🌐 公开（登录用户可见）' : '🔒 仅成员可见'}
                       </span>
@@ -205,7 +202,7 @@ export default function SpacesClient() {
                           编辑
                         </button>
                       ) : (
-                        <span className="flex-1 py-1 text-center text-xs text-ink-600">
+                        <span className="flex-1 py-1 text-center text-xs text-ink-400">
                           只读权限
                         </span>
                       )}
@@ -288,8 +285,8 @@ export default function SpacesClient() {
                   onClick={() => setDraft((d) => (d ? { ...d, visibility: option.value } : d))}
                   className={`rounded-lg border p-2.5 text-left transition-colors ${
                     draft?.visibility === option.value
-                      ? 'border-brand-500 bg-brand-500/10'
-                      : 'border-ink-700 hover:border-ink-600'
+                      ? 'border-sky bg-sky/10'
+                      : 'border-ink-700 hover:border-sky/30'
                   }`}
                 >
                   <div className="text-sm font-medium text-ink-100">{option.title}</div>
@@ -300,7 +297,7 @@ export default function SpacesClient() {
               ))}
             </div>
           </div>
-          {error && <p className="text-sm text-red-300">{error}</p>}
+          {error && <p className="text-sm text-blush">{error}</p>}
         </div>
       </Modal>
 
@@ -319,7 +316,7 @@ export default function SpacesClient() {
           </>
         }
       >
-        <p className="text-sm text-ink-300">
+        <p className="text-sm text-ink-200">
           将删除空间「{pendingDelete?.name}」及其中的 {pendingDelete?.item_count ?? 0} 张图片与{' '}
           {pendingDelete?.annotation_count ?? 0} 条标注，所有协作者都会失去访问权。
           图库中的原始素材不会被删除。

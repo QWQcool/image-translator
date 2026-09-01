@@ -40,13 +40,13 @@ export default function ExportMenu({
       </button>
 
       {open && (
-        <div className="absolute right-0 z-30 mt-1 w-60 overflow-hidden rounded-lg border border-ink-700 bg-ink-900 shadow-xl">
+        <div className="absolute right-0 z-30 mt-1 w-60 overflow-hidden rounded-lg border border-ink-700 bg-cloud shadow-card">
           {OPTIONS.map((option) => (
             <a
               key={option.format}
               href={`/api/spaces/${spaceId}/export?format=${option.format}`}
               onClick={() => setOpen(false)}
-              className="block px-3 py-2.5 text-sm text-ink-200 transition-colors hover:bg-ink-800"
+              className="block px-3 py-2.5 text-sm text-ink-200 transition-colors hover:bg-paper"
             >
               <div className="font-medium">{option.label}</div>
               <div className="mt-0.5 text-[11px] text-ink-500">{option.hint}</div>

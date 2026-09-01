@@ -450,7 +450,7 @@ export default function AnnotationCanvas({
         <span className="ml-2 text-xs text-ink-500">
           {Math.round(zoom * 100)}% · {imageWidth}×{imageHeight}
         </span>
-        <span className="text-xs text-ink-600">滚轮缩放 · 空格或中键拖动平移 · Alt 拖动也可平移</span>
+        <span className="text-xs text-ink-400">滚轮缩放 · 空格或中键拖动平移 · Alt 拖动也可平移</span>
         <button type="button" className="btn-ghost ml-auto px-2.5 py-1 text-xs" onClick={exportPng}>
           导出这张图
         </button>
@@ -458,8 +458,11 @@ export default function AnnotationCanvas({
 
       <div
         ref={viewportRef}
-        className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-ink-800 bg-ink-950"
-        style={{ backgroundImage: 'radial-gradient(circle, #1b202b 1px, transparent 1px)', backgroundSize: '18px 18px' }}
+        className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-sky/20 bg-ink-950"
+        style={{
+          backgroundImage: 'radial-gradient(circle, rgba(247,251,255,0.14) 1px, transparent 1px)',
+          backgroundSize: '18px 18px',
+        }}
       >
         <div
           ref={wrapperRef}

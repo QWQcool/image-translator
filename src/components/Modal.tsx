@@ -31,12 +31,12 @@ export default function Modal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div
-        className="absolute inset-0 bg-black/65 backdrop-blur-sm"
+        className="absolute inset-0 bg-ink-100/35 backdrop-blur-sm"
         onClick={onClose}
         aria-hidden
       />
-      <div className={`relative w-full ${width} card p-5 shadow-2xl`}>
-        <h2 className="mb-4 text-base font-semibold text-white">{title}</h2>
+      <div className={`relative w-full ${width} card p-5 shadow-xl`}>
+        <h2 className="font-display mb-4 text-lg text-ink-100">{title}</h2>
         {children}
         {footer && <div className="mt-5 flex justify-end gap-2">{footer}</div>}
       </div>
