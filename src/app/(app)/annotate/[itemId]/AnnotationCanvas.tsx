@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { clamp01, layoutText, type DraftAnnotation } from '@/lib/annotation';
+import { clamp01, isPin, layoutText, newKey, type DraftAnnotation } from '@/lib/annotation';
+import { groupColor } from '@/lib/labelplus';
 
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
 type Handle = (typeof HANDLES)[number];
@@ -34,6 +35,7 @@ function paint(
 
   const all = extra ? [...annotations, extra] : annotations;
   for (const annotation of all) {
+    if (isPin(annotation)) continue;
     const x = annotation.x * width;
     const y = annotation.y * height;
     const w = annotation.w * width;
@@ -72,6 +74,8 @@ function paint(
   }
 }
 
+export type EditorMode = 'box' | 'browse' | 'label' | 'input' | 'review';
+
 export default function AnnotationCanvas({
   imageSrc,
   previewSrc,
@@ -83,6 +87,11 @@ export default function AnnotationCanvas({
   onChange,
   fileName,
   readOnly,
+  mode = 'box',
+  hidePins = false,
+  showGroupNames = false,
+  defaultGroupId = 1,
+  followSelection = false,
 }: {
   imageSrc: string;
   previewSrc?: string;
@@ -94,6 +103,11 @@ export default function AnnotationCanvas({
   onChange: (next: DraftAnnotation[]) => void;
   fileName: string;
   readOnly: boolean;
+  mode?: EditorMode;
+  hidePins?: boolean;
+  showGroupNames?: boolean;
+  defaultGroupId?: number;
+  followSelection?: boolean;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -120,6 +134,14 @@ export default function AnnotationCanvas({
   annotationsRef.current = annotations;
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const hidePinsRef = useRef(hidePins);
+  hidePinsRef.current = hidePins;
+  const defaultGroupRef = useRef(defaultGroupId);
+  defaultGroupRef.current = defaultGroupId;
+  const selectedKeyRef = useRef(selectedKey);
+  selectedKeyRef.current = selectedKey;
 
   const originalImgRef = useRef<HTMLImageElement | null>(null);
 
@@ -233,6 +255,17 @@ export default function AnnotationCanvas({
     };
   }, []);
 
+  useEffect(() => {
+    if (!followSelection || !selectedKey || !base.w) return;
+    const pin = annotations.find((a) => a.key === selectedKey && isPin(a));
+    if (!pin || !viewportRef.current) return;
+    const rect = viewportRef.current.getBoundingClientRect();
+    setPan({
+      x: rect.width / 2 - pin.x * base.w * zoom,
+      y: rect.height / 2 - pin.y * base.h * zoom,
+    });
+  }, [followSelection, selectedKey]);
+
   function stageCoords(event: { clientX: number; clientY: number }) {
     const wrapper = wrapperRef.current;
     if (!wrapper) return { x: 0, y: 0 };
@@ -244,11 +277,35 @@ export default function AnnotationCanvas({
     };
   }
 
-  function hitTest(point: { x: number; y: number }): DraftAnnotation | null {
+  function hitTestPin(point: { x: number; y: number }): DraftAnnotation | null {
+    if (hidePinsRef.current) return null;
+    const nx = point.x / base.w;
+    const ny = point.y / base.h;
+    const rx = 18 / base.w;
+    const ry = 18 / base.h;
+    let best: DraftAnnotation | null = null;
+    let bestDist = Infinity;
+    for (const annotation of annotationsRef.current) {
+      if (!isPin(annotation)) continue;
+      const dx = nx - annotation.x;
+      const dy = ny - annotation.y;
+      if (Math.abs(dx) <= rx && Math.abs(dy) <= ry) {
+        const dist = dx * dx + dy * dy;
+        if (dist < bestDist) {
+          best = annotation;
+          bestDist = dist;
+        }
+      }
+    }
+    return best;
+  }
+
+  function hitTestBox(point: { x: number; y: number }): DraftAnnotation | null {
     const nx = point.x / base.w;
     const ny = point.y / base.h;
     for (let i = annotationsRef.current.length - 1; i >= 0; i -= 1) {
       const annotation = annotationsRef.current[i];
+      if (isPin(annotation)) continue;
       if (
         nx >= annotation.x &&
         nx <= annotation.x + annotation.w &&
@@ -259,6 +316,11 @@ export default function AnnotationCanvas({
       }
     }
     return null;
+  }
+
+  function hitTest(point: { x: number; y: number }): DraftAnnotation | null {
+    if (modeRef.current === 'box') return hitTestBox(point);
+    return hitTestPin(point) ?? (modeRef.current === 'browse' ? hitTestBox(point) : null);
   }
 
   function onPointerDown(event: React.PointerEvent) {
@@ -281,10 +343,57 @@ export default function AnnotationCanvas({
     if (readOnly) return;
 
     const point = stageCoords(event);
+    const currentMode = modeRef.current;
     const hit = hitTest(point);
+
+    if (currentMode === 'label' && !hit) {
+      const nx = clamp01(point.x / base.w);
+      const ny = clamp01(point.y / base.h);
+      const pin: DraftAnnotation = {
+        key: newKey(),
+        x: nx,
+        y: ny,
+        w: 0,
+        h: 0,
+        text: '',
+        font_size_ratio: 0.035,
+        color: '#FFFFFF',
+        bg_color: '#000000B3',
+        align: 'left',
+        font_weight: 700,
+        kind: 'pin',
+        group_id: defaultGroupRef.current,
+        source_text: '',
+        comment: '',
+      };
+      onChange([...annotationsRef.current, pin]);
+      onSelect(pin.key);
+      dragRef.current = {
+        mode: 'move',
+        key: pin.key,
+        start: point,
+        startPan: pan,
+        snapshot: { ...pin },
+      };
+      wrapper.setPointerCapture(event.pointerId);
+      return;
+    }
 
     if (hit) {
       onSelect(hit.key);
+      if (currentMode === 'browse' || currentMode === 'input' || currentMode === 'review') {
+        if (isPin(hit) && currentMode !== 'input' && currentMode !== 'review') {
+          dragRef.current = {
+            mode: 'move',
+            key: hit.key,
+            start: point,
+            startPan: pan,
+            snapshot: { ...hit },
+          };
+          wrapper.setPointerCapture(event.pointerId);
+        }
+        return;
+      }
       dragRef.current = {
         mode: 'move',
         key: hit.key,
@@ -292,19 +401,27 @@ export default function AnnotationCanvas({
         startPan: pan,
         snapshot: { ...hit },
       };
-    } else {
+    } else if (currentMode === 'box') {
       onSelect(null);
       dragRef.current = {
         mode: 'draw',
         start: point,
         startPan: pan,
       };
+    } else {
+      onSelect(null);
+      return;
     }
     wrapper.setPointerCapture(event.pointerId);
   }
 
   function onPointerMove(event: React.PointerEvent) {
     const drag = dragRef.current;
+    if (drag.mode === 'none' && modeRef.current === 'review' && base.w) {
+      const hover = hitTestPin(stageCoords(event));
+      if (hover && hover.key !== selectedKeyRef.current) onSelect(hover.key);
+    }
+
     if (drag.mode === 'none' || !base.w) return;
 
     if (drag.mode === 'pan') {
@@ -334,6 +451,10 @@ export default function AnnotationCanvas({
         bg_color: '#00000000',
         align: 'left',
         font_weight: 700,
+        kind: 'box',
+        group_id: 1,
+        source_text: '',
+        comment: '',
       });
       return;
     }
@@ -342,8 +463,12 @@ export default function AnnotationCanvas({
       const dx = (point.x - drag.start.x) / base.w;
       const dy = (point.y - drag.start.y) / base.h;
       const snap = drag.snapshot;
-      const x = clamp01(Math.min(snap.x + dx, 1 - snap.w));
-      const y = clamp01(Math.min(snap.y + dy, 1 - snap.h));
+      const x = isPin(snap)
+        ? clamp01(snap.x + dx)
+        : clamp01(Math.min(snap.x + dx, 1 - snap.w));
+      const y = isPin(snap)
+        ? clamp01(snap.y + dy)
+        : clamp01(Math.min(snap.y + dy, 1 - snap.h));
       onChange(
         annotationsRef.current.map((item) =>
           item.key === drag.key ? { ...item, x, y } : item,
@@ -438,7 +563,15 @@ export default function AnnotationCanvas({
     }, 'image/png');
   }
 
-  const cursor = spaceDown ? 'grab' : readOnly ? 'default' : 'crosshair';
+  const cursor = spaceDown
+    ? 'grab'
+    : readOnly
+      ? 'default'
+      : mode === 'box'
+        ? 'crosshair'
+        : mode === 'label'
+          ? 'cell'
+          : 'default';
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -503,7 +636,47 @@ export default function AnnotationCanvas({
           <canvas ref={canvasRef} className="block" />
 
           {annotations.map((annotation) => {
-            const active = annotation.key === selectedKey && !readOnly;
+            if (isPin(annotation)) {
+              if (hidePins) return null;
+              const pinIndex = annotations.filter((a) => isPin(a)).indexOf(annotation) + 1;
+              const color = groupColor(annotation.group_id || 1);
+              const active = annotation.key === selectedKey;
+              const size = 22 / zoom;
+              return (
+                <div
+                  key={annotation.key}
+                  className="pointer-events-none absolute flex flex-col items-center"
+                  style={{
+                    left: annotation.x * base.w,
+                    top: annotation.y * base.h,
+                    transform: 'translate(-50%, -50%)',
+                  }}
+                >
+                  <div
+                    className="flex items-center justify-center rounded-full font-bold text-white shadow"
+                    style={{
+                      width: size,
+                      height: size,
+                      fontSize: Math.max(10, 12 / zoom),
+                      background: color,
+                      outline: active ? '2px solid #E8C547' : '2px solid rgba(255,255,255,0.85)',
+                    }}
+                  >
+                    {pinIndex}
+                  </div>
+                  {showGroupNames && (
+                    <span
+                      className="mt-0.5 whitespace-nowrap rounded px-1 text-[10px] text-white"
+                      style={{ background: color, fontSize: Math.max(9, 10 / zoom) }}
+                    >
+                      {annotation.group_id}
+                    </span>
+                  )}
+                </div>
+              );
+            }
+
+            const active = annotation.key === selectedKey && !readOnly && mode === 'box';
             const left = annotation.x * base.w;
             const top = annotation.y * base.h;
             const width = annotation.w * base.w;

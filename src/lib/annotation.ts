@@ -14,6 +14,12 @@ export type DraftAnnotation = {
   bg_color: string;
   align: 'left' | 'center' | 'right';
   font_weight: number;
+  kind: 'box' | 'pin';
+  group_id: number;
+  source_text: string;
+  comment: string;
+  updated_by?: number | null;
+  updated_by_username?: string | null;
 };
 
 export const DEFAULT_ANNOTATION: Omit<DraftAnnotation, 'key' | 'x' | 'y' | 'w' | 'h'> = {
@@ -23,7 +29,15 @@ export const DEFAULT_ANNOTATION: Omit<DraftAnnotation, 'key' | 'x' | 'y' | 'w' |
   bg_color: '#000000B3',
   align: 'left',
   font_weight: 700,
+  kind: 'box',
+  group_id: 1,
+  source_text: '',
+  comment: '',
 };
+
+export function isPin(annotation: { kind?: string; w: number; h: number }): boolean {
+  return annotation.kind === 'pin' || (annotation.w <= 0 && annotation.h <= 0 && annotation.kind !== 'box');
+}
 
 export const CANVAS_FONT =
   '700 {size}px system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';

@@ -106,7 +106,45 @@ export async function GET(_request: Request, { params }: Params) {
     updated_at: '',
   };
 
-  return NextResponse.json({ item, asset, space, access: viewing.access });
+  const siblings = db
+    .prepare(
+      `SELECT si.id, si.title, a.thumb_filename, a.filename, a.original_name
+         FROM space_items si
+         JOIN assets a ON a.id = si.asset_id
+        WHERE si.space_id = ?
+        ORDER BY si.sort_order, si.id`,
+    )
+    .all(item.space_id) as Array<{
+    id: number;
+    title: string | null;
+    thumb_filename: string | null;
+    filename: string;
+    original_name: string | null;
+  }>;
+  const index = siblings.findIndex((row) => row.id === item.id);
+  const neighbors = {
+    index,
+    total: siblings.length,
+    prevId: index > 0 ? siblings[index - 1].id : null,
+    nextId: index >= 0 && index < siblings.length - 1 ? siblings[index + 1].id : null,
+    items: siblings,
+  };
+
+  const spaceRow = db.prepare('SELECT lp_groups, lp_phrases FROM spaces WHERE id = ?').get(item.space_id) as
+    | { lp_groups: string | null; lp_phrases: string | null }
+    | undefined;
+
+  return NextResponse.json({
+    item,
+    asset,
+    space,
+    access: viewing.access,
+    neighbors,
+    labelplus: {
+      groups: spaceRow?.lp_groups ?? null,
+      phrases: spaceRow?.lp_phrases ?? null,
+    },
+  });
 }
 
 export async function PATCH(request: Request, { params }: Params) {

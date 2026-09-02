@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { getCurrentUser } from '@/lib/auth';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import type { Annotation } from '@/lib/types';
 
@@ -22,7 +22,13 @@ export async function GET(_request: Request, { params }: Params) {
   if (denied) return denied;
 
   const annotations = db
-    .prepare('SELECT * FROM annotations WHERE item_id = ? ORDER BY order_index, id')
+    .prepare(
+      `SELECT a.*, u.username AS updated_by_username
+         FROM annotations a
+         LEFT JOIN users u ON u.id = a.updated_by
+        WHERE a.item_id = ?
+        ORDER BY a.order_index, a.id`,
+    )
     .all(itemId) as Annotation[];
 
   return NextResponse.json({ annotations });
@@ -40,6 +46,10 @@ type IncomingAnnotation = {
   bg_color: string;
   align: 'left' | 'center' | 'right';
   font_weight: number;
+  kind?: 'box' | 'pin';
+  group_id?: number;
+  source_text?: string;
+  comment?: string;
 };
 
 const ALIGNS = new Set(['left', 'center', 'right']);
@@ -79,33 +89,40 @@ export async function PUT(request: Request, { params }: Params) {
     return NextResponse.json({ error: 'annotations 必须是数组' }, { status: 400 });
   }
 
-  const normalized = incoming.map((item, index) => {
-    const x = clamp01(item.x);
-    const y = clamp01(item.y);
+  const normalized = incoming.map((row, index) => {
+    const x = clamp01(row.x);
+    const y = clamp01(row.y);
+    const kind = row.kind === 'pin' ? 'pin' : 'box';
+    const groupId = Number.isInteger(row.group_id) ? Math.min(9, Math.max(1, Number(row.group_id))) : 1;
     return {
-      id: Number.isInteger(item.id) ? Number(item.id) : null,
       x,
       y,
-      // 保证框不越界
-      w: Math.max(0, Math.min(1 - x, clamp01(item.w))),
-      h: Math.max(0, Math.min(1 - y, clamp01(item.h))),
-      text: String(item.text ?? ''),
-      font_size_ratio: Math.min(0.5, Math.max(0.004, Number(item.font_size_ratio) || 0.035)),
-      color: /^#[0-9a-fA-F]{6}$/.test(item.color ?? '') ? item.color : '#FFFFFF',
-      bg_color: /^#[0-9a-fA-F]{8}$|^#[0-9a-fA-F]{6}$/.test(item.bg_color ?? '')
-        ? item.bg_color
+      w: kind === 'pin' ? 0 : Math.max(0, Math.min(1 - x, clamp01(row.w))),
+      h: kind === 'pin' ? 0 : Math.max(0, Math.min(1 - y, clamp01(row.h))),
+      text: String(row.text ?? ''),
+      font_size_ratio: Math.min(0.5, Math.max(0.004, Number(row.font_size_ratio) || 0.035)),
+      color: /^#[0-9a-fA-F]{6}$/.test(row.color ?? '') ? row.color : '#FFFFFF',
+      bg_color: /^#[0-9a-fA-F]{8}$|^#[0-9a-fA-F]{6}$/.test(row.bg_color ?? '')
+        ? row.bg_color
         : '#000000B3',
-      align: ALIGNS.has(item.align) ? item.align : 'left',
-      font_weight: item.font_weight === 400 ? 400 : 700,
+      align: ALIGNS.has(row.align) ? row.align : 'left',
+      font_weight: row.font_weight === 400 ? 400 : 700,
       order_index: index,
+      kind,
+      group_id: groupId,
+      source_text: String(row.source_text ?? ''),
+      comment: String(row.comment ?? ''),
+      updated_by: user.id,
     };
   });
 
   const clear = db.prepare('DELETE FROM annotations WHERE item_id = ?');
   const insert = db.prepare(
     `INSERT INTO annotations
-       (item_id, x, y, w, h, text, font_size_ratio, color, bg_color, align, font_weight, order_index)
-     VALUES (@item_id, @x, @y, @w, @h, @text, @font_size_ratio, @color, @bg_color, @align, @font_weight, @order_index)`,
+       (item_id, x, y, w, h, text, font_size_ratio, color, bg_color, align, font_weight,
+        order_index, kind, group_id, source_text, comment, updated_by)
+     VALUES (@item_id, @x, @y, @w, @h, @text, @font_size_ratio, @color, @bg_color, @align, @font_weight,
+        @order_index, @kind, @group_id, @source_text, @comment, @updated_by)`,
   );
   const touch = db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`);
 
@@ -118,7 +135,13 @@ export async function PUT(request: Request, { params }: Params) {
   })();
 
   const annotations = db
-    .prepare('SELECT * FROM annotations WHERE item_id = ? ORDER BY order_index, id')
+    .prepare(
+      `SELECT a.*, u.username AS updated_by_username
+         FROM annotations a
+         LEFT JOIN users u ON u.id = a.updated_by
+        WHERE a.item_id = ?
+        ORDER BY a.order_index, a.id`,
+    )
     .all(itemId) as Annotation[];
 
   return NextResponse.json({ annotations });

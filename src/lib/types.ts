@@ -37,6 +37,8 @@ export type Space = {
   visibility: SpaceVisibility;
   created_at: string;
   updated_at: string;
+  lp_groups?: string | null;
+  lp_phrases?: string | null;
 };
 
 /** owner 可增删改并管理成员；editor 可增删改；viewer 只读 */
@@ -74,7 +76,11 @@ export type SpaceItem = {
   annotation_count?: number;
 };
 
-/** 框选标注。所有坐标均为相对图片宽高的归一化值（0~1） */
+export type AnnotationKind = 'box' | 'pin';
+
+export type LabelPlusGroup = { id: number; name: string };
+
+/** 框选标注或 LabelPlus 点标号。坐标均为相对图片宽高的归一化值（0~1） */
 export type Annotation = {
   id: number;
   item_id: number;
@@ -90,6 +96,13 @@ export type Annotation = {
   align: 'left' | 'center' | 'right';
   font_weight: number;
   order_index: number;
+  kind: AnnotationKind;
+  /** LabelPlus 分组 1–9；框选可忽略 */
+  group_id: number;
+  source_text: string;
+  comment: string;
+  updated_by: number | null;
+  updated_by_username?: string | null;
 };
 
 export type SpaceWithCounts = Space & {

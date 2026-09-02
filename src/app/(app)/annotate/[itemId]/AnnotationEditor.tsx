@@ -2,13 +2,42 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
-import { originalUrl, previewUrl } from '@/lib/media';
-import { newKey, type DraftAnnotation } from '@/lib/annotation';
-import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
-import AnnotationCanvas from './AnnotationCanvas';
+import { originalUrl, previewUrl, thumbUrl } from '@/lib/media';
+import { isPin, newKey, type DraftAnnotation } from '@/lib/annotation';
+import { parseGroups, parsePhrases } from '@/lib/labelplus';
+import type { Asset, LabelPlusGroup, SpaceAccess, SpaceItem } from '@/lib/types';
+import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
 import AnnotationPanel from './AnnotationPanel';
+import LabelPlusPanel from './LabelPlusPanel';
+
+const MODES: Array<{ id: EditorMode; key: string; label: string }> = [
+  { id: 'box', key: '', label: '框选' },
+  { id: 'browse', key: 'Q', label: '浏览' },
+  { id: 'label', key: 'W', label: '标号' },
+  { id: 'input', key: 'E', label: '录入' },
+  { id: 'review', key: 'R', label: '审校' },
+];
+
+type NeighborItem = {
+  id: number;
+  title: string | null;
+  thumb_filename: string | null;
+  filename: string;
+  original_name: string | null;
+};
+
+function hydrate(row: DraftAnnotation): DraftAnnotation {
+  return {
+    ...row,
+    key: newKey(),
+    kind: row.kind === 'pin' || (row.w === 0 && row.h === 0 && row.kind !== 'box') ? 'pin' : 'box',
+    group_id: row.group_id || 1,
+    source_text: row.source_text ?? '',
+    comment: row.comment ?? '',
+  };
+}
 
 export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const router = useRouter();
@@ -26,6 +55,23 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const [title, setTitle] = useState('');
   const [editingTitle, setEditingTitle] = useState(false);
   const [access, setAccess] = useState<SpaceAccess | null>(null);
+  const [mode, setMode] = useState<EditorMode>('box');
+  const [hidePins, setHidePins] = useState(false);
+  const [showGroupNames, setShowGroupNames] = useState(false);
+  const [defaultGroupId, setDefaultGroupId] = useState(1);
+  const [groups, setGroups] = useState<LabelPlusGroup[]>([]);
+  const [phrases, setPhrases] = useState<string[]>([]);
+  const [neighbors, setNeighbors] = useState<{
+    prevId: number | null;
+    nextId: number | null;
+    items: NeighborItem[];
+  }>({ prevId: null, nextId: null, items: [] });
+
+  const annotationsRef = useRef(annotations);
+  annotationsRef.current = annotations;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const canEditRef = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -46,13 +92,16 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       setSpaceName(detail.space?.name ?? '');
       setTitle(detail.item?.title ?? '');
       setAccess(detail.access ?? null);
-      setAnnotations(
-        (annotationData.annotations ?? []).map((row: DraftAnnotation) => ({
-          ...row,
-          key: newKey(),
-        })),
-      );
+      setAnnotations((annotationData.annotations ?? []).map((row: DraftAnnotation) => hydrate(row)));
       setDirty(false);
+      setSelectedKey(null);
+      setGroups(parseGroups(detail.labelplus?.groups));
+      setPhrases(parsePhrases(detail.labelplus?.phrases));
+      setNeighbors({
+        prevId: detail.neighbors?.prevId ?? null,
+        nextId: detail.neighbors?.nextId ?? null,
+        items: detail.neighbors?.items ?? [],
+      });
     } catch {
       setError('加载失败，请刷新重试');
     } finally {
@@ -74,13 +123,14 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   }, []);
 
   const canEdit = access?.canEdit ?? false;
+  canEditRef.current = canEdit;
 
   const save = useCallback(async () => {
-    if (!item || !access?.canEdit) return;
+    if (!item || !canEditRef.current) return;
     setSaving(true);
     setError(null);
     try {
-      const payload = annotations.map(({ key, ...rest }) => rest);
+      const payload = annotationsRef.current.map(({ key: _key, ...rest }) => rest);
       const res = await fetch(`/api/items/${itemId}/annotations`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -91,10 +141,9 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
         setError(data.error ?? '保存失败');
         return;
       }
-      // 用服务端返回的记录回填，保证后续编辑带上真实 id
       setAnnotations((prev) =>
         (data.annotations ?? []).map((row: DraftAnnotation, index: number) => ({
-          ...row,
+          ...hydrate(row),
           key: prev[index]?.key ?? newKey(),
         })),
       );
@@ -105,7 +154,13 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     } finally {
       setSaving(false);
     }
-  }, [annotations, item, itemId]);
+  }, [item, itemId]);
+
+  useEffect(() => {
+    if (!dirty || !canEdit || mode === 'box') return;
+    const timer = window.setTimeout(() => void save(), 900);
+    return () => window.clearTimeout(timer);
+  }, [dirty, annotations, canEdit, mode, save]);
 
   async function saveTitle() {
     setEditingTitle(false);
@@ -119,7 +174,27 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     if (!res.ok) setError('重命名失败');
   }
 
-  // Ctrl/Cmd+S 保存；非输入状态下 Delete 删除选中标注
+  const goItem = useCallback(
+    async (targetId: number | null) => {
+      if (!targetId) return;
+      if (dirtyRef.current && canEditRef.current) await save();
+      router.push(`/annotate/${targetId}`);
+    },
+    [router, save],
+  );
+
+  const pins = useMemo(() => annotations.filter(isPin), [annotations]);
+
+  const selectPinByOffset = useCallback(
+    (delta: number) => {
+      if (pins.length === 0) return;
+      const index = pins.findIndex((p) => p.key === selectedKey);
+      const next = pins[(index < 0 ? 0 : index + delta + pins.length) % pins.length];
+      setSelectedKey(next.key);
+    },
+    [pins, selectedKey],
+  );
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -130,8 +205,49 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
         if (canEdit) void save();
         return;
       }
-      if (typing || !canEdit) return;
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        selectPinByOffset(1);
+        return;
+      }
 
+      if (typing) return;
+
+      if (event.key === 'q' || event.key === 'Q') setMode('browse');
+      if (event.key === 'w' || event.key === 'W') setMode('label');
+      if (event.key === 'e' || event.key === 'E') setMode('input');
+      if (event.key === 'r' || event.key === 'R') setMode('review');
+      if (event.key === 'v' || event.key === 'V') setHidePins((v) => !v);
+      if (event.key === 'c' || event.key === 'C') setShowGroupNames((v) => !v);
+      if (/^[1-9]$/.test(event.key)) {
+        const id = Number(event.key);
+        setDefaultGroupId(id);
+        if (selectedKey && canEdit) {
+          applyChange(
+            annotationsRef.current.map((row) =>
+              row.key === selectedKey && isPin(row) ? { ...row, group_id: id } : row,
+            ),
+          );
+        }
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        void goItem(neighbors.prevId);
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        void goItem(neighbors.nextId);
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        selectPinByOffset(-1);
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        selectPinByOffset(1);
+      }
+
+      if (!canEdit) return;
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedKey) {
         event.preventDefault();
         applyChange(annotations.filter((annotation) => annotation.key !== selectedKey));
@@ -140,9 +256,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [annotations, selectedKey, save, applyChange, canEdit]);
+  }, [annotations, selectedKey, save, applyChange, canEdit, neighbors, goItem, selectPinByOffset]);
 
-  // 离开页面前提醒未保存的改动
   useEffect(() => {
     if (!dirty) return;
     const handler = (event: BeforeUnloadEvent) => event.preventDefault();
@@ -166,16 +281,15 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
 
   const imageWidth = asset.width ?? 1200;
   const imageHeight = asset.height ?? 800;
+  const pinMode = mode !== 'box';
 
   return (
-    <div className="flex h-[calc(100vh-7rem)] flex-col gap-4">
+    <div className="flex h-[calc(100vh-7rem)] flex-col gap-3">
       <div className="flex flex-wrap items-center gap-3">
         <Link href={`/spaces/${item.space_id}`} className="text-sm text-ink-400 hover:text-sky-deep">
           ← {spaceName || '返回空间'}
         </Link>
-
         <span className="text-ink-700">/</span>
-
         {editingTitle ? (
           <input
             autoFocus
@@ -205,6 +319,24 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           </button>
         )}
 
+        <div className="seg ml-2 flex flex-wrap gap-1">
+          {MODES.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              className={`seg-btn ${mode === entry.id ? 'seg-btn-on' : ''}`}
+              onClick={() => setMode(entry.id)}
+              title={entry.key ? `${entry.label}（${entry.key}）` : entry.label}
+            >
+              {entry.label}
+              {entry.key && <span className="ml-1 text-[10px] opacity-60">{entry.key}</span>}
+            </button>
+          ))}
+          <button type="button" className="seg-btn opacity-50" disabled title="第 E 阶段接入">
+            嵌字
+          </button>
+        </div>
+
         <span className="ml-auto flex items-center gap-3">
           {canEdit ? (
             <>
@@ -226,47 +358,104 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
         </span>
       </div>
 
-      {error && (
-        <p className="notice-error">{error}</p>
-      )}
+      {error && <p className="notice-error">{error}</p>}
 
       <div className="flex min-h-0 flex-1 gap-5">
-        <AnnotationCanvas
-          imageSrc={originalUrl(asset.filename)}
-          previewSrc={previewUrl(asset.filename)}
-          imageWidth={imageWidth}
-          imageHeight={imageHeight}
-          annotations={annotations}
-          selectedKey={selectedKey}
-          onSelect={setSelectedKey}
-          onChange={applyChange}
-          fileName={asset.original_name ?? asset.filename}
-          readOnly={!canEdit}
-        />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <AnnotationCanvas
+            imageSrc={originalUrl(asset.filename)}
+            previewSrc={previewUrl(asset.filename)}
+            imageWidth={imageWidth}
+            imageHeight={imageHeight}
+            annotations={annotations}
+            selectedKey={selectedKey}
+            onSelect={setSelectedKey}
+            onChange={applyChange}
+            fileName={asset.original_name ?? asset.filename}
+            readOnly={!canEdit}
+            mode={mode}
+            hidePins={hidePins}
+            showGroupNames={showGroupNames || mode === 'review'}
+            defaultGroupId={defaultGroupId}
+            followSelection={mode === 'input'}
+          />
+          {neighbors.items.length > 1 && (
+            <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+              {neighbors.items.map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  onClick={() => void goItem(entry.id)}
+                  className={`h-16 w-16 shrink-0 overflow-hidden rounded-md border ${
+                    entry.id === itemId ? 'border-sky ring-1 ring-sky' : 'border-ink-700'
+                  }`}
+                  title={entry.title ?? entry.original_name ?? ''}
+                >
+                  <img
+                    src={thumbUrl(entry.thumb_filename, entry.filename)}
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         <aside className="flex w-[350px] shrink-0 flex-col rounded-xl border border-ink-700 bg-cloud/80 p-3">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-sm font-medium text-ink-100">
-              标注 <span className="text-ink-500">({annotations.length})</span>
+              {pinMode ? '标号' : '标注'}{' '}
+              <span className="text-ink-500">({pinMode ? pins.length : annotations.filter((a) => !isPin(a)).length})</span>
             </h2>
             <span className="text-[11px] text-ink-400">
-              {canEdit ? 'Ctrl+S 保存 · Delete 删除' : '只读模式'}
+              {canEdit ? 'Ctrl+S · ←→ 翻图 · ↑↓ 切号' : '只读模式'}
             </span>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <AnnotationPanel
-              annotations={annotations}
-              selectedKey={selectedKey}
-              imageHeight={imageHeight}
-              onSelect={setSelectedKey}
-              onChange={applyChange}
-              readOnly={!canEdit}
-              onRemove={(key) => {
-                if (!canEdit) return;
-                applyChange(annotations.filter((annotation) => annotation.key !== key));
-                if (selectedKey === key) setSelectedKey(null);
-              }}
-            />
+            {pinMode ? (
+              <LabelPlusPanel
+                annotations={annotations}
+                selectedKey={selectedKey}
+                groups={groups}
+                phrases={phrases}
+                defaultGroupId={defaultGroupId}
+                reviewMode={mode === 'review'}
+                onSelect={setSelectedKey}
+                onChange={applyChange}
+                readOnly={!canEdit}
+                onDefaultGroup={setDefaultGroupId}
+                onInsertPhrase={(phrase) => {
+                  if (!selectedKey || !canEdit) return;
+                  applyChange(
+                    annotations.map((row) =>
+                      row.key === selectedKey ? { ...row, text: `${row.text}${phrase}` } : row,
+                    ),
+                  );
+                }}
+                onRemove={(key) => {
+                  if (!canEdit) return;
+                  applyChange(annotations.filter((annotation) => annotation.key !== key));
+                  if (selectedKey === key) setSelectedKey(null);
+                }}
+              />
+            ) : (
+              <AnnotationPanel
+                annotations={annotations.filter((a) => !isPin(a))}
+                selectedKey={selectedKey}
+                imageHeight={imageHeight}
+                onSelect={setSelectedKey}
+                onChange={(nextBoxes) => {
+                  applyChange([...nextBoxes, ...annotations.filter(isPin)]);
+                }}
+                readOnly={!canEdit}
+                onRemove={(key) => {
+                  if (!canEdit) return;
+                  applyChange(annotations.filter((annotation) => annotation.key !== key));
+                  if (selectedKey === key) setSelectedKey(null);
+                }}
+              />
+            )}
           </div>
         </aside>
       </div>

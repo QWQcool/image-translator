@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { getSpaceAccess } from '@/lib/permissions';
+import { parseGroups, serializeLabelPlus } from '@/lib/labelplus';
 import type { Annotation, Asset, Space, SpaceItem } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -268,6 +269,24 @@ export async function GET(request: Request, { params }: Params) {
   }
 
   const json = JSON.stringify(buildPayload(space, rows), null, 2);
+
+  if (format === 'lp' || format === 'labelplus') {
+    const txt = serializeLabelPlus({
+      groups: parseGroups(space.lp_groups),
+      files: rows.map(({ item, asset, annotations }) => ({
+        filename: asset.original_name || asset.filename,
+        labels: annotations
+          .filter((an) => an.kind === 'pin')
+          .map((an) => ({ x: an.x, y: an.y, groupId: an.group_id || 1, text: an.text })),
+      })),
+    });
+    return new NextResponse(txt, {
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Disposition': disposition(`${safeName}-翻译_0.txt`),
+      },
+    });
+  }
 
   if (format === 'zip') {
     const zip = new JSZip();

@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS spaces (
   description TEXT,
   -- private: 仅成员可见；public: 所有登录用户可见，非成员一律只读
   visibility  TEXT NOT NULL DEFAULT 'private',
+  lp_groups   TEXT,
+  lp_phrases  TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -81,6 +83,11 @@ CREATE TABLE IF NOT EXISTS annotations (
   align           TEXT NOT NULL DEFAULT 'left',
   font_weight     INTEGER NOT NULL DEFAULT 700,
   order_index     INTEGER NOT NULL DEFAULT 0,
+  kind            TEXT NOT NULL DEFAULT 'box',
+  group_id        INTEGER NOT NULL DEFAULT 1,
+  source_text     TEXT NOT NULL DEFAULT '',
+  comment         TEXT NOT NULL DEFAULT '',
+  updated_by      INTEGER,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -122,6 +129,30 @@ function migrate(database: Database.Database): void {
     `INSERT OR IGNORE INTO space_members (space_id, user_id, role)
      SELECT id, owner_id, 'owner' FROM spaces`,
   );
+
+  const annotationColumns = database
+    .prepare('PRAGMA table_info(annotations)')
+    .all() as Array<{ name: string }>;
+  const addAnnotationColumn = (name: string, ddl: string) => {
+    if (!annotationColumns.some((column) => column.name === name)) {
+      database.exec(`ALTER TABLE annotations ADD COLUMN ${ddl}`);
+    }
+  };
+  addAnnotationColumn('kind', `kind TEXT NOT NULL DEFAULT 'box'`);
+  addAnnotationColumn('group_id', `group_id INTEGER NOT NULL DEFAULT 1`);
+  addAnnotationColumn('source_text', `source_text TEXT NOT NULL DEFAULT ''`);
+  addAnnotationColumn('comment', `comment TEXT NOT NULL DEFAULT ''`);
+  addAnnotationColumn('updated_by', `updated_by INTEGER`);
+
+  const latestSpaceColumns = database
+    .prepare('PRAGMA table_info(spaces)')
+    .all() as Array<{ name: string }>;
+  if (!latestSpaceColumns.some((column) => column.name === 'lp_groups')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN lp_groups TEXT`);
+  }
+  if (!latestSpaceColumns.some((column) => column.name === 'lp_phrases')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN lp_phrases TEXT`);
+  }
 }
 
 // Next.js 开发模式下模块会被反复重载，用 globalThis 缓存连接避免句柄泄漏。
