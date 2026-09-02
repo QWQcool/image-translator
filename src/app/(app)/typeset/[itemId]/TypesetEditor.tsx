@@ -346,6 +346,29 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   saveRef.current = save;
   undoRef.current = undo;
 
+  async function autoInpaint() {
+    setError(null);
+    const res = await fetch(`/api/items/${itemId}/inpaint`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ boxes: [] }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: '去字失败' }));
+      setError(data.error ?? '去字失败');
+      return;
+    }
+    const blob = await res.blob();
+    const bmp = await createImageBitmap(blob);
+    const canvas = paintRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    bmp.close();
+    setDirty(true);
+    await snapshotPaint();
+  }
+
   async function fromPins() {
     const res = await fetch(`/api/items/${itemId}/annotations`);
     const data = await res.json();
@@ -459,6 +482,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         <span className="ml-auto flex gap-2">
           <button type="button" className="btn-ghost text-xs" onClick={() => void fromPins()}>
             从标号生成文字层
+          </button>
+          <button type="button" className="btn-ghost text-xs" onClick={() => void autoInpaint()}>
+            自动去字
           </button>
           <button type="button" className="btn-ghost text-xs" onClick={() => void undo()}>
             撤销

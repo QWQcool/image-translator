@@ -11,6 +11,7 @@ import type { Asset, LabelPlusGroup, SpaceAccess, SpaceItem } from '@/lib/types'
 import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
 import AnnotationPanel from './AnnotationPanel';
 import LabelPlusPanel from './LabelPlusPanel';
+import OcrModal from './OcrModal';
 
 const MODES: Array<{ id: EditorMode; key: string; label: string }> = [
   { id: 'box', key: '', label: '框选' },
@@ -61,6 +62,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const [defaultGroupId, setDefaultGroupId] = useState(1);
   const [groups, setGroups] = useState<LabelPlusGroup[]>([]);
   const [phrases, setPhrases] = useState<string[]>([]);
+  const [ocrOpen, setOcrOpen] = useState(false);
   const [neighbors, setNeighbors] = useState<{
     prevId: number | null;
     nextId: number | null;
@@ -408,9 +410,16 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               {pinMode ? '标号' : '标注'}{' '}
               <span className="text-ink-500">({pinMode ? pins.length : annotations.filter((a) => !isPin(a)).length})</span>
             </h2>
-            <span className="text-[11px] text-ink-400">
-              {canEdit ? 'Ctrl+S · ←→ 翻图 · ↑↓ 切号' : '只读模式'}
-            </span>
+            <div className="flex items-center gap-2">
+              {pinMode && canEdit && (
+                <button type="button" className="btn-ghost px-2 py-1 text-[11px]" onClick={() => setOcrOpen(true)}>
+                  OCR 自动标号
+                </button>
+              )}
+              <span className="text-[11px] text-ink-400">
+                {canEdit ? 'Ctrl+S · ←→ 翻图 · ↑↓ 切号' : '只读模式'}
+              </span>
+            </div>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             {pinMode ? (
@@ -459,6 +468,13 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           </div>
         </aside>
       </div>
+      {ocrOpen && (
+        <OcrModal
+          itemId={itemId}
+          onClose={() => setOcrOpen(false)}
+          onApplied={() => void load()}
+        />
+      )}
     </div>
   );
 }
