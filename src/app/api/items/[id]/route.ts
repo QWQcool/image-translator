@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import type { Asset, Space, SpaceAccess, SpaceItem } from '@/lib/types';
 
@@ -44,6 +45,7 @@ export async function GET(_request: Request, { params }: Params) {
               si.title       AS item_title,
               si.sort_order  AS item_sort_order,
               si.created_at  AS item_created_at,
+              si.ai_context  AS item_ai_context,
               a.id           AS asset_id,
               a.owner_id     AS asset_owner_id,
               a.filename     AS asset_filename,
@@ -78,6 +80,7 @@ export async function GET(_request: Request, { params }: Params) {
     title: row.item_title as string | null,
     sort_order: row.item_sort_order as number,
     created_at: row.item_created_at as string,
+    ai_context: (row.item_ai_context as string | null) ?? null,
   };
   const asset: Asset = {
     id: row.asset_id as number,
@@ -130,8 +133,8 @@ export async function GET(_request: Request, { params }: Params) {
     items: siblings,
   };
 
-  const spaceRow = db.prepare('SELECT lp_groups, lp_phrases FROM spaces WHERE id = ?').get(item.space_id) as
-    | { lp_groups: string | null; lp_phrases: string | null }
+  const spaceRow = db.prepare('SELECT lp_groups, lp_phrases, lp_styles FROM spaces WHERE id = ?').get(item.space_id) as
+    | { lp_groups: string | null; lp_phrases: string | null; lp_styles: string | null }
     | undefined;
 
   return NextResponse.json({
@@ -143,6 +146,7 @@ export async function GET(_request: Request, { params }: Params) {
     labelplus: {
       groups: spaceRow?.lp_groups ?? null,
       phrases: spaceRow?.lp_phrases ?? null,
+      styles: spaceRow?.lp_styles ?? null,
     },
   });
 }
@@ -174,6 +178,7 @@ export async function PATCH(request: Request, { params }: Params) {
     if (!title) return NextResponse.json({ error: '名称不能为空' }, { status: 400 });
     if (title.length > 200) return NextResponse.json({ error: '名称过长' }, { status: 400 });
     db.prepare('UPDATE space_items SET title = ? WHERE id = ?').run(title, id);
+    logOp(user.id, 'update', 'item', id, title, '条目改名');
   }
 
   if (body.sortOrder !== undefined) {
@@ -208,6 +213,8 @@ export async function DELETE(_request: Request, { params }: Params) {
 
   db.prepare('DELETE FROM space_items WHERE id = ?').run(id);
   db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`).run(item.space_id);
+
+  logOp(user.id, 'delete', 'item', id, item.title || `条目 ${id}`, '从空间移除条目（素材保留在图库）');
 
   return NextResponse.json({ ok: true });
 }

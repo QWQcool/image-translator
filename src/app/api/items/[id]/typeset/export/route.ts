@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { imageLimiter, storeImage } from '@/lib/storage';
 import type { Asset } from '@/lib/types';
@@ -65,5 +66,6 @@ export async function POST(request: Request, { params }: Params) {
   ).run(item.space_id, result.lastInsertRowid, title, maxOrder.m + 1);
 
   const asset = db.prepare('SELECT * FROM assets WHERE id = ?').get(result.lastInsertRowid) as Asset;
+  logOp(user.id, 'upload', 'asset', asset.id, asset.title, `嵌字成品写入空间（来源条目：${itemDisplayName(itemId) ?? itemId}）`);
   return NextResponse.json({ asset }, { status: 201 });
 }

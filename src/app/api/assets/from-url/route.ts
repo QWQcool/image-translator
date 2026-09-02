@@ -3,6 +3,7 @@ import net from 'node:net';
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { logOp } from '@/lib/oplog';
 import { imageLimiter, storeImage, SUPPORTED_MIME_TYPES } from '@/lib/storage';
 import type { Asset } from '@/lib/types';
 
@@ -157,5 +158,13 @@ export async function POST(request: Request) {
   if (created.length === 0) {
     return NextResponse.json({ error: errors.join('；') || '全部链接导入失败' }, { status: 400 });
   }
+  logOp(
+    user.id,
+    'upload',
+    'asset',
+    null,
+    created[0]?.title ?? null,
+    `链接导入 ${created.length} 张图片：${created.map((a) => a.title ?? `#${a.id}`).join('、').slice(0, 200)}`,
+  );
   return NextResponse.json({ assets: created, errors }, { status: 201 });
 }

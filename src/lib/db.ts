@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DEFAULT_LP_STYLES } from './labelplus';
 
 const DATA_DIR = path.resolve(process.cwd(), process.env.DATA_DIR ?? 'data');
 const DB_PATH = path.join(DATA_DIR, 'app.db');
@@ -163,6 +164,26 @@ function migrate(database: Database.Database): void {
      SELECT id, owner_id, 'owner' FROM spaces`,
   );
 
+  // 素材软删除：deleted_at 非空 = 在回收站里；磁盘文件保留，恢复即可用
+  if (!assetColumns.some((column) => column.name === 'deleted_at')) {
+    database.exec(`ALTER TABLE assets ADD COLUMN deleted_at TEXT`);
+  }
+
+  // 全站操作日志：空间/素材/条目的增删改、AI 调用等，日志页只展示最近 500 条
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS op_logs (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      action      TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id   INTEGER,
+      target_name TEXT,
+      detail      TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_op_logs_created ON op_logs(id DESC);
+  `);
+
   const annotationColumns = database
     .prepare('PRAGMA table_info(annotations)')
     .all() as Array<{ name: string }>;
@@ -185,6 +206,14 @@ function migrate(database: Database.Database): void {
   }
   if (!latestSpaceColumns.some((column) => column.name === 'lp_phrases')) {
     database.exec(`ALTER TABLE spaces ADD COLUMN lp_phrases TEXT`);
+  }
+
+  // 嵌字分组样式预设（JSON：{[groupId]: LpStyle}），迁移时给已有空间写入默认值
+  if (!latestSpaceColumns.some((column) => column.name === 'lp_styles')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN lp_styles TEXT`);
+    database
+      .prepare('UPDATE spaces SET lp_styles = ? WHERE lp_styles IS NULL')
+      .run(JSON.stringify(DEFAULT_LP_STYLES));
   }
 
   // 开放空间改造：历史遗留的私人空间/私人素材一次性转成公共，
@@ -212,6 +241,40 @@ function migrate(database: Database.Database): void {
       updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // 多 Provider：一个用户可配置多条 AI 服务（OCR/翻译/去字可选用哪条）。
+  // user_id 为 NULL 的记录是「官方渠道」占位（server 端 token 字段保留，暂不填、不计费）。
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS ai_providers (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      name       TEXT NOT NULL DEFAULT '',
+      base_url   TEXT NOT NULL DEFAULT '',
+      api_key    TEXT NOT NULL DEFAULT '',
+      ocr_model  TEXT NOT NULL DEFAULT '',
+      chat_model TEXT NOT NULL DEFAULT '',
+      image_model TEXT NOT NULL DEFAULT '',
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  // 一次性把旧 ai_configs 迁成一条默认 Provider（幂等：只补没迁移过的用户）
+  database.exec(`
+    INSERT INTO ai_providers (user_id, name, base_url, api_key, ocr_model, chat_model, image_model, is_default)
+      SELECT user_id, '默认', base_url, api_key, ocr_model, ocr_model, image_model, 1
+        FROM ai_configs
+       WHERE base_url <> '' AND api_key <> ''
+         AND user_id NOT IN (SELECT user_id FROM ai_providers WHERE user_id IS NOT NULL)
+  `);
+
+  // AI 图像解析：OCR 时顺带存一段图片内容描述（人物/场景/剧情提示），AI 翻译时作为上下文。
+  // ai_context 挂在 space_items 上（条目即一张图）
+  const itemColumns = database
+    .prepare('PRAGMA table_info(space_items)')
+    .all() as Array<{ name: string }>;
+  if (!itemColumns.some((column) => column.name === 'ai_context')) {
+    database.exec(`ALTER TABLE space_items ADD COLUMN ai_context TEXT`);
+  }
 
   // 房间垃圾回收：过期锁直接清掉，两周前的操作日志丢弃（防表无限增长）
   database.exec(`DELETE FROM edit_rooms WHERE expires_at < (strftime('%s','now') * 1000 - 60000)`);

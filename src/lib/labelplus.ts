@@ -54,6 +54,87 @@ export type LpLabel = { x: number; y: number; groupId: number; text: string };
 export type LpFile = { filename: string; labels: LpLabel[] };
 export type LpDocument = { groups: string[]; files: LpFile[] };
 
+/**
+ * 嵌字分组样式预设（对标 LabelPlus PS 脚本的分组设计）。
+ * 键是分组 id（字符串形式的 1~9），从标号生成文字层时按 group_id 套用。
+ */
+export type LpStyle = {
+  /** 竖排文字 */
+  vertical: boolean;
+  /** 文字颜色 */
+  color: string;
+  /** 描边颜色 */
+  stroke: string;
+  /** 描边宽度（像素） */
+  strokeWidth: number;
+  /** 字号比例：字号 = fontSizeRatio * 图片高度 */
+  fontSizeRatio: number;
+  align: 'left' | 'center' | 'right';
+  fontWeight: number;
+  lineHeight: number;
+};
+
+/** 空间默认预置：组1=竖排白描边深蓝字，组2=横排蓝字白描边 */
+export const DEFAULT_LP_STYLES: Record<string, LpStyle> = {
+  '1': {
+    vertical: true,
+    color: '#243044',
+    stroke: '#FFFFFF',
+    strokeWidth: 4,
+    fontSizeRatio: 0.032,
+    align: 'center',
+    fontWeight: 700,
+    lineHeight: 1.25,
+  },
+  '2': {
+    vertical: false,
+    color: '#1F64B8',
+    stroke: '#FFFFFF',
+    strokeWidth: 4,
+    fontSizeRatio: 0.032,
+    align: 'center',
+    fontWeight: 700,
+    lineHeight: 1.25,
+  },
+};
+
+function clampNum(value: unknown, min: number, max: number, fallback: number): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+/** 清洗任意输入为合法的样式表（仅接受 1~9 的分组键），用于 API 校验与前端解析 */
+export function normalizeStyles(input: unknown): Record<string, LpStyle> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const out: Record<string, LpStyle> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!/^[1-9]$/.test(key) || !value || typeof value !== 'object') continue;
+    const s = value as Partial<LpStyle>;
+    out[key] = {
+      vertical: Boolean(s.vertical),
+      color: typeof s.color === 'string' && s.color ? s.color.slice(0, 20) : '#243044',
+      stroke: typeof s.stroke === 'string' && s.stroke ? s.stroke.slice(0, 20) : '#FFFFFF',
+      strokeWidth: clampNum(s.strokeWidth, 0, 40, 4),
+      fontSizeRatio: clampNum(s.fontSizeRatio, 0.005, 0.2, 0.032),
+      align: s.align === 'left' || s.align === 'right' ? s.align : 'center',
+      fontWeight: Math.round(clampNum(s.fontWeight, 100, 900, 700)),
+      lineHeight: clampNum(s.lineHeight, 0.8, 3, 1.25),
+    };
+  }
+  return out;
+}
+
+/** 解析空间里存的 lp_styles JSON（损坏/缺省时返回空表，调用方自行落回默认值） */
+export function parseStyles(raw: string | null | undefined): Record<string, LpStyle> {
+  if (!raw) return {};
+  try {
+    return normalizeStyles(JSON.parse(raw));
+  } catch {
+    return {};
+  }
+}
+
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));

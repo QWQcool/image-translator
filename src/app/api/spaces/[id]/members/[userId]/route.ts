@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess, isSpaceRole } from '@/lib/permissions';
 
 type Params = { params: Promise<{ id: string; userId: string }> };
@@ -53,6 +54,11 @@ export async function PATCH(request: Request, { params }: Params) {
     targetUserId,
   );
 
+  const targetUser = db.prepare('SELECT username FROM users WHERE id = ?').get(targetUserId) as
+    | { username: string }
+    | undefined;
+  logOp(user.id, 'member', 'member', targetUserId, targetUser?.username ?? `用户 ${targetUserId}`, `角色改为 ${body.role}`);
+
   return NextResponse.json({ ok: true });
 }
 
@@ -83,6 +89,11 @@ export async function DELETE(_request: Request, { params }: Params) {
   if (result.changes === 0) {
     return NextResponse.json({ error: '该用户不是空间成员' }, { status: 404 });
   }
+
+  const targetUser = db.prepare('SELECT username FROM users WHERE id = ?').get(targetUserId) as
+    | { username: string }
+    | undefined;
+  logOp(user.id, 'member', 'member', targetUserId, targetUser?.username ?? `用户 ${targetUserId}`, '移出空间');
 
   return NextResponse.json({ ok: true });
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/auth';
+import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { saveGuard } from '@/lib/room';
 import type { Annotation } from '@/lib/types';
@@ -140,6 +141,9 @@ export async function PUT(request: Request, { params }: Params) {
     }
     touch.run(owned.space_id);
   })();
+
+  const itemName = itemDisplayName(itemId);
+  logOp(user.id, 'update', 'item', itemId, itemName, `标注保存（${normalized.length} 条）`);
 
   const annotations = db
     .prepare(

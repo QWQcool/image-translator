@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { normalizeStyles } from '@/lib/labelplus';
+import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import type { Asset, Space, SpaceItem, SpaceVisibility } from '@/lib/types';
 
@@ -123,6 +125,7 @@ export async function PATCH(request: Request, { params }: Params) {
     description?: string;
     visibility?: string;
     lp_groups?: Array<{ id: number; name: string }>;
+    lp_styles?: Record<string, unknown>;
   };
   try {
     body = await request.json();
@@ -170,11 +173,22 @@ export async function PATCH(request: Request, { params }: Params) {
     lpGroupsJson = cleaned.length > 0 ? JSON.stringify(cleaned) : null;
   }
 
+  // 嵌字分组样式预设：与 lp_groups 同级（公共工作数据），edit 级权限即可修改
+  let lpStylesJson: string | null | undefined;
+  if (body.lp_styles !== undefined) {
+    if (typeof body.lp_styles !== 'object' || body.lp_styles === null || Array.isArray(body.lp_styles)) {
+      return NextResponse.json({ error: 'lp_styles 必须是对象' }, { status: 400 });
+    }
+    // normalizeStyles 只保留 1~9 的合法分组键并清洗字段
+    lpStylesJson = JSON.stringify(normalizeStyles(body.lp_styles));
+  }
+
   if (
     name === undefined &&
     description === undefined &&
     visibility === undefined &&
-    lpGroupsJson === undefined
+    lpGroupsJson === undefined &&
+    lpStylesJson === undefined
   ) {
     return NextResponse.json({ error: '没有需要更新的字段' }, { status: 400 });
   }
@@ -185,9 +199,20 @@ export async function PATCH(request: Request, { params }: Params) {
             description = COALESCE(?, description),
             visibility = COALESCE(?, visibility),
             lp_groups = COALESCE(?, lp_groups),
+            lp_styles = COALESCE(?, lp_styles),
             updated_at = datetime('now')
       WHERE id = ?`,
-  ).run(name ?? null, description ?? null, visibility ?? null, lpGroupsJson ?? null, id);
+  ).run(name ?? null, description ?? null, visibility ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, id);
+
+  // 日志：只记管理类改动（名称/描述/可见性），分组表与样式的编辑很频繁，不刷屏
+  const changed: string[] = [];
+  if (name !== undefined) changed.push('名称');
+  if (description !== undefined) changed.push('描述');
+  if (visibility !== undefined) changed.push('可见性');
+  if (changed.length > 0) {
+    const current = db.prepare('SELECT name FROM spaces WHERE id = ?').get(id) as { name: string };
+    logOp(user.id, 'update', 'space', id, current.name, `修改空间${changed.join('、')}`);
+  }
 
   return NextResponse.json({
     space: db.prepare('SELECT * FROM spaces WHERE id = ?').get(id) as Space,
@@ -205,7 +230,13 @@ export async function DELETE(_request: Request, { params }: Params) {
   const denied = accessError(access, 'manage');
   if (denied) return denied;
 
+  const space = db.prepare('SELECT name FROM spaces WHERE id = ?').get(id) as
+    | { name: string }
+    | undefined;
+
   db.prepare('DELETE FROM spaces WHERE id = ?').run(id);
+
+  logOp(user.id, 'space_delete', 'space', id, space?.name ?? `空间 ${id}`);
 
   // 只解绑空间与图片的关联，磁盘上的素材保留在图库中
   return NextResponse.json({ ok: true });

@@ -13,6 +13,7 @@ import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
 import AnnotationPanel from './AnnotationPanel';
 import LabelPlusPanel from './LabelPlusPanel';
 import OcrModal from './OcrModal';
+import TranslateModal from './TranslateModal';
 
 const MODES: Array<{ id: EditorMode; key: string; label: string }> = [
   { id: 'box', key: '', label: '框选' },
@@ -67,6 +68,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const [phraseMenuOpen, setPhraseMenuOpen] = useState(false);
   const phraseCursor = useRef(0);
   const [ocrOpen, setOcrOpen] = useState(false);
+  const [translateOpen, setTranslateOpen] = useState(false);
   const [neighbors, setNeighbors] = useState<{
     prevId: number | null;
     nextId: number | null;
@@ -146,12 +148,13 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     }
   });
 
-  const save = useCallback(async () => {
+  const save = useCallback(async (rows?: DraftAnnotation[]) => {
     if (!item || !canEditRef.current) return;
     setSaving(true);
     setError(null);
     try {
-      const payload = annotationsRef.current.map(({ key: _key, ...rest }) => rest);
+      const source = rows ?? annotationsRef.current;
+      const payload = source.map(({ key: _key, ...rest }) => rest);
       const res = await fetch(`/api/items/${itemId}/annotations`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -236,6 +239,21 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       }
     },
     [item?.space_id],
+  );
+
+  /** 6b AI 翻译采纳：把译文写进对应标号并立即保存（走与 Ctrl+S 相同的保存路径） */
+  const applyTranslations = useCallback(
+    (updates: Array<{ id: number; text: string }>) => {
+      if (!canEditRef.current || updates.length === 0) return;
+      const byId = new Map(updates.map((u) => [u.id, u.text]));
+      const next = annotationsRef.current.map((row) =>
+        row.id !== undefined && byId.has(row.id) ? { ...row, text: byId.get(row.id)! } : row,
+      );
+      setAnnotations(next);
+      setTranslateOpen(false);
+      void save(next);
+    },
+    [save],
   );
 
   const selectPinByOffset = useCallback(
@@ -519,9 +537,14 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
             </h2>
             <div className="flex items-center gap-2">
               {pinMode && canEdit && (
-                <button type="button" className="btn-ghost px-2 py-1 text-[11px]" onClick={() => setOcrOpen(true)}>
-                  OCR 自动标号
-                </button>
+                <>
+                  <button type="button" className="btn-ghost px-2 py-1 text-[11px]" onClick={() => setOcrOpen(true)}>
+                    OCR 自动标号
+                  </button>
+                  <button type="button" className="btn-ghost px-2 py-1 text-[11px]" onClick={() => setTranslateOpen(true)}>
+                    AI 翻译
+                  </button>
+                </>
               )}
               <span className="text-[11px] text-ink-400">
                 {canEdit ? 'Ctrl+S · ←→ 翻图 · ↑↓ 切号' : '只读模式'}
@@ -584,6 +607,13 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           itemId={itemId}
           onClose={() => setOcrOpen(false)}
           onApplied={() => void load()}
+        />
+      )}
+      {translateOpen && (
+        <TranslateModal
+          itemId={itemId}
+          onClose={() => setTranslateOpen(false)}
+          onApply={applyTranslations}
         />
       )}
     </div>

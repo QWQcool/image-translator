@@ -78,6 +78,25 @@ export function consumeRateLimit(key: string, limit: number, windowMs = WINDOW_M
   return consume(key, limit, windowMs);
 }
 
+/** 查询指定桶是否已达上限（不消耗计数），用于登录前快速拒绝 */
+export function isRateLimited(key: string, limit: number, windowMs = WINDOW_MS): boolean {
+  const row = db
+    .prepare('SELECT window_start, count FROM rate_limits WHERE bucket = ?')
+    .get(key) as { window_start: number; count: number } | undefined;
+  if (!row) return false;
+  if (Date.now() - row.window_start >= windowMs) return false;
+  return row.count >= limit;
+}
+
+/** 清零指定桶（登录成功后调用，避免误伤正常用户） */
+export function resetRateLimit(key: string): void {
+  try {
+    db.prepare('DELETE FROM rate_limits WHERE bucket = ?').run(key);
+  } catch {
+    // 清理失败不影响主流程
+  }
+}
+
 /**
  * 取出请求来源 IP。
  *

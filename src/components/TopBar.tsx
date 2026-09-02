@@ -8,6 +8,7 @@ const NAV = [
   { href: '/spaces', label: '空间' },
   { href: '/library', label: '图库' },
   { href: '/ai', label: 'AI 设置' },
+  { href: '/logs', label: '日志' },
 ];
 
 export default function TopBar({

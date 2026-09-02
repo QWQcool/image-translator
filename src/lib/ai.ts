@@ -2,7 +2,8 @@ import { db } from './db';
 
 /**
  * AI 网关配置：每个用户填自己的 OpenAI 兼容服务（DeepSeek / GPT / GLM / Qwen…）。
- * 存在 ai_configs 表里，谁配置了 token 谁能用 AI 能力；key 永不下发前端。
+ * 多 Provider 存 ai_providers 表（可配多条，OCR/翻译/去字可选用哪条）；
+ * 旧的 ai_configs 单条配置保留作兼容回退。key 永不下发前端。
  * 日志与记录（created_by 之类）仍用注册用户名，与 AI 配置无关。
  */
 export type AiConfig = {
@@ -11,6 +12,8 @@ export type AiConfig = {
   apiKey: string;
   /** 视觉对话模型（OCR 用），如 deepseek-v4-flash-vision-exp */
   ocrModel: string;
+  /** 对话模型（AI 翻译用）；留空时回退用 ocrModel */
+  chatModel: string;
   /** 图像编辑模型（AI 去字用），如 gpt-image-1；留空 = 不启用 AI 去字 */
   imageModel: string;
 };
@@ -23,19 +26,89 @@ type AiConfigRow = {
   image_model: string;
 };
 
-export function readAiConfig(userId: number): AiConfig {
+export type AiProviderRow = {
+  id: number;
+  user_id: number | null;
+  name: string;
+  base_url: string;
+  api_key: string;
+  ocr_model: string;
+  chat_model: string;
+  image_model: string;
+  is_default: number;
+};
+
+/** 列出某用户自己的全部 Provider（官方渠道 user_id IS NULL 的记录不在其中） */
+export function listProviders(userId: number): AiProviderRow[] {
+  return db
+    .prepare(
+      `SELECT id, user_id, name, base_url, api_key, ocr_model, chat_model, image_model, is_default
+         FROM ai_providers
+        WHERE user_id = ?
+        ORDER BY is_default DESC, id`,
+    )
+    .all(userId) as AiProviderRow[];
+}
+
+/** 取单条 Provider（只能取自己的） */
+export function getProvider(userId: number, providerId: number): AiProviderRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, user_id, name, base_url, api_key, ocr_model, chat_model, image_model, is_default
+         FROM ai_providers WHERE id = ? AND user_id = ?`,
+    )
+    .get(providerId, userId) as AiProviderRow | undefined;
+  return row ?? null;
+}
+
+/** 旧的单条配置（兼容回退用） */
+function readLegacyConfig(userId: number): AiConfig {
   const row = db
     .prepare(
       'SELECT user_id, base_url, api_key, ocr_model, image_model FROM ai_configs WHERE user_id = ?',
     )
     .get(userId) as AiConfigRow | undefined;
-  if (!row) return { baseUrl: '', apiKey: '', ocrModel: '', imageModel: '' };
+  if (!row) return { baseUrl: '', apiKey: '', ocrModel: '', chatModel: '', imageModel: '' };
   return {
     baseUrl: row.base_url.replace(/\/+$/, ''),
     apiKey: row.api_key,
     ocrModel: row.ocr_model,
+    chatModel: row.ocr_model,
     imageModel: row.image_model,
   };
+}
+
+function rowToConfig(row: AiProviderRow): AiConfig {
+  return {
+    baseUrl: row.base_url.replace(/\/+$/, ''),
+    apiKey: row.api_key,
+    ocrModel: row.ocr_model,
+    chatModel: row.chat_model || row.ocr_model,
+    imageModel: row.image_model,
+  };
+}
+
+/**
+ * 解析当前用户生效的 AI 配置。
+ * 优先默认 Provider（is_default=1），否则第一条；一个 Provider 都没有时回退旧 ai_configs。
+ * 可按用途指定某条 Provider（providerId 传 0/undefined = 用默认）。
+ */
+export function resolveAiConfig(userId: number, which: 'ocr' | 'chat' | 'inpaint', providerId?: number): AiConfig {
+  const rows = listProviders(userId);
+  let row: AiProviderRow | undefined;
+  if (providerId && providerId > 0) {
+    row = rows.find((r) => r.id === providerId);
+  }
+  if (!row) {
+    row = rows.find((r) => r.is_default === 1) ?? rows[0];
+  }
+  if (!row) return readLegacyConfig(userId);
+  return rowToConfig(row);
+}
+
+/** 兼容旧调用点：解析默认配置（OCR/去字路由用） */
+export function readAiConfig(userId: number): AiConfig {
+  return resolveAiConfig(userId, 'ocr');
 }
 
 export function writeAiConfig(userId: number, config: AiConfig): void {
@@ -57,9 +130,10 @@ export function maskKey(key: string): string {
   return `****${key.slice(-4)}`;
 }
 
-export function aiConfigured(config: AiConfig, which: 'ocr' | 'inpaint'): boolean {
+export function aiConfigured(config: AiConfig, which: 'ocr' | 'inpaint' | 'chat'): boolean {
   if (!config.baseUrl || !config.apiKey) return false;
   if (which === 'ocr') return Boolean(config.ocrModel);
+  if (which === 'chat') return Boolean(config.chatModel || config.ocrModel);
   return Boolean(config.imageModel);
 }
 

@@ -8,6 +8,7 @@ import Modal from '@/components/Modal';
 import { thumbUrl } from '@/lib/media';
 import type { Space, SpaceAccess, SpaceItem, SpaceVisibility } from '@/lib/types';
 import AddImagesModal from './AddImagesModal';
+import AiBatchModal from './AiBatchModal';
 import ExportMenu from './ExportMenu';
 import { ROLE_LABEL } from './MembersPanel';
 
@@ -18,6 +19,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [items, setItems] = useState<SpaceItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [renamingSpace, setRenamingSpace] = useState(false);
@@ -207,6 +209,11 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 添加图片
               </button>
             )}
+            {canEdit && items.length > 0 && (
+              <button type="button" className="btn-ghost" onClick={() => setBatchOpen(true)}>
+                AI 批量处理
+              </button>
+            )}
             <ExportMenu spaceId={spaceId} disabled={items.length === 0} />
             {canManage && (
               <button
@@ -336,6 +343,14 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           existingAssetIds={items.map((i) => i.asset_id)}
           onClose={() => setAddOpen(false)}
           onAdded={() => void load()}
+        />
+      )}
+
+      {batchOpen && canEdit && (
+        <AiBatchModal
+          items={items.map((i) => ({ id: i.id, title: i.title }))}
+          onClose={() => setBatchOpen(false)}
+          onDone={() => void load()}
         />
       )}
 

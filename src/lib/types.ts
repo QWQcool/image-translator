@@ -26,6 +26,8 @@ export type Asset = {
   source_post_id: string | null;
   /** private: 仅自己可见；shared: 所有登录用户可见（共享图库） */
   visibility: 'private' | 'shared';
+  /** 软删除时间（非空 = 在回收站里），恢复时置回 NULL */
+  deleted_at?: string | null;
   created_at: string;
   /** 联表查询时附带：素材上传者 */
   owner_username?: string;
@@ -43,6 +45,8 @@ export type Space = {
   updated_at: string;
   lp_groups?: string | null;
   lp_phrases?: string | null;
+  /** 嵌字分组样式预设（JSON：{[groupId]: LpStyle}） */
+  lp_styles?: string | null;
 };
 
 /** owner 可增删改并管理成员；editor 可增删改；viewer 只读 */
@@ -78,6 +82,8 @@ export type SpaceItem = {
   /** 联表查询时附带 */
   asset?: Asset;
   annotation_count?: number;
+  /** AI 图像解析出的内容描述（人物/场景/剧情提示），AI 翻译时作为上下文 */
+  ai_context?: string | null;
 };
 
 export type AnnotationKind = 'box' | 'pin';

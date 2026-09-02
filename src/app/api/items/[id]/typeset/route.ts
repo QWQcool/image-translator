@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { saveGuard } from '@/lib/room';
 import { readTypesetMeta, readTypesetPaint, writeTypeset, type TypesetTextLayer } from '@/lib/typeset';
@@ -90,5 +91,6 @@ export async function PUT(request: Request, { params }: Params) {
     { version: 1, width, height, textLayers, updatedAt: new Date().toISOString() },
     paint,
   );
+  logOp(user.id, 'update', 'item', itemId, itemDisplayName(itemId), '嵌字草稿保存');
   return NextResponse.json({ ok: true });
 }

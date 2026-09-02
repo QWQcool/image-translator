@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { logOp } from '@/lib/oplog';
 import { accessError, addMember, getSpaceAccess, isSpaceRole } from '@/lib/permissions';
 import type { SpaceMember } from '@/lib/types';
 
@@ -66,6 +67,11 @@ export async function POST(request: Request, { params }: Params) {
   if (!target) return NextResponse.json({ error: '用户不存在' }, { status: 404 });
 
   addMember(spaceId, userId, body.role);
+
+  const space = db.prepare('SELECT name FROM spaces WHERE id = ?').get(spaceId) as
+    | { name: string }
+    | undefined;
+  logOp(user.id, 'member', 'member', userId, target.username, `在空间「${space?.name ?? spaceId}」中设为 ${body.role}`);
 
   return NextResponse.json(
     {

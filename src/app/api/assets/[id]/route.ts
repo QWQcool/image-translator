@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
-import { deleteImageFiles } from '@/lib/storage';
+import { logOp } from '@/lib/oplog';
 import type { Asset } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -34,11 +34,13 @@ export async function PATCH(request: Request, { params }: Params) {
     .run(title, id, user.id);
   if (result.changes === 0) return NextResponse.json({ error: '图片不存在' }, { status: 404 });
 
+  logOp(user.id, 'update', 'asset', id, title, '素材改名');
   return NextResponse.json({
     asset: db.prepare('SELECT * FROM assets WHERE id = ?').get(id) as Asset,
   });
 }
 
+/** 单个删除：与批量删除一致走软删除（进回收站），磁盘文件保留 */
 export async function DELETE(_request: Request, { params }: Params) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
@@ -47,17 +49,32 @@ export async function DELETE(_request: Request, { params }: Params) {
   if (!id) return NextResponse.json({ error: '参数错误' }, { status: 400 });
 
   const asset = db
-    .prepare('SELECT id, filename, thumb_filename FROM assets WHERE id = ? AND owner_id = ?')
-    .get(id, user.id) as { id: number; filename: string; thumb_filename: string | null } | undefined;
-  if (!asset) return NextResponse.json({ error: '图片不存在' }, { status: 404 });
+    .prepare(
+      'SELECT id, owner_id, title, original_name FROM assets WHERE id = ? AND owner_id = ? AND deleted_at IS NULL',
+    )
+    .get(id, user.id) as
+    | { id: number; owner_id: number; title: string | null; original_name: string | null }
+    | undefined;
+  if (!asset) return NextResponse.json({ error: '图片不存在或已在回收站' }, { status: 404 });
 
   // 与批量删除保持一致：告知用户这次删除影响了多少处协作空间引用
   const usage = db
     .prepare('SELECT COUNT(*) AS n FROM space_items WHERE asset_id = ?')
     .get(id) as { n: number };
 
-  db.prepare('DELETE FROM assets WHERE id = ?').run(id);
-  await deleteImageFiles(asset.filename, asset.thumb_filename);
+  db.transaction(() => {
+    db.prepare('DELETE FROM space_items WHERE asset_id = ?').run(id);
+    db.prepare(`UPDATE assets SET deleted_at = datetime('now') WHERE id = ?`).run(id);
+  })();
+
+  logOp(
+    user.id,
+    'delete',
+    'asset',
+    asset.id,
+    asset.title ?? asset.original_name ?? `素材 ${asset.id}`,
+    '移入回收站',
+  );
 
   return NextResponse.json({ ok: true, detachedFromSpaces: usage.n });
 }

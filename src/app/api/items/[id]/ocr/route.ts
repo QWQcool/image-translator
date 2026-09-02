@@ -2,9 +2,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
 import { NextResponse } from 'next/server';
-import { aiConfigured, readAiConfig, toDataUrl } from '@/lib/ai';
+import { aiConfigured, resolveAiConfig, toDataUrl } from '@/lib/ai';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { IMAGE_DIRS } from '@/lib/storage';
 import { sidecarHealth, sidecarOcr, type OcrBlock } from '@/lib/sidecar';
@@ -18,16 +19,19 @@ function nearExisting(cx: number, cy: number, pins: Annotation[]): boolean {
 
 type VisionBlock = { x: number; y: number; w: number; h: number; text: string };
 
+type VisionResult = { blocks: VisionBlock[]; description: string | null };
+
 /**
- * 用 OpenAI 兼容的视觉对话模型做 OCR：
- * 图片缩到 1600px 转 base64，要求模型输出归一化坐标的 JSON 数组。
+ * 用 OpenAI 兼容的视觉对话模型做 OCR，顺带输出一段图片内容描述（6c 图像解析）：
+ * 图片缩到 1600px 转 base64，要求模型输出 {"blocks":[...],"description":"…"}。
+ * 兼容旧格式（裸数组）——只有 blocks，没有 description。
  * 视觉模型数格子不如专用 OCR 准，但零部署、跨语言，创作者用自己的 token。
  */
 async function visionOcr(
   image: Buffer,
   mime: string,
   config: { baseUrl: string; apiKey: string; ocrModel: string },
-): Promise<VisionBlock[] | null> {
+): Promise<VisionResult | null> {
   try {
     // 视觉模型对超大图不友好，统一压到长边 1600
     const resized = await sharp(image).rotate().resize({ width: 1600, height: 1600, fit: 'inside' }).png().toBuffer();
@@ -49,10 +53,11 @@ async function visionOcr(
               {
                 type: 'text',
                 text:
-                  `这是漫画/图片，尺寸 ${meta.width}x${meta.height}。找出图中所有对话气泡和独立文字块。` +
-                  '只输出 JSON 数组，不要任何其它文字：' +
-                  '[{"x":0.12,"y":0.34,"w":0.2,"h":0.08,"text":"原文"}]，' +
-                  '其中 x/y/w/h 是相对图片宽高的 0~1 归一化值（x/y 为块左上角），text 是块内原文。没有文字时输出 []。',
+                  `这是漫画/图片，尺寸 ${meta.width}x${meta.height}。找出图中所有对话气泡和独立文字块，` +
+                  '并用一句话输出图片内容描述（对话人物/场景/剧情提示，中文）。\n' +
+                  '只输出 JSON 对象，不要任何其它文字：' +
+                  '{"blocks":[{"x":0.12,"y":0.34,"w":0.2,"h":0.08,"text":"原文"}],"description":"图片内容描述"}，' +
+                  '其中 x/y/w/h 是相对图片宽高的 0~1 归一化值（x/y 为块左上角），text 是块内原文；没有文字时 blocks 输出 []。',
               },
               { type: 'image_url', image_url: { url: dataUrl } },
             ],
@@ -68,9 +73,37 @@ async function visionOcr(
       choices?: Array<{ message?: { content?: string } }>;
     };
     const content = data.choices?.[0]?.message?.content ?? '';
-    const match = content.match(/\[[\s\S]*\]/);
-    if (!match) return null;
-    const parsed = JSON.parse(match[0]) as Array<{
+    // 新格式：{"blocks":[...],"description":"…"}；兼容旧格式：裸 [...]
+    const objectMatch = content.match(/\{[\s\S]*\}/);
+    if (objectMatch) {
+      try {
+        const parsed = JSON.parse(objectMatch[0]) as {
+          blocks?: Array<{ x?: number; y?: number; w?: number; h?: number; text?: string }>;
+          description?: string;
+        };
+        if (Array.isArray(parsed.blocks)) {
+          return {
+            blocks: parsed.blocks
+              .filter((b) => Number.isFinite(b.x) && Number.isFinite(b.y) && typeof b.text === 'string')
+              .map((b) => ({
+                x: Math.min(1, Math.max(0, Number(b.x))),
+                y: Math.min(1, Math.max(0, Number(b.y))),
+                w: Math.min(1, Math.max(0.01, Number(b.w ?? 0.1))),
+                h: Math.min(1, Math.max(0.01, Number(b.h ?? 0.04))),
+                text: String(b.text ?? ''),
+              })),
+            description: typeof parsed.description === 'string' && parsed.description.trim()
+              ? parsed.description.trim().slice(0, 500)
+              : null,
+          };
+        }
+      } catch {
+        // 对象解析失败时继续尝试旧格式
+      }
+    }
+    const arrayMatch = content.match(/\[[\s\S]*\]/);
+    if (!arrayMatch) return null;
+    const parsed = JSON.parse(arrayMatch[0]) as Array<{
       x?: number;
       y?: number;
       w?: number;
@@ -78,15 +111,18 @@ async function visionOcr(
       text?: string;
     }>;
     if (!Array.isArray(parsed)) return null;
-    return parsed
-      .filter((b) => Number.isFinite(b.x) && Number.isFinite(b.y) && typeof b.text === 'string')
-      .map((b) => ({
-        x: Math.min(1, Math.max(0, Number(b.x))),
-        y: Math.min(1, Math.max(0, Number(b.y))),
-        w: Math.min(1, Math.max(0.01, Number(b.w ?? 0.1))),
-        h: Math.min(1, Math.max(0.01, Number(b.h ?? 0.04))),
-        text: String(b.text ?? ''),
-      }));
+    return {
+      blocks: parsed
+        .filter((b) => Number.isFinite(b.x) && Number.isFinite(b.y) && typeof b.text === 'string')
+        .map((b) => ({
+          x: Math.min(1, Math.max(0, Number(b.x))),
+          y: Math.min(1, Math.max(0, Number(b.y))),
+          w: Math.min(1, Math.max(0.01, Number(b.w ?? 0.1))),
+          h: Math.min(1, Math.max(0.01, Number(b.h ?? 0.04))),
+          text: String(b.text ?? ''),
+        })),
+      description: null,
+    };
   } catch {
     return null;
   }
@@ -115,18 +151,20 @@ export async function POST(request: Request, { params }: Params) {
   const image = await fs.readFile(filePath);
 
   // 优先走"我自己"配置的 AI 视觉模型；没配置或失败再退回本机 sidecar
-  const aiConfig = readAiConfig(user.id);
+  const aiConfig = resolveAiConfig(user.id, 'ocr');
   let blocks: OcrBlock[] | null = null;
   let engine: 'ai' | 'sidecar' = 'sidecar';
+  let description: string | null = null;
 
   if (aiConfigured(aiConfig, 'ocr')) {
-    const visionBlocks = await visionOcr(image, 'image/png', {
+    const vision = await visionOcr(image, 'image/png', {
       baseUrl: aiConfig.baseUrl,
       apiKey: aiConfig.apiKey,
       ocrModel: aiConfig.ocrModel,
     });
-    if (visionBlocks && visionBlocks.length > 0) {
-      blocks = visionBlocks;
+    if (vision && vision.blocks.length > 0) {
+      blocks = vision.blocks;
+      description = vision.description;
       engine = 'ai';
     }
   }
@@ -174,7 +212,17 @@ export async function POST(request: Request, { params }: Params) {
     })
     .filter((row) => !row.skipped);
 
-  return NextResponse.json({ proposals, sidecar: engine === 'sidecar', engine });
+  // AI 调用埋点：只有真正用了用户自己的视觉模型才记（sidecar 是本机确定性引擎）
+  if (engine === 'ai') {
+    logOp(user.id, 'ai_ocr', 'ai', itemId, itemDisplayName(itemId), `AI 视觉识别，识别出 ${proposals.length} 个文字块`);
+    // 6c 图像解析：把内容描述存到条目上，AI 翻译时作为上下文
+    if (description) {
+      db.prepare('UPDATE space_items SET ai_context = ? WHERE id = ?').run(description, itemId);
+    }
+  }
+
+  const aiContext = engine === 'ai' ? description : null;
+  return NextResponse.json({ proposals, sidecar: engine === 'sidecar', engine, aiContext });
 }
 
 function sidecarUrlHint(): string {

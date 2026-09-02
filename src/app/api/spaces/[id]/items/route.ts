@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import type { SpaceItem } from '@/lib/types';
 
@@ -32,12 +33,12 @@ export async function POST(request: Request, { params }: Params) {
   const denied = accessError(getSpaceAccess(spaceId, user.id), 'edit');
   if (denied) return denied;
 
-  // 可用范围＝自己的素材 ＋ 共享图库中被他人共享出来的素材
+  // 可用范围＝自己的素材 ＋ 共享图库中被他人共享出来的素材；回收站里的素材不可加入
   const placeholders = assetIds.map(() => '?').join(',');
   const assets = db
     .prepare(
       `SELECT id, title FROM assets
-        WHERE (owner_id = ? OR visibility = 'shared') AND id IN (${placeholders})`,
+        WHERE (owner_id = ? OR visibility = 'shared') AND deleted_at IS NULL AND id IN (${placeholders})`,
     )
     .all(user.id, ...assetIds) as { id: number; title: string | null }[];
 
@@ -58,6 +59,18 @@ export async function POST(request: Request, { params }: Params) {
     }
     touchSpace.run(spaceId);
   })();
+
+  const space = db.prepare('SELECT name FROM spaces WHERE id = ?').get(spaceId) as
+    | { name: string }
+    | undefined;
+  logOp(
+    user.id,
+    'create',
+    'item',
+    null,
+    assets[0]?.title ?? null,
+    `向空间「${space?.name ?? spaceId}」添加 ${assets.length} 个条目`,
+  );
 
   const items = db
     .prepare('SELECT * FROM space_items WHERE space_id = ? ORDER BY sort_order, id')

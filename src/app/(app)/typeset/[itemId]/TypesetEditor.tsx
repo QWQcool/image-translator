@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import { isPin } from '@/lib/annotation';
+import type { LpStyle } from '@/lib/labelplus';
+import { DEFAULT_LP_STYLES, normalizeStyles, parseGroups, parseStyles } from '@/lib/labelplus';
 import { originalUrl } from '@/lib/media';
 import { useCollabRoom, type CollabOp } from '@/lib/use-collab-room';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
@@ -102,6 +104,19 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const [dirty, setDirty] = useState(false);
   const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [hasPaint, setHasPaint] = useState(false);
+  /** 分组样式预设：按 pin.group_id 套用；空表时落回硬编码默认值 */
+  const [styles, setStyles] = useState<Record<string, LpStyle>>({});
+  /** LabelPlus 分组表（样式面板按此展示） */
+  const [lpGroups, setLpGroups] = useState(parseGroups(null));
+  /** 分组样式编辑弹层：开合 + 草稿 */
+  const [styleOpen, setStyleOpen] = useState(false);
+  const [styleDraft, setStyleDraft] = useState<Record<string, LpStyle>>({});
+  const [styleSaving, setStyleSaving] = useState(false);
+  /** 前后对比模式：分隔线左侧显示原图，右侧显示当前合成 */
+  const [compareMode, setCompareMode] = useState(false);
+  /** 分隔线位置（占 wrapper 宽度的百分比 0~100） */
+  const [comparePos, setComparePos] = useState(50);
+  const compareDragging = useRef(false);
 
   const imageWidth = asset?.width ?? 1200;
   const imageHeight = asset?.height ?? 800;
@@ -154,6 +169,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       setAccess(detail.access ?? null);
       setTextLayers(draft.meta?.textLayers ?? []);
       setHasPaint(Boolean(draft.hasPaint));
+      // 分组表与分组样式：样式缺省时空表，生成时落回硬编码默认值
+      setLpGroups(parseGroups(detail.labelplus?.groups));
+      setStyles(parseStyles(detail.labelplus?.styles));
     } catch {
       setError('加载失败');
     } finally {
@@ -699,24 +717,105 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     const pins = (data.annotations ?? []).filter(isPin);
     const generated: TypesetTextLayer[] = pins
       .filter((p: { text: string }) => p.text.trim())
-      .map((p: { x: number; y: number; text: string; group_id: number }) => ({
-        id: newLayerId(),
-        x: p.x,
-        y: p.y,
-        text: p.text,
-        fontSize: Math.max(18, imageHeight * 0.032),
-        fontWeight: 700,
-        color: p.group_id === 2 ? '#1F64B8' : '#243044',
-        stroke: '#FFFFFF',
-        strokeWidth: 4,
-        align: 'center' as const,
-        lineHeight: 1.25,
-      }));
+      .map((p: { x: number; y: number; text: string; group_id: number }) => {
+        // 按分组套用样式预设；未配置时落回默认预置（与样式面板的合并逻辑一致）
+        const style = styles[String(p.group_id)] ?? DEFAULT_LP_STYLES[String(p.group_id)];
+        return {
+          id: newLayerId(),
+          x: p.x,
+          y: p.y,
+          text: p.text,
+          fontSize: Math.max(18, imageHeight * (style?.fontSizeRatio ?? 0.032)),
+          fontWeight: style?.fontWeight ?? 700,
+          color: style?.color ?? (p.group_id === 2 ? '#1F64B8' : '#243044'),
+          stroke: style?.stroke ?? '#FFFFFF',
+          strokeWidth: style?.strokeWidth ?? 4,
+          align: (style?.align ?? 'center') as 'left' | 'center' | 'right',
+          lineHeight: style?.lineHeight ?? 1.25,
+          vertical: style?.vertical ?? false,
+        };
+      });
     const next = [...textLayersRef.current, ...generated];
     setTextLayers(next);
     setDirty(true);
     void pushHistory(next, generated[0]?.id ?? selectedTextRef.current);
     broadcastText(next);
+  }
+
+  /** 打开分组样式编辑弹层：草稿从当前已保存样式出发，未配置的分组用默认预置兜底 */
+  function openStylePanel() {
+    const merged: Record<string, LpStyle> = {};
+    for (const group of lpGroups) {
+      const key = String(group.id);
+      merged[key] = styles[key] ?? DEFAULT_LP_STYLES[key] ?? {
+        vertical: false,
+        color: '#243044',
+        stroke: '#FFFFFF',
+        strokeWidth: 4,
+        fontSizeRatio: 0.032,
+        align: 'center',
+        fontWeight: 700,
+        lineHeight: 1.25,
+      };
+    }
+    setStyleDraft(merged);
+    setStyleOpen(true);
+  }
+
+  /** 保存分组样式到空间（edit 级权限，与 lp_groups 同级） */
+  async function saveStyles() {
+    if (!item) return;
+    setStyleSaving(true);
+    try {
+      const cleaned = normalizeStyles(styleDraft);
+      const res = await fetch(`/api/spaces/${item.space_id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lp_styles: cleaned }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: '保存失败' }));
+        setError(data.error ?? '保存样式失败');
+        return;
+      }
+      setStyles(cleaned);
+      setStyleOpen(false);
+    } finally {
+      setStyleSaving(false);
+    }
+  }
+
+  /** 更新弹层里某个分组的某一项样式 */
+  function patchDraft(groupId: number, patch: Partial<LpStyle>) {
+    setStyleDraft((prev) => ({
+      ...prev,
+      [String(groupId)]: { ...prev[String(groupId)], ...patch },
+    }));
+  }
+
+  /** 对比分隔线拖拽：pointer 事件，stopPropagation 避免触发画笔工具 */
+  function onCompareHandleDown(event: React.PointerEvent) {
+    event.stopPropagation();
+    compareDragging.current = true;
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // 不支持捕获时仍可在分隔线上滑动
+    }
+  }
+
+  function onCompareHandleMove(event: React.PointerEvent) {
+    if (!compareDragging.current) return;
+    event.stopPropagation();
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+    const box = wrapper.getBoundingClientRect();
+    const pct = ((event.clientX - box.left) / box.width) * 100;
+    setComparePos(Math.min(100, Math.max(0, pct)));
+  }
+
+  function onCompareHandleUp() {
+    compareDragging.current = false;
   }
 
   async function exportPng(writeBack: boolean) {
@@ -854,6 +953,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           <button type="button" className="btn-ghost text-xs" onClick={() => void fromPins()}>
             从标号生成文字层
           </button>
+          <button type="button" className="btn-ghost text-xs" onClick={openStylePanel}>
+            分组样式
+          </button>
           <button type="button" className="btn-ghost text-xs" onClick={() => void autoInpaint()}>
             自动去字
           </button>
@@ -875,6 +977,97 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         </span>
       </div>
       {error && <p className="notice-error">{error}</p>}
+
+      {styleOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/60 p-4" onClick={() => setStyleOpen(false)}>
+          <div
+            className="max-h-[80vh] w-full max-w-xl overflow-y-auto rounded-xl border border-ink-700 bg-cloud p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-medium text-ink-100">分组样式预设</h2>
+              <button type="button" className="text-xs text-ink-400 hover:text-ink-100" onClick={() => setStyleOpen(false)}>
+                ✕
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] text-ink-500">「从标号生成文字层」时按分组套用这里的样式。</p>
+            <div className="mt-3 space-y-3">
+              {lpGroups.map((group) => {
+                const draft = styleDraft[String(group.id)];
+                if (!draft) return null;
+                return (
+                  <div key={group.id} className="rounded-lg border border-ink-700 bg-paper p-2">
+                    <div className="flex items-center gap-2 text-xs text-ink-200">
+                      <span className="rounded bg-sky/15 px-2 py-0.5 font-medium text-sky-deep">组 {group.id}</span>
+                      <span className="truncate">{group.name}</span>
+                      <label className="ml-auto flex items-center gap-1 text-[11px] text-ink-500">
+                        <input
+                          type="checkbox"
+                          checked={draft.vertical}
+                          onChange={(e) => patchDraft(group.id, { vertical: e.target.checked })}
+                        />
+                        竖排
+                      </label>
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-ink-500 sm:grid-cols-4">
+                      <label>
+                        文字颜色
+                        <input
+                          type="color"
+                          value={draft.color}
+                          onChange={(e) => patchDraft(group.id, { color: e.target.value })}
+                          className="mt-1 h-7 w-full"
+                        />
+                      </label>
+                      <label>
+                        描边色
+                        <input
+                          type="color"
+                          value={draft.stroke}
+                          onChange={(e) => patchDraft(group.id, { stroke: e.target.value })}
+                          className="mt-1 h-7 w-full"
+                        />
+                      </label>
+                      <label>
+                        描边宽 {draft.strokeWidth}px
+                        <input
+                          type="number"
+                          min={0}
+                          max={40}
+                          step={1}
+                          value={draft.strokeWidth}
+                          onChange={(e) => patchDraft(group.id, { strokeWidth: Number(e.target.value) || 0 })}
+                          className="input mt-1 h-7 text-xs"
+                        />
+                      </label>
+                      <label>
+                        字号比例
+                        <input
+                          type="number"
+                          min={0.005}
+                          max={0.2}
+                          step={0.002}
+                          value={draft.fontSizeRatio}
+                          onChange={(e) => patchDraft(group.id, { fontSizeRatio: Number(e.target.value) || 0.032 })}
+                          className="input mt-1 h-7 text-xs"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" className="btn-ghost text-xs" onClick={() => setStyleOpen(false)}>
+                取消
+              </button>
+              <button type="button" className="btn-primary text-xs" disabled={styleSaving} onClick={() => void saveStyles()}>
+                {styleSaving ? '保存中…' : '保存样式'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1 gap-4">
         <div className="flex w-40 shrink-0 flex-col gap-2 rounded-xl border border-ink-700 bg-cloud/80 p-2">
@@ -927,6 +1120,16 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
             </button>
             <button type="button" className="btn-ghost px-2 py-1" onClick={() => setZoom((z) => Math.max(0.15, z / 1.25))}>
               缩小
+            </button>
+            <button
+              type="button"
+              className={`btn-ghost px-2 py-1 ${compareMode ? 'btn-primary' : ''}`}
+              onClick={() => {
+                setCompareMode((v) => !v);
+                setComparePos(50);
+              }}
+            >
+              对比
             </button>
             <span className="text-ink-500">{Math.round(zoom * 100)}% · {imageWidth}×{imageHeight}</span>
           </div>
@@ -1007,6 +1210,31 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   className="pointer-events-none absolute border border-halo bg-halo/20"
                   style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
                 />
+              )}
+              {compareMode && (
+                <>
+                  {/* 对比覆盖层：分隔线左侧盖一层原图，右侧露出下面的当前合成（涂改+文字层） */}
+                  <img
+                    src={originalUrl(asset.filename)}
+                    alt=""
+                    draggable={false}
+                    className="pointer-events-none absolute inset-0 h-full w-full select-none"
+                    style={{ clipPath: `inset(0 ${100 - comparePos}% 0 0)` }}
+                  />
+                  <div
+                    className="absolute inset-y-0 z-10 flex w-4 -translate-x-1/2 cursor-col-resize items-center justify-center"
+                    style={{ left: `${comparePos}%`, touchAction: 'none' }}
+                    onPointerDown={onCompareHandleDown}
+                    onPointerMove={onCompareHandleMove}
+                    onPointerUp={onCompareHandleUp}
+                    onPointerCancel={onCompareHandleUp}
+                  >
+                    <div className="h-full w-0.5 bg-halo" />
+                    <div className="absolute flex h-7 w-7 items-center justify-center rounded-full bg-cloud/90 text-[10px] text-ink-300 shadow">
+                      ⇔
+                    </div>
+                  </div>
+                </>
               )}
             </div>
           </div>

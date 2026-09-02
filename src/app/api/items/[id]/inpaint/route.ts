@@ -4,9 +4,10 @@ import sharp from 'sharp';
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { IMAGE_DIRS } from '@/lib/storage';
-import { aiConfigured, imageEditWithMask, readAiConfig } from '@/lib/ai';
+import { aiConfigured, imageEditWithMask, resolveAiConfig } from '@/lib/ai';
 import { maskPng, teleaFallback, type NormBox } from '@/lib/inpaint';
 import { sidecarHealth, sidecarInpaint } from '@/lib/sidecar';
 
@@ -106,7 +107,7 @@ export async function POST(request: Request, { params }: Params) {
   // 引擎优先级：sidecar LaMa（本地、确定性最好）> AI 生成式（当前用户自己的 token）> telea（零依赖兜底）
   let aiPaint: Buffer | null = null;
   if (!(await sidecarHealth())) {
-    const aiConfig = readAiConfig(user.id);
+    const aiConfig = resolveAiConfig(user.id, 'inpaint');
     if (aiConfigured(aiConfig, 'inpaint')) {
       const size = width >= height ? '1536x1024' : '1024x1536';
       const padded = await sharp(original).rotate().png().toBuffer();
@@ -144,6 +145,11 @@ export async function POST(request: Request, { params }: Params) {
     }
   } else {
     paint = await teleaFallback(original, boxes);
+  }
+
+  // AI 调用埋点：只有 AI 生成式引擎真正生效才记（漂移拒收/本地引擎不刷日志）
+  if (engine === 'ai') {
+    logOp(user.id, 'ai_inpaint', 'ai', itemId, itemDisplayName(itemId), `AI 去字（${boxes.length} 个区域）`);
   }
 
   return new NextResponse(new Uint8Array(paint), {

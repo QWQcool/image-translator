@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { DEFAULT_LP_STYLES } from '@/lib/labelplus';
+import { logOp } from '@/lib/oplog';
 import { addMember } from '@/lib/permissions';
 import type { Space, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
 
@@ -74,11 +76,14 @@ export async function POST(request: Request) {
   if (!name) return NextResponse.json({ error: '空间名称不能为空' }, { status: 400 });
   if (name.length > 100) return NextResponse.json({ error: '空间名称过长' }, { status: 400 });
 
-  // 建空间与写入 owner 成员必须在同一事务，否则中途失败会留下无主空间
+  // 建空间与写入 owner 成员必须在同一事务，否则中途失败会留下无主空间。
+  // 新空间同时预置默认分组样式（与迁移回填对齐：组1 竖排深蓝，组2 横排蓝）。
   const createSpace = db.transaction(() => {
     const result = db
-      .prepare('INSERT INTO spaces (owner_id, name, description, visibility) VALUES (?, ?, ?, ?)')
-      .run(user.id, name, description, visibility);
+      .prepare(
+        'INSERT INTO spaces (owner_id, name, description, visibility, lp_styles) VALUES (?, ?, ?, ?, ?)',
+      )
+      .run(user.id, name, description, visibility, JSON.stringify(DEFAULT_LP_STYLES));
     const spaceId = Number(result.lastInsertRowid);
     addMember(spaceId, user.id, 'owner');
     return spaceId;
@@ -87,5 +92,6 @@ export async function POST(request: Request) {
   const spaceId = createSpace();
   const space = db.prepare('SELECT * FROM spaces WHERE id = ?').get(spaceId) as Space;
 
+  logOp(user.id, 'space_create', 'space', spaceId, space.name);
   return NextResponse.json({ space }, { status: 201 });
 }

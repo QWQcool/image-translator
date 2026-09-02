@@ -11,7 +11,7 @@ export default function LibraryClient() {
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState('');
   const [debounced, setDebounced] = useState('');
-  const [scope, setScope] = useState<'all' | 'my'>('all');
+  const [scope, setScope] = useState<'all' | 'my' | 'trash'>('all');
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -19,12 +19,14 @@ export default function LibraryClient() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [pendingDelete, setPendingDelete] = useState<number[] | null>(null);
+  /** 回收站里等待彻底删除的素材（二次确认） */
+  const [pendingPurge, setPendingPurge] = useState<number[] | null>(null);
   const [urlModalOpen, setUrlModalOpen] = useState(false);
   const [urlText, setUrlText] = useState('');
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async (query: string, target: 'all' | 'my') => {
+  const load = useCallback(async (query: string, target: 'all' | 'my' | 'trash') => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ scope: target });
@@ -166,6 +168,33 @@ export default function LibraryClient() {
     }
   }
 
+  /** 回收站操作：恢复 / 彻底删除 */
+  async function trashAction(ids: number[], action: 'restore' | 'purge') {
+    try {
+      const res = await fetch('/api/assets/trash', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, action }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setNotice({ type: 'error', text: data.error ?? '操作失败' });
+        return;
+      }
+      setNotice({
+        type: 'ok',
+        text:
+          action === 'restore'
+            ? `已恢复 ${data.affected} 张图片（空间引用需重新添加）`
+            : `已彻底删除 ${data.affected} 张图片，磁盘文件已清理`,
+      });
+      setSelected(new Set());
+      await load(debounced, scope);
+    } catch {
+      setNotice({ type: 'error', text: '操作过程中发生网络错误' });
+    }
+  }
+
   async function saveTitle(id: number) {
     const title = editingTitle.trim();
     setEditingId(null);
@@ -194,6 +223,7 @@ export default function LibraryClient() {
   }
 
   const isMine = scope === 'my';
+  const inTrash = scope === 'trash';
   const allSelected = assets.length > 0 && assets.every((a) => selected.has(a.id));
 
   return (
@@ -204,6 +234,7 @@ export default function LibraryClient() {
             [
               ['all', '公共图库'],
               ['my', '我上传的'],
+              ['trash', '回收站'],
             ] as const
           ).map(([value, label]) => (
             <button
@@ -226,33 +257,37 @@ export default function LibraryClient() {
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={uploading}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          {uploading ? '上传中…' : '上传图片'}
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            void upload(Array.from(e.target.files ?? []));
-            e.target.value = '';
-          }}
-        />
-        <button type="button" className="btn-ghost" onClick={() => setUrlModalOpen(true)}>
-          链接导入
-        </button>
+        {!inTrash && (
+          <>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={uploading}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {uploading ? '上传中…' : '上传图片'}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                void upload(Array.from(e.target.files ?? []));
+                e.target.value = '';
+              }}
+            />
+            <button type="button" className="btn-ghost" onClick={() => setUrlModalOpen(true)}>
+              链接导入
+            </button>
 
-        <label className="flex items-center gap-1.5 text-sm text-ink-400" title="开放图库：上传即进入公共池，所有人可见可用">
-          <input type="checkbox" checked disabled className="h-4 w-4 rounded border-ink-700 bg-white accent-sky" />
-          上传即共享
-        </label>
+            <label className="flex items-center gap-1.5 text-sm text-ink-400" title="开放图库：上传即进入公共池，所有人可见可用">
+              <input type="checkbox" checked disabled className="h-4 w-4 rounded border-ink-700 bg-white accent-sky" />
+              上传即共享
+            </label>
+          </>
+        )}
 
         {selected.size > 0 && (
           <>
@@ -265,6 +300,24 @@ export default function LibraryClient() {
               >
                 删除所选
               </button>
+            )}
+            {inTrash && (
+              <>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => void trashAction([...selected], 'restore')}
+                >
+                  恢复所选
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={() => setPendingPurge([...selected])}
+                >
+                  彻底删除所选
+                </button>
+              </>
             )}
             <button type="button" className="btn-ghost" onClick={() => setSelected(new Set())}>
               取消选择
@@ -302,6 +355,7 @@ export default function LibraryClient() {
         onDrop={(e) => {
           e.preventDefault();
           setDragging(false);
+          if (inTrash) return;
           void upload(Array.from(e.dataTransfer.files));
         }}
         className={`rounded-xl border-2 border-dashed transition-colors ${
@@ -316,7 +370,13 @@ export default function LibraryClient() {
             showMascot={!debounced}
             kaomoji={debounced ? '(・・?)' : '(´∀｀)♡'}
             title={
-              debounced ? '没有匹配的图片' : isMine ? '你还没有上传过图片' : '公共图库还是空的'
+              debounced
+                ? '没有匹配的图片'
+                : inTrash
+                  ? '回收站是空的'
+                  : isMine
+                    ? '你还没有上传过图片'
+                    : '公共图库还是空的'
             }
             hint={
               <>
@@ -371,6 +431,27 @@ export default function LibraryClient() {
                     >
                       删除
                     </button>
+                  )}
+
+                  {inTrash && (
+                    <div className="absolute right-2 top-2 flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void trashAction([asset.id], 'restore')}
+                        className="rounded-md bg-cloud/90 px-1.5 py-0.5 text-xs text-emerald-700 hover:bg-emerald-500/15"
+                        title="恢复到图库"
+                      >
+                        恢复
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPendingPurge([asset.id])}
+                        className="rounded-md bg-cloud/90 px-1.5 py-0.5 text-xs text-blush hover:bg-blush/15"
+                        title="彻底删除（不可恢复）"
+                      >
+                        彻底删除
+                      </button>
+                    </div>
                   )}
 
                   <div className="p-2">
@@ -433,8 +514,36 @@ export default function LibraryClient() {
         }
       >
         <p className="text-sm text-ink-200">
-          将删除 {pendingDelete?.length ?? 0} 张图片。若这些图片已加入空间，会连同其标注一起移除；
-          此操作不可撤销。
+          将把 {pendingDelete?.length ?? 0} 张图片移入回收站。若这些图片已加入空间，会从空间中移除
+          （标注一并删除）；图片本身可在回收站恢复，此操作可撤销。
+        </p>
+      </Modal>
+
+      <Modal
+        open={pendingPurge !== null}
+        title="彻底删除"
+        onClose={() => setPendingPurge(null)}
+        footer={
+          <>
+            <button type="button" className="btn-ghost" onClick={() => setPendingPurge(null)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={() => {
+                const ids = pendingPurge;
+                setPendingPurge(null);
+                if (ids) void trashAction(ids, 'purge');
+              }}
+            >
+              彻底删除
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-ink-200">
+          将彻底删除 {pendingPurge?.length ?? 0} 张图片，磁盘文件一并清理，此操作不可恢复。
         </p>
       </Modal>
 
