@@ -7,7 +7,7 @@ import { useRef, useState } from 'react';
 
 gsap.registerPlugin(useGSAP);
 
-export default function AuthForm() {
+export default function AuthForm({ nextPath }: { nextPath: string }) {
   const router = useRouter();
   const rootRef = useRef<HTMLElement>(null);
   const [mode, setMode] = useState<'login' | 'register'>('login');
@@ -50,14 +50,16 @@ export default function AuthForm() {
       const res = await fetch(`/api/auth/${mode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify(
+          mode === 'register' ? { username, password, inviteCode } : { username, password },
+        ),
       });
       const data = await res.json();
       if (!res.ok) {
         setError(data.error ?? '操作失败');
         return;
       }
-      router.replace('/spaces');
+      router.replace(nextPath);
       router.refresh();
     } catch {
       setError('网络错误，请重试');
@@ -146,10 +148,11 @@ export default function AuthForm() {
                   className="input"
                   value={inviteCode}
                   onChange={(e) => setInviteCode(e.target.value)}
-                  placeholder="选填，暂未启用"
+                  placeholder="向管理员索取"
                   autoComplete="off"
+                  required
                 />
-                <p className="mt-1.5 text-xs text-ink-500">邀请码稍后生效，现在可不填。</p>
+                <p className="mt-1.5 text-xs text-ink-500">没有有效邀请码无法注册。</p>
               </div>
             )}
 

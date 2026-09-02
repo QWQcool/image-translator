@@ -6,9 +6,18 @@ import {
   validatePassword,
   validateUsername,
 } from '@/lib/auth';
+import { clientIp, consumeRegisterAttempt, verifyInviteCode } from '@/lib/register-guard';
 
 export async function POST(request: Request) {
-  let body: { username?: string; password?: string };
+  const ip = clientIp(request);
+  if (!consumeRegisterAttempt(ip)) {
+    return NextResponse.json(
+      { error: '注册尝试过于频繁，请一小时后再试' },
+      { status: 429, headers: { 'Retry-After': '3600' } },
+    );
+  }
+
+  let body: { username?: string; password?: string; inviteCode?: string };
   try {
     body = await request.json();
   } catch {
@@ -22,6 +31,9 @@ export async function POST(request: Request) {
   if (usernameError) return NextResponse.json({ error: usernameError }, { status: 400 });
   const passwordError = validatePassword(password);
   if (passwordError) return NextResponse.json({ error: passwordError }, { status: 400 });
+
+  const invite = verifyInviteCode(body.inviteCode);
+  if (!invite.ok) return NextResponse.json({ error: invite.error }, { status: 400 });
 
   const exists = db.prepare('SELECT 1 FROM users WHERE username = ?').get(username);
   if (exists) return NextResponse.json({ error: '该用户名已被注册' }, { status: 409 });

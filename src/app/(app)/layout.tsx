@@ -1,10 +1,16 @@
+import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { getCurrentUser } from '@/lib/auth';
+import { safeNextPath } from '@/lib/safe-next';
 import TopBar from '@/components/TopBar';
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await getCurrentUser();
-  if (!user) redirect('/login');
+  if (!user) {
+    const incoming = (await headers()).get('x-url-path');
+    const next = safeNextPath(incoming);
+    redirect(next ? `/login?next=${encodeURIComponent(next)}` : '/login');
+  }
 
   return (
     <div className="app-shell min-h-screen">
