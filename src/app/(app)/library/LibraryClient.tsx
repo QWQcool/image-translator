@@ -11,8 +11,7 @@ export default function LibraryClient() {
   const [loading, setLoading] = useState(true);
   const [keyword, setKeyword] = useState('');
   const [debounced, setDebounced] = useState('');
-  const [scope, setScope] = useState<'my' | 'shared'>('my');
-  const [shareOnUpload, setShareOnUpload] = useState(false);
+  const [scope, setScope] = useState<'all' | 'my'>('all');
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -25,7 +24,7 @@ export default function LibraryClient() {
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async (query: string, target: 'my' | 'shared') => {
+  const load = useCallback(async (query: string, target: 'all' | 'my') => {
     setLoading(true);
     try {
       const params = new URLSearchParams({ scope: target });
@@ -55,7 +54,6 @@ export default function LibraryClient() {
       try {
         const form = new FormData();
         for (const file of files) form.append('files', file);
-        form.append('shared', String(shareOnUpload));
         const res = await fetch('/api/assets', { method: 'POST', body: form });
         const data = await res.json();
         if (!res.ok) {
@@ -77,7 +75,7 @@ export default function LibraryClient() {
         setUploading(false);
       }
     },
-    [debounced, scope, load, shareOnUpload],
+    [debounced, scope, load],
   );
 
   // Ctrl+V 直接粘贴剪贴板里的图片，省掉「先保存文件再选文件」这一步
@@ -110,7 +108,7 @@ export default function LibraryClient() {
       const res = await fetch('/api/assets/from-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls, shared: shareOnUpload }),
+        body: JSON.stringify({ urls, shared: true }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -204,8 +202,8 @@ export default function LibraryClient() {
         <div className="seg">
           {(
             [
-              ['my', '我的图库'],
-              ['shared', '共享图库'],
+              ['all', '公共图库'],
+              ['my', '我上传的'],
             ] as const
           ).map(([value, label]) => (
             <button
@@ -251,14 +249,9 @@ export default function LibraryClient() {
           链接导入
         </button>
 
-        <label className="flex items-center gap-1.5 text-sm text-ink-400" title="勾选后其他人也能在共享图库看到并取用">
-          <input
-            type="checkbox"
-            checked={shareOnUpload}
-            onChange={(e) => setShareOnUpload(e.target.checked)}
-            className="h-4 w-4 rounded border-ink-700 bg-white accent-sky"
-          />
-          共享到公共图库
+        <label className="flex items-center gap-1.5 text-sm text-ink-400" title="开放图库：上传即进入公共池，所有人可见可用">
+          <input type="checkbox" checked disabled className="h-4 w-4 rounded border-ink-700 bg-white accent-sky" />
+          上传即共享
         </label>
 
         {selected.size > 0 && (
@@ -323,7 +316,7 @@ export default function LibraryClient() {
             showMascot={!debounced}
             kaomoji={debounced ? '(・・?)' : '(´∀｀)♡'}
             title={
-              debounced ? '没有匹配的图片' : isMine ? '图库还是空的' : '共享图库还是空的'
+              debounced ? '没有匹配的图片' : isMine ? '你还没有上传过图片' : '公共图库还是空的'
             }
             hint={
               <>

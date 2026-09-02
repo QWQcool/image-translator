@@ -10,6 +10,7 @@ import type { Space, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
  */
 const LIST_SQL = `
   SELECT s.*,
+         (SELECT u.username FROM users u WHERE u.id = s.owner_id) AS owner_name,
          (SELECT COUNT(*) FROM space_items si WHERE si.space_id = s.id) AS item_count,
          (SELECT COUNT(*) FROM annotations an
             JOIN space_items si ON an.item_id = si.id
@@ -67,7 +68,8 @@ export async function POST(request: Request) {
 
   const name = (body.name ?? '').trim();
   const description = (body.description ?? '').trim() || null;
-  const visibility: SpaceVisibility = body.visibility === 'public' ? 'public' : 'private';
+  // 开放空间：没有私人文件夹，请求里的 visibility 一律忽略
+  const visibility: SpaceVisibility = 'public';
 
   if (!name) return NextResponse.json({ error: '空间名称不能为空' }, { status: 400 });
   if (name.length > 100) return NextResponse.json({ error: '空间名称过长' }, { status: 400 });

@@ -14,6 +14,10 @@ export type TypesetTextLayer = {
   strokeWidth: number;
   align: 'left' | 'center' | 'right';
   lineHeight: number;
+  /** 隐藏后不参与画布渲染与导出（图层面板的眼睛开关） */
+  visible?: boolean;
+  /** 竖排文字：从上到下逐字排列（日漫对白刚需） */
+  vertical?: boolean;
 };
 
 export type TypesetMeta = {

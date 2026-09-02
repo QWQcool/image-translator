@@ -9,7 +9,7 @@ import { thumbUrl } from '@/lib/media';
 import type { Space, SpaceAccess, SpaceItem, SpaceVisibility } from '@/lib/types';
 import AddImagesModal from './AddImagesModal';
 import ExportMenu from './ExportMenu';
-import MembersPanel, { ROLE_LABEL } from './MembersPanel';
+import { ROLE_LABEL } from './MembersPanel';
 
 export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const router = useRouter();
@@ -157,33 +157,9 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 onChange={(e) => setSpaceDraft((d) => ({ ...d, description: e.target.value }))}
               />
             </div>
-            <div>
-              <span className="label">可见性</span>
-              <div className="grid grid-cols-2 gap-2">
-                {(
-                  [
-                    { value: 'private', title: '仅成员可见', hint: '只有通过邀请加入的人能访问' },
-                    { value: 'public', title: '公开', hint: '所有登录用户可见，非成员只能查看' },
-                  ] as const
-                ).map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    onClick={() => setSpaceDraft((d) => ({ ...d, visibility: option.value }))}
-                    className={`rounded-lg border p-2.5 text-left transition-colors ${
-                      spaceDraft.visibility === option.value
-                      ? 'border-sky bg-sky/10'
-                      : 'border-ink-700 hover:border-sky/30'
-                    }`}
-                  >
-                    <div className="text-sm font-medium text-ink-100">{option.title}</div>
-                    <div className="mt-0.5 text-[11px] leading-relaxed text-ink-500">
-                      {option.hint}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
+            <p className="rounded-lg bg-sky/10 px-3 py-2 text-[11px] leading-relaxed text-ink-500">
+              🌐 公共文件夹对所有登录用户开放，人人可编辑；只有创建者能改名或删除。
+            </p>
             <div className="flex gap-2">
               <button type="button" className="btn-primary" onClick={() => void saveSpace()}>
                 保存
@@ -219,8 +195,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
             </div>
             <p className="mt-1 text-sm text-ink-400">{space.description || '还没写简介'}</p>
             <p className="mt-1.5 text-xs text-ink-400">
-              {items.length} 张图片 · {totalAnnotations} 条标注 ·{' '}
-              {space.visibility === 'public' ? '🌐 公开（非成员只读）' : '🔒 仅成员可见'}
+              {items.length} 张图片 · {totalAnnotations} 条标注 · 🌐 公共文件夹（人人可编辑）
             </p>
           </div>
         )}
@@ -232,7 +207,6 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 添加图片
               </button>
             )}
-            <MembersPanel spaceId={spaceId} canManage={canManage} onChanged={() => void load()} />
             <ExportMenu spaceId={spaceId} disabled={items.length === 0} />
             {canManage && (
               <button

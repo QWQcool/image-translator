@@ -7,6 +7,7 @@ import HaloMark from './HaloMark';
 const NAV = [
   { href: '/spaces', label: '空间' },
   { href: '/library', label: '图库' },
+  { href: '/ai', label: 'AI 设置' },
 ];
 
 export default function TopBar({ username }: { username: string }) {

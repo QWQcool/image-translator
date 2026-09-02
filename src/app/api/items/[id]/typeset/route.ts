@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
+import { saveGuard } from '@/lib/room';
 import { readTypesetMeta, readTypesetPaint, writeTypeset, type TypesetTextLayer } from '@/lib/typeset';
 
 type Params = { params: Promise<{ id: string }> };
@@ -48,6 +49,12 @@ export async function PUT(request: Request, { params }: Params) {
   const { item, access } = loadItem(itemId, user.id);
   const denied = accessError(access, 'edit');
   if (denied || !item) return denied ?? NextResponse.json({ error: '条目不存在' }, { status: 404 });
+
+  // 协作锁：别人持锁且未共享时不允许覆盖嵌字草稿
+  const guard = saveGuard(itemId, user.id);
+  if (!guard.ok) {
+    return NextResponse.json({ error: guard.error }, { status: 423 });
+  }
 
   let form: FormData;
   try {

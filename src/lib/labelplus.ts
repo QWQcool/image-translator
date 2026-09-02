@@ -124,7 +124,10 @@ export function serializeLabelPlus(doc: {
     .sort((a, b) => a.id - b.id)
     .map((g) => g.name || `分组${g.id}`);
   const groupLines = names.length > 0 ? names : ['框内', '框外'];
-  const chunks = ['1,0', '-', ...groupLines, '-', 'Default Comment'];
+  // 头部的「Default Comment」是标题，下一行才是正文，后面还要留两个空行。
+  // 少了这两行，LabelPlus / PS 脚本等严格解析器会把第一个 >>>>>>>> 文件标记
+  // 当成注释正文吃掉，导致首个文件的标号全部丢失。
+  const chunks = ['1,0', '-', ...groupLines, '-', 'Default Comment', 'You can edit me', '', ''];
 
   for (const file of doc.files) {
     chunks.push(`>>>>>>>>[${file.filename}]<<<<<<<<`);

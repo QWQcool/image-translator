@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/auth';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
+import { saveGuard } from '@/lib/room';
 import type { Annotation } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -67,6 +68,12 @@ export async function PUT(request: Request, { params }: Params) {
   const itemId = Number((await params).id);
   if (!Number.isInteger(itemId) || itemId <= 0) {
     return NextResponse.json({ error: '参数错误' }, { status: 400 });
+  }
+
+  // 协作锁：别人持锁且未共享时不允许覆盖
+  const guard = saveGuard(itemId, user.id);
+  if (!guard.ok) {
+    return NextResponse.json({ error: guard.error }, { status: 423 });
   }
 
   const item = db.prepare('SELECT space_id FROM space_items WHERE id = ?').get(itemId) as

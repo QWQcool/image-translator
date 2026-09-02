@@ -672,6 +672,17 @@ export default function AnnotationCanvas({
                       {annotation.group_id}
                     </span>
                   )}
+                  {mode === 'review' && active && (annotation.source_text || annotation.text) && (
+                    <span
+                      className="pointer-events-none absolute bottom-full mb-1 max-w-[260px] whitespace-pre-wrap rounded-md bg-ink-950/95 px-2 py-1 text-left text-ink-100 shadow-lg ring-1 ring-white/15"
+                      style={{ fontSize: Math.max(10, 12 / zoom) }}
+                    >
+                      {annotation.source_text && (
+                        <span className="block text-ink-400">{annotation.source_text}</span>
+                      )}
+                      {annotation.text && <span className="block">{annotation.text}</span>}
+                    </span>
+                  )}
                 </div>
               );
             }

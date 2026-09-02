@@ -7,6 +7,7 @@ import EmptyState from '@/components/EmptyState';
 import { originalUrl, previewUrl, thumbUrl } from '@/lib/media';
 import { isPin, newKey, type DraftAnnotation } from '@/lib/annotation';
 import { parseGroups, parsePhrases } from '@/lib/labelplus';
+import { useCollabRoom } from '@/lib/use-collab-room';
 import type { Asset, LabelPlusGroup, SpaceAccess, SpaceItem } from '@/lib/types';
 import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
 import AnnotationPanel from './AnnotationPanel';
@@ -53,6 +54,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [syncNote, setSyncNote] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [editingTitle, setEditingTitle] = useState(false);
   const [access, setAccess] = useState<SpaceAccess | null>(null);
@@ -62,6 +64,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const [defaultGroupId, setDefaultGroupId] = useState(1);
   const [groups, setGroups] = useState<LabelPlusGroup[]>([]);
   const [phrases, setPhrases] = useState<string[]>([]);
+  const [phraseMenuOpen, setPhraseMenuOpen] = useState(false);
+  const phraseCursor = useRef(0);
   const [ocrOpen, setOcrOpen] = useState(false);
   const [neighbors, setNeighbors] = useState<{
     prevId: number | null;
@@ -124,8 +128,23 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     setDirty(true);
   }, []);
 
-  const canEdit = access?.canEdit ?? false;
+  const collab = useCollabRoom(Number.isInteger(itemId) ? itemId : 0);
+
+  // 权限 = 空间权限 ∧ 房间状态（别人持锁未共享时整页转只读）
+  const canEdit = (access?.canEdit ?? false) && (collab.room ? collab.room.canEdit : true);
   canEditRef.current = canEdit;
+
+  // 收到别人的标注快照 → 直接覆盖本地（保持多人看到的画面一致）
+  collab.onRemoteOp((op) => {
+    if (op.kind === 'annotations') {
+      const rows = (op.payload as { annotations?: unknown[] } | null)?.annotations;
+      if (!Array.isArray(rows)) return;
+      setAnnotations((rows as DraftAnnotation[]).map((row) => hydrate(row)));
+      setDirty(false);
+      setSyncNote('已同步协作者的标注更新');
+      window.setTimeout(() => setSyncNote(null), 4000);
+    }
+  });
 
   const save = useCallback(async () => {
     if (!item || !canEditRef.current) return;
@@ -151,12 +170,14 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       );
       setDirty(false);
       setSavedAt(new Date().toLocaleTimeString('zh-CN'));
+      // 广播给同房间的人：以服务端返回的规范状态为准
+      void collab.sendOp('annotations', { annotations: data.annotations });
     } catch {
       setError('保存过程中发生网络错误');
     } finally {
       setSaving(false);
     }
-  }, [item, itemId]);
+  }, [item, itemId, collab]);
 
   useEffect(() => {
     if (!dirty || !canEdit || mode === 'box') return;
@@ -187,6 +208,36 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
 
   const pins = useMemo(() => annotations.filter(isPin), [annotations]);
 
+  /** 把短语追加到当前选中的标号译文末尾（按钮、快捷键共用） */
+  const insertPhraseAtSelected = useCallback(
+    (phrase: string) => {
+      if (!selectedKey || !canEdit) return;
+      applyChange(
+        annotationsRef.current.map((row) =>
+          row.key === selectedKey && isPin(row) ? { ...row, text: `${row.text}${phrase}` } : row,
+        ),
+      );
+    },
+    [selectedKey, canEdit, applyChange],
+  );
+
+  /** 保存分组名到空间（开放空间模型下人人可改） */
+  const saveGroups = useCallback(
+    async (next: LabelPlusGroup[]) => {
+      setGroups(next);
+      try {
+        await fetch(`/api/spaces/${item?.space_id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lp_groups: next }),
+        });
+      } catch {
+        // 分组名保存失败不打断标注流程，刷新后会回到服务器上的值
+      }
+    },
+    [item?.space_id],
+  );
+
   const selectPinByOffset = useCallback(
     (delta: number) => {
       if (pins.length === 0) return;
@@ -212,8 +263,33 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
         selectPinByOffset(1);
         return;
       }
+      // Alt+A 打开短语菜单：官方设计里录入译文时也要能呼出，所以在 typing 判断之前拦截
+      if (event.altKey && (event.key === 'a' || event.key === 'A')) {
+        event.preventDefault();
+        setPhraseMenuOpen((v) => !v);
+        return;
+      }
+      if (event.key === 'Escape') {
+        setPhraseMenuOpen(false);
+        return;
+      }
 
       if (typing) return;
+
+      // A 快速插入预置短语（连按循环切换短语），对应官方"快速插入预置文本"
+      if ((event.key === 'a' || event.key === 'A') && canEdit && phrases.length > 0) {
+        event.preventDefault();
+        const phrase = phrases[phraseCursor.current % phrases.length];
+        phraseCursor.current = (phraseCursor.current + 1) % phrases.length;
+        insertPhraseAtSelected(phrase);
+        return;
+      }
+      // Tab 向后翻页（官方快捷键）
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        void goItem(neighbors.nextId);
+        return;
+      }
 
       if (event.key === 'q' || event.key === 'Q') setMode('browse');
       if (event.key === 'w' || event.key === 'W') setMode('label');
@@ -258,7 +334,18 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [annotations, selectedKey, save, applyChange, canEdit, neighbors, goItem, selectPinByOffset]);
+  }, [
+    annotations,
+    selectedKey,
+    save,
+    applyChange,
+    canEdit,
+    neighbors,
+    goItem,
+    selectPinByOffset,
+    phrases,
+    insertPhraseAtSelected,
+  ]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -339,7 +426,27 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           </button>
         </div>
 
-        <span className="ml-auto flex items-center gap-3">
+        <span className="ml-auto flex items-center gap-2">
+          {collab.room?.holderName && !collab.room.isHolder && !collab.room.shared && (
+            <span className="rounded bg-amber-500/20 px-2 py-1 text-xs text-amber-700">
+              🔒 {collab.room.holderName} 正在编辑
+            </span>
+          )}
+          {collab.room?.shared && (
+            <span className="rounded bg-emerald-500/15 px-2 py-1 text-xs text-emerald-700">
+              🟢 实时协作中
+            </span>
+          )}
+          {collab.room?.isHolder && (
+            <button
+              type="button"
+              className="btn-ghost px-2 py-1 text-xs"
+              onClick={() => void collab.setShared(!collab.room?.shared)}
+            >
+              {collab.room?.shared ? '结束共享' : '共享编辑'}
+            </button>
+          )}
+          {syncNote && <span className="text-xs text-sky-deep">{syncNote}</span>}
           {canEdit ? (
             <>
               <span className="text-xs text-ink-500">
@@ -430,10 +537,14 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
                 phrases={phrases}
                 defaultGroupId={defaultGroupId}
                 reviewMode={mode === 'review'}
+                phraseMenuOpen={phraseMenuOpen}
+                onClosePhraseMenu={() => setPhraseMenuOpen(false)}
                 onSelect={setSelectedKey}
                 onChange={applyChange}
                 readOnly={!canEdit}
+                canManageGroups={canEdit}
                 onDefaultGroup={setDefaultGroupId}
+                onSaveGroups={(next) => void saveGroups(next)}
                 onInsertPhrase={(phrase) => {
                   if (!selectedKey || !canEdit) return;
                   applyChange(

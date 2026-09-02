@@ -116,16 +116,26 @@ export async function PATCH(request: Request, { params }: Params) {
   const id = parseId((await params).id);
   if (!id) return NextResponse.json({ error: '参数错误' }, { status: 400 });
 
-  const access = getSpaceAccess(id, user.id);
-  const denied = accessError(access, 'manage');
-  if (denied) return denied;
-
-  let body: { name?: string; description?: string; visibility?: string };
+  // 先解析 body 才能决定权限级别：分组表是公共工作数据（和标注同级），
+  // 开放空间下人人可改；改名/描述/可见性仍然只有创建者能动。
+  let body: {
+    name?: string;
+    description?: string;
+    visibility?: string;
+    lp_groups?: Array<{ id: number; name: string }>;
+  };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: '请求体格式错误' }, { status: 400 });
   }
+
+  const wantsManage =
+    body.name !== undefined || body.description !== undefined || body.visibility !== undefined;
+
+  const access = getSpaceAccess(id, user.id);
+  const denied = accessError(access, wantsManage ? 'manage' : 'edit');
+  if (denied) return denied;
 
   const name = body.name === undefined ? undefined : body.name.trim();
   if (name !== undefined && !name) {
@@ -135,10 +145,37 @@ export async function PATCH(request: Request, { params }: Params) {
     return NextResponse.json({ error: '空间名称过长' }, { status: 400 });
   }
   const description = body.description === undefined ? undefined : body.description.trim() || null;
+  // 开放空间模型：不再接受 private
   const visibility: SpaceVisibility | undefined =
-    body.visibility === 'public' ? 'public' : body.visibility === 'private' ? 'private' : undefined;
+    body.visibility === 'public' ? 'public' : undefined;
 
-  if (name === undefined && description === undefined && visibility === undefined) {
+  // LabelPlus 分组表：1~9 组，名字留空的组视为停用
+  let lpGroupsJson: string | null | undefined;
+  if (body.lp_groups !== undefined) {
+    if (!Array.isArray(body.lp_groups)) {
+      return NextResponse.json({ error: 'lp_groups 必须是数组' }, { status: 400 });
+    }
+    const cleaned = body.lp_groups
+      .filter(
+        (g) =>
+          g &&
+          Number.isInteger(g.id) &&
+          g.id >= 1 &&
+          g.id <= 9 &&
+          typeof g.name === 'string' &&
+          g.name.trim(),
+      )
+      .slice(0, 9)
+      .map((g) => ({ id: g.id, name: g.name.trim().slice(0, 20) }));
+    lpGroupsJson = cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+  }
+
+  if (
+    name === undefined &&
+    description === undefined &&
+    visibility === undefined &&
+    lpGroupsJson === undefined
+  ) {
     return NextResponse.json({ error: '没有需要更新的字段' }, { status: 400 });
   }
 
@@ -147,9 +184,10 @@ export async function PATCH(request: Request, { params }: Params) {
         SET name = COALESCE(?, name),
             description = COALESCE(?, description),
             visibility = COALESCE(?, visibility),
+            lp_groups = COALESCE(?, lp_groups),
             updated_at = datetime('now')
       WHERE id = ?`,
-  ).run(name ?? null, description ?? null, visibility ?? null, id);
+  ).run(name ?? null, description ?? null, visibility ?? null, lpGroupsJson ?? null, id);
 
   return NextResponse.json({
     space: db.prepare('SELECT * FROM spaces WHERE id = ?').get(id) as Space,

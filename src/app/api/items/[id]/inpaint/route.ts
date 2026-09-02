@@ -6,10 +6,51 @@ import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { IMAGE_DIRS } from '@/lib/storage';
+import { aiConfigured, imageEditWithMask, readAiConfig } from '@/lib/ai';
 import { maskPng, teleaFallback, type NormBox } from '@/lib/inpaint';
 import { sidecarHealth, sidecarInpaint } from '@/lib/sidecar';
 
 type Params = { params: Promise<{ id: string }> };
+
+/**
+ * 漂移校验：AI 生成式编辑可能把 mask 外的像素也改了。
+ * 把 AI 结果缩放回原尺寸后，逐点采样 mask 外区域的 RGB 差值，
+ * 平均差超过阈值就判定"画歪了"，调用方回退到确定性引擎。
+ */
+async function outsideMaskDrift(
+  original: Buffer,
+  result: Buffer,
+  mask: Buffer,
+  width: number,
+  height: number,
+  threshold = 14,
+): Promise<boolean> {
+  try {
+    const W = Math.max(1, Math.min(512, width));
+    const H = Math.max(1, Math.min(512, height));
+    const scale = { width: W, height: H, fit: 'fill' as const };
+    const a = await sharp(original).rotate().resize(scale).raw().toBuffer();
+    const b = await sharp(result).resize(scale).raw().toBuffer();
+    const m = await sharp(mask).resize(scale).raw().toBuffer();
+    const channels = 3;
+    let sum = 0;
+    let count = 0;
+    for (let i = 0; i < W * H; i += 1) {
+      // mask 是黑色（透明）= 不去字区域；白色 = 去字区域。非白才算 mask 外
+      const mg = m[i * channels] ?? 0;
+      if (mg > 128) continue;
+      const dr = Math.abs(a[i * channels] - b[i * channels]);
+      const dg = Math.abs(a[i * channels + 1] - b[i * channels + 1]);
+      const db = Math.abs(a[i * channels + 2] - b[i * channels + 2]);
+      sum += (dr + dg + db) / 3;
+      count += 1;
+    }
+    if (count === 0) return false;
+    return sum / count > threshold;
+  } catch {
+    return true; // 校验本身失败就宁可保守，回退确定性引擎
+  }
+}
 
 export async function POST(request: Request, { params }: Params) {
   const user = await getCurrentUser();
@@ -59,15 +100,47 @@ export async function POST(request: Request, { params }: Params) {
   const height = meta.height ?? item.height ?? 0;
 
   let paint: Buffer;
-  let engine: 'lama' | 'telea' = 'telea';
+  let engine: 'lama' | 'telea' | 'ai' = 'telea';
+  const mask = await maskPng(width, height, boxes);
+
+  // 引擎优先级：sidecar LaMa（本地、确定性最好）> AI 生成式（用户自己的 token）> telea（零依赖兜底）
+  let aiPaint: Buffer | null = null;
+  if (!(await sidecarHealth())) {
+    const aiConfig = await readAiConfig();
+    if (aiConfigured(aiConfig, 'inpaint')) {
+      const size = width >= height ? '1536x1024' : '1024x1536';
+      const padded = await sharp(original).rotate().png().toBuffer();
+      aiPaint = await imageEditWithMask(
+        aiConfig,
+        padded,
+        mask,
+        'Remove the text inside the masked area and fill it with the surrounding background (screentone/lineart). Keep everything outside the mask exactly unchanged.',
+        size,
+      );
+    }
+  }
+
   if (await sidecarHealth()) {
-    const mask = await maskPng(width, height, boxes);
     const lama = await sidecarInpaint(original, mask);
     if (lama) {
       paint = lama;
       engine = 'lama';
     } else {
       paint = await teleaFallback(original, boxes);
+    }
+  } else if (aiPaint) {
+    // 漂移校验：生成式编辑可能把 mask 外的线稿也改了。
+    // 只比较 mask 外区域，平均差异超过阈值就拒收，回退到 telea。
+    const drifted = await outsideMaskDrift(original, aiPaint, mask, width, height);
+    if (drifted) {
+      paint = await teleaFallback(original, boxes);
+    } else {
+      // AI 返回的尺寸可能和原图不一致，缩放回原尺寸
+      paint = await sharp(aiPaint)
+        .resize(width, height, { fit: 'fill' })
+        .png()
+        .toBuffer();
+      engine = 'ai';
     }
   } else {
     paint = await teleaFallback(original, boxes);

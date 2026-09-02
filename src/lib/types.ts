@@ -113,6 +113,8 @@ export type SpaceWithCounts = Space & {
   cover_thumb: string | null;
   cover_filename: string | null;
   member_count: number;
+  /** 文件夹创建者用户名（开放空间模型下用于卡片展示） */
+  owner_name?: string | null;
   /** 当前用户在该空间的角色 */
   role: SpaceRole;
   can_edit: boolean;

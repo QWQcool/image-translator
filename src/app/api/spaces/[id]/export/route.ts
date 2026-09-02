@@ -1,10 +1,16 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { NextResponse } from 'next/server';
 import JSZip from 'jszip';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { getSpaceAccess } from '@/lib/permissions';
+import { IMAGES_DIR } from '@/lib/storage';
 import { parseGroups, serializeLabelPlus } from '@/lib/labelplus';
 import type { Annotation, Asset, Space, SpaceItem } from '@/lib/types';
+
+/** 打包原图时的体积上限，超过就跳过后面的图，避免把进程内存打爆 */
+const MAX_ZIP_IMAGE_BYTES = 800 * 1024 * 1024;
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -270,17 +276,18 @@ export async function GET(request: Request, { params }: Params) {
 
   const json = JSON.stringify(buildPayload(space, rows), null, 2);
 
+  const labelPlusTxt = serializeLabelPlus({
+    groups: parseGroups(space.lp_groups),
+    files: rows.map(({ asset, annotations }) => ({
+      filename: asset.original_name || asset.filename,
+      labels: annotations
+        .filter((an) => an.kind === 'pin')
+        .map((an) => ({ x: an.x, y: an.y, groupId: an.group_id || 1, text: an.text })),
+    })),
+  });
+
   if (format === 'lp' || format === 'labelplus') {
-    const txt = serializeLabelPlus({
-      groups: parseGroups(space.lp_groups),
-      files: rows.map(({ item, asset, annotations }) => ({
-        filename: asset.original_name || asset.filename,
-        labels: annotations
-          .filter((an) => an.kind === 'pin')
-          .map((an) => ({ x: an.x, y: an.y, groupId: an.group_id || 1, text: an.text })),
-      })),
-    });
-    return new NextResponse(txt, {
+    return new NextResponse(labelPlusTxt, {
       headers: {
         'Content-Type': 'text/plain; charset=utf-8',
         'Content-Disposition': disposition(`${safeName}-翻译_0.txt`),
@@ -289,9 +296,38 @@ export async function GET(request: Request, { params }: Params) {
   }
 
   if (format === 'zip') {
+    const includeImages = new URL(request.url).searchParams.get('images') !== '0';
     const zip = new JSZip();
     zip.file('annotations.json', json);
     zip.file('annotations.csv', buildCsv(rows));
+    zip.file('翻译_0.txt', labelPlusTxt);
+
+    // 图片放 images/，与 annotations.json 里的 file 字段对应，解包即可直接用
+    const packed: string[] = [];
+    const missing: string[] = [];
+    let packedBytes = 0;
+    let capped = false;
+
+    if (includeImages) {
+      const imageFolder = zip.folder('images') ?? zip;
+      for (const { asset } of rows) {
+        if (packed.includes(asset.filename)) continue;
+        try {
+          const file = await fs.readFile(path.join(IMAGES_DIR, asset.filename));
+          if (packedBytes + file.byteLength > MAX_ZIP_IMAGE_BYTES) {
+            capped = true;
+            continue;
+          }
+          // 图片本身已压缩，再 deflate 只会白烧 CPU
+          imageFolder.file(asset.filename, file, { compression: 'STORE' });
+          packed.push(asset.filename);
+          packedBytes += file.byteLength;
+        } catch {
+          missing.push(asset.original_name || asset.filename);
+        }
+      }
+    }
+
     zip.file(
       'README.txt',
       [
@@ -300,13 +336,29 @@ export async function GET(request: Request, { params }: Params) {
         `图片数量：${rows.length}`,
         `标注数量：${rows.reduce((sum, r) => sum + r.annotations.length, 0)}`,
         '',
-        'annotations.json —— 完整结构，坐标同时提供 0~1 归一化值与像素值。',
-        'annotations.csv  —— 表格形式，可直接用 Excel 打开。',
+        '目录结构：',
+        '  annotations.json —— 完整结构，坐标同时提供 0~1 归一化值与像素值。',
+        '  annotations.csv  —— 表格形式，可直接用 Excel 打开。',
+        '  翻译_0.txt       —— LabelPlus 格式译文，PS-Script 可直接读取。',
+        '  images/          —— 原图文件，annotations.json 的 file 字段指向这里。',
         '',
         '坐标说明：x/y 为框左上角，w/h 为框宽高，均相对图片左上角。',
-      ].join('\r\n'),
+        '',
+        includeImages
+          ? `已打包原图：${packed.length} 个，共 ${(packedBytes / 1024 / 1024).toFixed(1)} MB。`
+          : '本次未打包原图（images=0）。',
+        capped ? `注意：原图总体积超过 ${MAX_ZIP_IMAGE_BYTES / 1024 / 1024} MB 上限，超出部分未打包。` : '',
+        missing.length > 0 ? `注意：${missing.length} 个文件在磁盘上已缺失：${missing.join('、')}` : '',
+      ]
+        .filter((line) => line !== '')
+        .join('\r\n'),
     );
-    const buffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+    const buffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    });
     return new NextResponse(new Uint8Array(buffer), {
       headers: {
         'Content-Type': 'application/zip',

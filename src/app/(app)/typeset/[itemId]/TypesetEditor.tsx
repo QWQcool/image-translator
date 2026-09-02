@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import { isPin } from '@/lib/annotation';
 import { originalUrl } from '@/lib/media';
+import { useCollabRoom, type CollabOp } from '@/lib/use-collab-room';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
 import type { TypesetTextLayer } from '@/lib/typeset';
 
@@ -26,18 +27,61 @@ function newLayerId(): string {
   return `t${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
+/** 一次可撤销的完整状态：涂改层位图 + 文字层列表 + 当前选中项 */
+type Snapshot = {
+  paint: Blob | null;
+  layers: TypesetTextLayer[];
+  selected: string | null;
+};
+
+/** 协作广播的涂改层操作（矢量形式，观众本地重放） */
+type PaintOp =
+  | {
+      type: 'stroke';
+      tool: 'brush' | 'eraser';
+      color: string;
+      size: number;
+      opacity: number;
+      points: { x: number; y: number }[];
+    }
+  | {
+      type: 'clone';
+      size: number;
+      opacity: number;
+      points: { x: number; y: number }[];
+      from: { x: number; y: number };
+    }
+  | { type: 'rect'; x: number; y: number; w: number; h: number; color: string }
+  | { type: 'lasso'; points: { x: number; y: number }[]; color: string };
+
+/** 文字连续输入时不要每敲一个字就记一步，停手 700ms 再落一步 */
+const HISTORY_COALESCE_MS = 700;
+const HISTORY_LIMIT = 50;
+
 export default function TypesetEditor({ itemId }: { itemId: number }) {
   const router = useRouter();
   const viewportRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const paintRef = useRef<HTMLCanvasElement>(null);
-  const historyRef = useRef<Blob[]>([]);
+  const historyRef = useRef<Snapshot[]>([]);
   const histIndex = useRef(-1);
+  const baselineKey = useRef('');
+  const coalesceTimer = useRef<number | null>(null);
+  /** 最近一次「已保存」落在历史的哪一步，用来判断撤销回到该步时是否还算脏 */
+  const savedIndex = useRef(0);
   const drawing = useRef(false);
   const lastPt = useRef<{ x: number; y: number } | null>(null);
   const cloneOrigin = useRef<{ x: number; y: number } | null>(null);
   const cloneDelta = useRef<{ x: number; y: number } | null>(null);
   const lassoPts = useRef<{ x: number; y: number }[]>([]);
+  /** 文字层拖拽中的状态：id + 起点屏幕坐标 + 该层原始归一化位置 */
+  const textDrag = useRef<{
+    id: string;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -48,6 +92,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const [tool, setTool] = useState<Tool>('brush');
   const [color, setColor] = useState('#FFFFFF');
   const [size, setSize] = useState(24);
+  const [opacity, setOpacity] = useState(100);
   const [textLayers, setTextLayers] = useState<TypesetTextLayer[]>([]);
   const [selectedText, setSelectedText] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -60,7 +105,35 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
 
   const imageWidth = asset?.width ?? 1200;
   const imageHeight = asset?.height ?? 800;
-  const canEdit = access?.canEdit ?? false;
+
+  // 协作房间：进页即接管/续期锁，轮询增量操作
+  const collab = useCollabRoom(itemId);
+  // 权限 = 空间权限 ∧ 房间状态（别人持锁未共享时整页转只读）
+  const canEdit = (access?.canEdit ?? false) && (collab.room ? collab.room.canEdit : true);
+
+  // 高频指针事件与防抖回调里要读最新值，不能依赖闭包里的旧 state
+  const textLayersRef = useRef(textLayers);
+  textLayersRef.current = textLayers;
+  const selectedTextRef = useRef(selectedText);
+  selectedTextRef.current = selectedText;
+  const hasPaintRef = useRef(hasPaint);
+  hasPaintRef.current = hasPaint;
+  const colorRef = useRef(color);
+  colorRef.current = color;
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
+  const opacityRef = useRef(opacity);
+  opacityRef.current = opacity;
+
+  /** 正在进行的笔画，落笔时打包成一条矢量操作广播给房间 */
+  const liveStroke = useRef<{
+    tool: 'brush' | 'eraser' | 'clone';
+    color: string;
+    size: number;
+    opacity: number;
+    points: { x: number; y: number }[];
+    from?: { x: number; y: number };
+  } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -94,13 +167,26 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
 
   const saveRef = useRef<() => Promise<void>>(async () => {});
   const undoRef = useRef<() => Promise<void>>(async () => {});
+  const redoRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.code === 'Space') setSpaceDown(true);
+      const typing =
+        e.target instanceof HTMLElement &&
+        (e.target.tagName === 'INPUT' ||
+          e.target.tagName === 'TEXTAREA' ||
+          e.target.isContentEditable);
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        // 输入框里的 Ctrl+Z 交给浏览器做文本撤销，不要整层回退
+        if (typing && !e.shiftKey) return;
         e.preventDefault();
-        void undoRef.current();
+        if (e.shiftKey) void redoRef.current();
+        else void undoRef.current();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        void redoRef.current();
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
@@ -118,36 +204,91 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     };
   }, []);
 
-  async function snapshotPaint() {
+  /** 把「涂改层画布 + 文字层」当前状态压入历史栈 */
+  async function pushHistory(layers: TypesetTextLayer[], selected: string | null) {
     const canvas = paintRef.current;
-    if (!canvas) return;
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
-    if (!blob) return;
+    let paint: Blob | null = null;
+    if (canvas) {
+      paint = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+    }
+    const snapshot: Snapshot = { paint, layers, selected };
     historyRef.current = historyRef.current.slice(0, histIndex.current + 1);
-    historyRef.current.push(blob);
-    if (historyRef.current.length > 50) historyRef.current.shift();
+    historyRef.current.push(snapshot);
+    if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
     histIndex.current = historyRef.current.length - 1;
   }
 
-  async function undo() {
-    if (histIndex.current <= 0) {
-      const canvas = paintRef.current;
-      const ctx = canvas?.getContext('2d');
-      if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      histIndex.current = -1;
-      setDirty(true);
-      return;
+  /**
+   * 建基线：撤销栈的第 0 步永远是「刚加载完草稿」的状态，
+   * 这样第一次撤销是回到磁盘上的草稿，而不是把草稿整层擦掉。
+   */
+  async function establishBaseline() {
+    const key = `${itemId}:${hasPaintRef.current}`;
+    if (baselineKey.current === key) return;
+    baselineKey.current = key;
+    historyRef.current = [];
+    histIndex.current = -1;
+    await pushHistory(textLayersRef.current, null);
+    savedIndex.current = histIndex.current;
+  }
+
+  /** 连续输入类改动：停手后再记一步 + 广播一次，避免每敲一个字就刷屏 */
+  function scheduleHistory(layers: TypesetTextLayer[], selected: string | null) {
+    if (coalesceTimer.current !== null) window.clearTimeout(coalesceTimer.current);
+    coalesceTimer.current = window.setTimeout(() => {
+      coalesceTimer.current = null;
+      void pushHistory(layers, selected);
+      broadcastText(layers);
+    }, HISTORY_COALESCE_MS);
+  }
+
+  /** 撤销前先把悬着的输入落袋，否则刚敲的字撤不掉 */
+  async function flushCoalesced() {
+    if (coalesceTimer.current === null) return;
+    window.clearTimeout(coalesceTimer.current);
+    coalesceTimer.current = null;
+    await pushHistory(textLayersRef.current, selectedTextRef.current);
+  }
+
+  function clearCoalesce() {
+    if (coalesceTimer.current !== null) {
+      window.clearTimeout(coalesceTimer.current);
+      coalesceTimer.current = null;
     }
-    histIndex.current -= 1;
-    const blob = historyRef.current[histIndex.current];
+  }
+
+  async function restore(snapshot: Snapshot) {
     const canvas = paintRef.current;
     const ctx = canvas?.getContext('2d');
-    if (!blob || !canvas || !ctx) return;
-    const bmp = await createImageBitmap(blob);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(bmp, 0, 0);
-    bmp.close();
-    setDirty(true);
+    if (canvas && ctx) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (snapshot.paint) {
+        const bmp = await createImageBitmap(snapshot.paint);
+        ctx.drawImage(bmp, 0, 0);
+        bmp.close();
+      }
+    }
+    setTextLayers(snapshot.layers);
+    setSelectedText(snapshot.selected);
+    setDirty(histIndex.current !== savedIndex.current);
+  }
+
+  async function undo() {
+    await flushCoalesced();
+    if (histIndex.current <= 0) return;
+    histIndex.current -= 1;
+    const snapshot = historyRef.current[histIndex.current];
+    if (!snapshot) return;
+    await restore(snapshot);
+  }
+
+  async function redo() {
+    await flushCoalesced();
+    if (histIndex.current >= historyRef.current.length - 1) return;
+    histIndex.current += 1;
+    const snapshot = historyRef.current[histIndex.current];
+    if (!snapshot) return;
+    await restore(snapshot);
   }
 
   function toLocal(event: { clientX: number; clientY: number }) {
@@ -164,14 +305,41 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     return paintRef.current?.getContext('2d') ?? null;
   }
 
-  function stamp(ctx: CanvasRenderingContext2D, x: number, y: number, erase: boolean) {
+  /**
+   * 参数化的盖章：本地绘制与「矢量笔画重放」共用这一份逻辑，
+   * 保证别人在远端看到的效果和操作者本地完全一致。
+   * cloneFrom 存在时是仿制图章：从源位置取像素盖到 (x,y)。
+   */
+  function stampWith(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    opts: { erase?: boolean; color?: string; size?: number; opacity?: number; cloneFrom?: { x: number; y: number } },
+  ) {
+    const erase = opts.erase ?? false;
+    const r = (opts.size ?? sizeRef.current) / 2;
+    const alpha = Math.min(1, Math.max(0.05, (opts.opacity ?? 100) / 100));
     ctx.save();
-    ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x, y, size / 2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.globalAlpha = alpha;
+    if (!erase && opts.cloneFrom) {
+      const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.clip();
+      if (img) ctx.drawImage(img, opts.cloneFrom.x - x, opts.cloneFrom.y - y);
+      ctx.drawImage(ctx.canvas, opts.cloneFrom.x - x, opts.cloneFrom.y - y);
+    } else {
+      ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+      ctx.fillStyle = opts.color ?? colorRef.current;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.restore();
+  }
+
+  function stamp(ctx: CanvasRenderingContext2D, x: number, y: number, erase: boolean) {
+    stampWith(ctx, x, y, { erase, color: colorRef.current, size: sizeRef.current, opacity: opacityRef.current });
   }
 
   async function sampleColor(x: number, y: number): Promise<string> {
@@ -224,9 +392,12 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         align: 'center',
         lineHeight: 1.25,
       };
-      setTextLayers((prev) => [...prev, layer]);
+      const next = [...textLayersRef.current, layer];
+      setTextLayers(next);
       setSelectedText(layer.id);
       setDirty(true);
+      void pushHistory(next, layer.id);
+      broadcastText(next);
       return;
     }
     if (tool === 'clone' && event.altKey) {
@@ -242,15 +413,46 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     if (tool === 'brush' || tool === 'eraser') {
       stamp(ctx, pt.x, pt.y, tool === 'eraser');
       setDirty(true);
+      liveStroke.current = {
+        tool,
+        color: colorRef.current,
+        size: sizeRef.current,
+        opacity: opacityRef.current,
+        points: [pt],
+      };
     }
     if (tool === 'rect') setRect({ x: pt.x, y: pt.y, w: 0, h: 0 });
     if (tool === 'lasso') lassoPts.current = [pt];
     if (tool === 'clone' && cloneOrigin.current) {
       cloneDelta.current = { x: pt.x - cloneOrigin.current.x, y: pt.y - cloneOrigin.current.y };
+      liveStroke.current = {
+        tool: 'clone',
+        color: colorRef.current,
+        size: sizeRef.current,
+        opacity: opacityRef.current,
+        points: [pt],
+        from: { ...cloneOrigin.current },
+      };
     }
   }
 
   function onPointerMove(event: React.PointerEvent) {
+    // 文字层拖拽：不需要按下画笔那套 drawing 状态，单独走一条通道
+    if (textDrag.current) {
+      const drag = textDrag.current;
+      const wrapper = wrapperRef.current;
+      if (!wrapper) return;
+      const box = wrapper.getBoundingClientRect();
+      const dx = ((event.clientX - drag.startX) / box.width) * imageWidth;
+      const dy = ((event.clientY - drag.startY) / box.height) * imageHeight;
+      const nx = Math.min(1, Math.max(0, drag.origX + dx / imageWidth));
+      const ny = Math.min(1, Math.max(0, drag.origY + dy / imageHeight));
+      setTextLayers((prev) =>
+        prev.map((l) => (l.id === drag.id ? { ...l, x: nx, y: ny } : l)),
+      );
+      setDirty(true);
+      return;
+    }
     if (!drawing.current) return;
     if (spaceDown || tool === 'pan') {
       const last = lastPt.current;
@@ -274,6 +476,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       }
       lastPt.current = pt;
       setDirty(true);
+      liveStroke.current?.points.push(pt);
     }
     if (tool === 'rect' && lastPt.current) {
       setRect({
@@ -283,29 +486,145 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         h: Math.abs(pt.y - lastPt.current.y),
       });
     }
-    if (tool === 'lasso') lassoPts.current.push(pt);
+    if (tool === 'lasso') {
+      lassoPts.current.push(pt);
+      liveStroke.current?.points.push(pt);
+    }
     if (tool === 'clone' && cloneDelta.current) {
       const src = { x: pt.x - cloneDelta.current.x, y: pt.y - cloneDelta.current.y };
-      const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
-      ctx.save();
+      stampWith(ctx, pt.x, pt.y, { size: sizeRef.current, opacity: opacityRef.current, cloneFrom: src });
+      setDirty(true);
+      liveStroke.current?.points.push(pt);
+    }
+  }
+
+  /** 把一笔操作广播给房间（矢量形式，观众本地重放） */
+  function broadcastPaint(op: PaintOp) {
+    void collab.sendOp('paint', op);
+  }
+
+  /** 文字层快照广播（全量，层数少，几十 KB 以内） */
+  const broadcastText = useCallback(
+    (layers: TypesetTextLayer[]) => {
+      void collab.sendOp('text', { layers });
+    },
+    [collab],
+  );
+
+  /** 重放远端的一笔涂改：和本地画笔共用 stampWith，效果完全一致 */
+  function replayPaintOp(op: PaintOp) {
+    const ctx = paintCtx();
+    if (!ctx) return;
+    if (op.type === 'stroke' || op.type === 'clone') {
+      const pts = op.points;
+      if (pts.length === 0) return;
+      const erase = op.type === 'stroke' && op.tool === 'eraser';
+      const cloneFrom = op.type === 'clone' ? op.from : undefined;
+      stampWith(ctx, pts[0].x, pts[0].y, {
+        erase,
+        color: op.type === 'stroke' ? op.color : undefined,
+        size: op.size,
+        opacity: op.opacity,
+        cloneFrom,
+      });
+      for (let i = 1; i < pts.length; i += 1) {
+        const prev = pts[i - 1];
+        const cur = pts[i];
+        const dist = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+        const steps = Math.max(1, Math.floor(dist / (op.size / 4)));
+        for (let s = 1; s <= steps; s += 1) {
+          const t = s / steps;
+          stampWith(ctx, prev.x + (cur.x - prev.x) * t, prev.y + (cur.y - prev.y) * t, {
+            erase,
+            color: op.type === 'stroke' ? op.color : undefined,
+            size: op.size,
+            opacity: op.opacity,
+            cloneFrom,
+          });
+        }
+      }
+      setDirty(true);
+      return;
+    }
+    if (op.type === 'rect') {
+      ctx.fillStyle = op.color;
+      ctx.fillRect(op.x, op.y, op.w, op.h);
+      setDirty(true);
+      return;
+    }
+    if (op.type === 'lasso' && op.points.length > 2) {
+      ctx.fillStyle = op.color;
       ctx.beginPath();
-      ctx.arc(pt.x, pt.y, size / 2, 0, Math.PI * 2);
-      ctx.clip();
-      if (img) ctx.drawImage(img, src.x - pt.x, src.y - pt.y);
-      ctx.drawImage(ctx.canvas, src.x - pt.x, src.y - pt.y);
-      ctx.restore();
+      ctx.moveTo(op.points[0].x, op.points[0].y);
+      op.points.forEach((p) => ctx.lineTo(p.x, p.y));
+      ctx.closePath();
+      ctx.fill();
       setDirty(true);
     }
   }
 
+  // 远端操作：笔画直接重放，文字层/标注用快照覆盖
+  collab.onRemoteOp((op: CollabOp) => {
+    if (op.kind === 'paint') {
+      replayPaintOp(op.payload as PaintOp);
+      return;
+    }
+    if (op.kind === 'text') {
+      const layers = (op.payload as { layers?: TypesetTextLayer[] } | null)?.layers;
+      if (Array.isArray(layers)) {
+        setTextLayers(layers);
+        setDirty(true);
+      }
+    }
+  });
+
   async function onPointerUp() {
+    // 拖完文字层：落一步历史，撤销即可回到拖拽前的位置
+    if (textDrag.current) {
+      const id = textDrag.current.id;
+      textDrag.current = null;
+      const next = textLayersRef.current;
+      setTextLayers(next);
+      setDirty(true);
+      await pushHistory(next, id);
+      broadcastText(next);
+      return;
+    }
     if (!drawing.current) return;
     drawing.current = false;
     const ctx = paintCtx();
+
+    // 笔画收尾：把整条矢量轨迹广播出去
+    const stroke = liveStroke.current;
+    liveStroke.current = null;
+    if (stroke && stroke.points.length > 0) {
+      if (stroke.tool === 'clone') {
+        if (stroke.from) {
+          broadcastPaint({
+            type: 'clone',
+            size: stroke.size,
+            opacity: stroke.opacity,
+            points: stroke.points,
+            from: stroke.from,
+          });
+        }
+      } else {
+        broadcastPaint({
+          type: 'stroke',
+          tool: stroke.tool,
+          color: stroke.color,
+          size: stroke.size,
+          opacity: stroke.opacity,
+          points: stroke.points,
+        });
+      }
+    }
+
     if (tool === 'rect' && rect && ctx && rect.w > 2 && rect.h > 2) {
       ctx.fillStyle = color;
       ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
       setDirty(true);
+      broadcastPaint({ type: 'rect', x: rect.x, y: rect.y, w: rect.w, h: rect.h, color });
     }
     if (tool === 'lasso' && ctx && lassoPts.current.length > 2) {
       ctx.fillStyle = color;
@@ -315,11 +634,14 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       ctx.closePath();
       ctx.fill();
       setDirty(true);
+      broadcastPaint({ type: 'lasso', points: [...lassoPts.current], color });
     }
     setRect(null);
     lassoPts.current = [];
     lastPt.current = null;
-    if (['brush', 'eraser', 'rect', 'lasso', 'clone'].includes(tool)) await snapshotPaint();
+    if (['brush', 'eraser', 'rect', 'lasso', 'clone'].includes(tool)) {
+      await pushHistory(textLayersRef.current, selectedTextRef.current);
+    }
   }
 
   async function save() {
@@ -338,6 +660,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         setError(data.error ?? '保存失败');
         return;
       }
+      savedIndex.current = histIndex.current;
       setDirty(false);
     } finally {
       setSaving(false);
@@ -345,6 +668,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   }
   saveRef.current = save;
   undoRef.current = undo;
+  redoRef.current = redo;
 
   async function autoInpaint() {
     setError(null);
@@ -366,7 +690,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
     bmp.close();
     setDirty(true);
-    await snapshotPaint();
+    await pushHistory(textLayersRef.current, selectedTextRef.current);
   }
 
   async function fromPins() {
@@ -388,8 +712,11 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         align: 'center' as const,
         lineHeight: 1.25,
       }));
-    setTextLayers((prev) => [...prev, ...generated]);
+    const next = [...textLayersRef.current, ...generated];
+    setTextLayers(next);
     setDirty(true);
+    void pushHistory(next, generated[0]?.id ?? selectedTextRef.current);
+    broadcastText(next);
   }
 
   async function exportPng(writeBack: boolean) {
@@ -404,19 +731,39 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     ctx.drawImage(img, 0, 0, imageWidth, imageHeight);
     ctx.drawImage(paint, 0, 0);
     for (const layer of textLayers) {
+      if (layer.visible === false) continue;
+      ctx.save();
       ctx.font = `${layer.fontWeight} ${layer.fontSize}px "Noto Sans SC", sans-serif`;
-      ctx.textAlign = layer.align;
+      ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.lineWidth = layer.strokeWidth;
       ctx.strokeStyle = layer.stroke;
       ctx.fillStyle = layer.color;
+      const originX = layer.x * imageWidth;
+      const originY = layer.y * imageHeight;
       const lines = layer.text.split('\n');
-      lines.forEach((line, i) => {
-        const x = layer.x * imageWidth;
-        const y = layer.y * imageHeight + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
-        if (layer.strokeWidth > 0) ctx.strokeText(line, x, y);
-        ctx.fillText(line, x, y);
-      });
+      if (layer.vertical) {
+        // 竖排：每行文字单独成一列，从右往左排（阅读顺序与日漫一致）
+        const columnGap = layer.fontSize * 0.35;
+        const totalWidth = (lines.length - 1) * (layer.fontSize + columnGap);
+        lines.forEach((line, col) => {
+          const colX = originX - totalWidth / 2 + col * (layer.fontSize + columnGap);
+          const chars = Array.from(line);
+          chars.forEach((ch, i) => {
+            const y = originY + (i - (chars.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+            if (layer.strokeWidth > 0) ctx.strokeText(ch, colX, y);
+            ctx.fillText(ch, colX, y);
+          });
+        });
+      } else {
+        ctx.textAlign = layer.align === 'left' ? 'left' : layer.align === 'right' ? 'right' : 'center';
+        lines.forEach((line, i) => {
+          const y = originY + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+          if (layer.strokeWidth > 0) ctx.strokeText(line, originX, y);
+          ctx.fillText(line, originX, y);
+        });
+      }
+      ctx.restore();
     }
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
     if (!blob) return;
@@ -441,7 +788,12 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
 
   useEffect(() => {
     const canvas = paintRef.current;
-    if (!canvas || !hasPaint) return;
+    if (!canvas) return;
+    if (!hasPaint) {
+      // 没有草稿涂改层：基线就是「空画布 + 已加载的文字层」
+      void establishBaseline();
+      return;
+    }
     let cancelled = false;
     void (async () => {
       const res = await fetch(`/api/items/${itemId}/typeset/paint`);
@@ -453,8 +805,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       ctx?.clearRect(0, 0, canvas.width, canvas.height);
       ctx?.drawImage(bmp, 0, 0);
       bmp.close();
-      historyRef.current = [blob];
-      histIndex.current = 0;
+      // 涂改层画进画布之后再打基线，撤销第 1 步才能回到磁盘上的草稿
+      await establishBaseline();
     })();
     return () => {
       cancelled = true;
@@ -479,7 +831,26 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           ← {spaceName || '标号'} / {item.title || '未命名'}
         </Link>
         <span className="rounded bg-sky/15 px-2 py-0.5 text-xs text-sky-deep">嵌字</span>
+        {collab.room?.holderName && !collab.room.isHolder && !collab.room.shared && (
+          <span className="rounded bg-amber-500/20 px-2 py-1 text-xs text-amber-700">
+            🔒 {collab.room.holderName} 正在编辑
+          </span>
+        )}
+        {collab.room?.shared && (
+          <span className="rounded bg-emerald-500/15 px-2 py-1 text-xs text-emerald-700">
+            🟢 实时协作中
+          </span>
+        )}
         <span className="ml-auto flex gap-2">
+          {collab.room?.isHolder && (
+            <button
+              type="button"
+              className="btn-ghost text-xs"
+              onClick={() => void collab.setShared(!collab.room?.shared)}
+            >
+              {collab.room?.shared ? '结束共享' : '共享编辑'}
+            </button>
+          )}
           <button type="button" className="btn-ghost text-xs" onClick={() => void fromPins()}>
             从标号生成文字层
           </button>
@@ -488,6 +859,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           </button>
           <button type="button" className="btn-ghost text-xs" onClick={() => void undo()}>
             撤销
+          </button>
+          <button type="button" className="btn-ghost text-xs" onClick={() => void redo()}>
+            重做
           </button>
           <button type="button" className="btn-ghost text-xs" onClick={() => void exportPng(false)}>
             导出 PNG
@@ -529,7 +903,18 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
               className="mt-1 w-full accent-sky"
             />
           </label>
-          <p className="text-[11px] text-ink-400">原图层已锁定。橡皮只擦涂改层。仿制：Alt 取源后涂抹。</p>
+          <label className="text-[11px] text-ink-500">
+            不透明度 {opacity}%
+            <input
+              type="range"
+              min={5}
+              max={100}
+              value={opacity}
+              onChange={(e) => setOpacity(Number(e.target.value))}
+              className="mt-1 w-full accent-sky"
+            />
+          </label>
+          <p className="text-[11px] text-ink-400">原图层已锁定。橡皮只擦涂改层。仿制：Alt 取源后涂抹（同源对齐）。</p>
         </div>
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -580,9 +965,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
               {textLayers.map((layer) => (
                 <div
                   key={layer.id}
-                  className={`absolute max-w-[40%] -translate-x-1/2 -translate-y-1/2 whitespace-pre-wrap text-center ${
-                    selectedText === layer.id ? 'outline outline-2 outline-halo' : ''
-                  }`}
+                  className={`absolute max-w-[40%] -translate-x-1/2 -translate-y-1/2 whitespace-pre-wrap ${
+                    layer.vertical ? 'text-start' : 'text-center'
+                  } ${selectedText === layer.id ? 'outline outline-2 outline-halo' : ''}`}
                   style={{
                     left: `${layer.x * 100}%`,
                     top: `${layer.y * 100}%`,
@@ -591,12 +976,27 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                     fontWeight: layer.fontWeight,
                     WebkitTextStroke: `${layer.strokeWidth / 2}px ${layer.stroke}`,
                     lineHeight: layer.lineHeight,
+                    writingMode: layer.vertical ? 'vertical-rl' : 'horizontal-tb',
+                    display: layer.visible === false ? 'none' : undefined,
                     pointerEvents: tool === 'text' ? 'auto' : 'none',
+                    cursor: tool === 'text' ? 'move' : undefined,
                   }}
                   onPointerDown={(event) => {
                     if (tool !== 'text') return;
                     event.stopPropagation();
                     setSelectedText(layer.id);
+                    try {
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                    } catch {
+                      // 浏览器不支持时退化为窗口级监听，拖拽仍然可用
+                    }
+                    textDrag.current = {
+                      id: layer.id,
+                      startX: event.clientX,
+                      startY: event.clientY,
+                      origX: layer.x,
+                      origY: layer.y,
+                    };
                   }}
                 >
                   {layer.text}
@@ -617,18 +1017,66 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           <ul className="mt-2 space-y-1 text-xs text-ink-300">
             <li className="rounded bg-paper px-2 py-1">背景（原图，锁定）</li>
             <li className="rounded bg-paper px-2 py-1">涂改 {dirty ? '· 未保存' : ''}</li>
-            <li className="rounded bg-paper px-2 py-1">文字 · {textLayers.length}</li>
           </ul>
+          <div className="mt-2">
+            <div className="flex items-center justify-between text-[11px] text-ink-500">
+              <span>文字层 · {textLayers.length}</span>
+            </div>
+            <ul className="mt-1 max-h-40 space-y-1 overflow-y-auto">
+              {textLayers.length === 0 && (
+                <li className="rounded bg-paper px-2 py-1 text-[11px] text-ink-500">暂无文字层</li>
+              )}
+              {[...textLayers].reverse().map((layer) => (
+                <li
+                  key={layer.id}
+                  className={`flex items-center gap-1 rounded px-1 py-0.5 ${
+                    selectedText === layer.id ? 'bg-sky/15' : 'bg-paper'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    className="shrink-0 text-[11px] text-ink-400 hover:text-ink-100"
+                    title={layer.visible === false ? '显示' : '隐藏'}
+                    onClick={() => {
+                      const next = textLayersRef.current.map((l) =>
+                        l.id === layer.id ? { ...l, visible: layer.visible === false } : l,
+                      );
+                      setTextLayers(next);
+                      setDirty(true);
+                      void pushHistory(next, selectedTextRef.current);
+                      broadcastText(next);
+                    }}
+                  >
+                    {layer.visible === false ? '🚫' : '👁'}
+                  </button>
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 truncate text-left text-[11px] text-ink-200 hover:text-ink-100"
+                    onClick={() => {
+                      setTool('text');
+                      setSelectedText(layer.id);
+                    }}
+                    title="选中该层（切换到文字工具可拖动）"
+                  >
+                    {layer.text.split('\n')[0] || '（空）'}
+                  </button>
+                  <span className="shrink-0 text-[10px] text-ink-500">{layer.vertical ? '竖' : '横'}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
           {selected && (
             <div className="mt-3 space-y-2">
               <textarea
                 className="input min-h-[80px] text-xs"
                 value={selected.text}
                 onChange={(e) => {
-                  setTextLayers((prev) =>
-                    prev.map((l) => (l.id === selected.id ? { ...l, text: e.target.value } : l)),
+                  const next = textLayersRef.current.map((l) =>
+                    l.id === selected.id ? { ...l, text: e.target.value } : l,
                   );
+                  setTextLayers(next);
                   setDirty(true);
+                  scheduleHistory(next, selected.id);
                 }}
               />
               <label className="text-[11px] text-ink-500">
@@ -640,21 +1088,62 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   value={selected.fontSize}
                   onChange={(e) => {
                     const fontSize = Number(e.target.value);
-                    setTextLayers((prev) =>
-                      prev.map((l) => (l.id === selected.id ? { ...l, fontSize } : l)),
+                    const next = textLayersRef.current.map((l) =>
+                      l.id === selected.id ? { ...l, fontSize } : l,
                     );
+                    setTextLayers(next);
                     setDirty(true);
+                    scheduleHistory(next, selected.id);
                   }}
                   className="w-full accent-sky"
                 />
               </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  className={`btn-ghost py-1 text-xs ${selected.vertical ? 'btn-primary' : ''}`}
+                  onClick={() => {
+                    const next = textLayersRef.current.map((l) =>
+                      l.id === selected.id ? { ...l, vertical: !selected.vertical } : l,
+                    );
+                    setTextLayers(next);
+                    setDirty(true);
+                    void pushHistory(next, selected.id);
+                    broadcastText(next);
+                  }}
+                >
+                  {selected.vertical ? '竖排' : '横排'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost py-1 text-xs"
+                  onClick={() => {
+                    const idx = textLayersRef.current.findIndex((l) => l.id === selected.id);
+                    const swapWith = idx > 0 ? idx - 1 : idx + 1;
+                    if (swapWith < 0 || swapWith >= textLayersRef.current.length || swapWith === idx) return;
+                    const next = [...textLayersRef.current];
+                    const [moved] = next.splice(idx, 1);
+                    next.splice(swapWith, 0, moved);
+                    setTextLayers(next);
+                    setDirty(true);
+                    void pushHistory(next, selected.id);
+                    broadcastText(next);
+                  }}
+                >
+                  上移一层
+                </button>
+              </div>
               <button
                 type="button"
                 className="btn-danger w-full py-1 text-xs"
                 onClick={() => {
-                  setTextLayers((prev) => prev.filter((l) => l.id !== selected.id));
+                  clearCoalesce();
+                  const next = textLayersRef.current.filter((l) => l.id !== selected.id);
+                  setTextLayers(next);
                   setSelectedText(null);
                   setDirty(true);
+                  void pushHistory(next, null);
+                  broadcastText(next);
                 }}
               >
                 删除文字层

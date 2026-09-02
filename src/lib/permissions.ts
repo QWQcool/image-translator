@@ -11,7 +11,9 @@ export function isSpaceRole(value: unknown): value is SpaceRole {
 /**
  * 判定当前用户对某个空间的权限。返回 null 表示完全不可见。
  *
- * 优先级：成员表记录 > 空间所有者 > 公开空间的只读旁观者 > 无权限
+ * 开放空间模型：站点内没有私人空间，所有登录用户对所有文件夹都有编辑权；
+ * 只有文件夹创建者保留管理权（改名/改描述/删除文件夹）。
+ * space_members 表保留只是为了兼容历史数据与将来的"文件夹级可见性"，不再参与鉴权。
  */
 export function getSpaceAccess(spaceId: number, userId: number): SpaceAccess | null {
   const space = db
@@ -19,29 +21,12 @@ export function getSpaceAccess(spaceId: number, userId: number): SpaceAccess | n
     .get(spaceId) as { id: number; owner_id: number; visibility: SpaceVisibility } | undefined;
   if (!space) return null;
 
-  const member = db
-    .prepare('SELECT role FROM space_members WHERE space_id = ? AND user_id = ?')
-    .get(spaceId, userId) as { role: string } | undefined;
-
-  let role: SpaceRole;
-  let isMember = true;
-
-  if (member && isSpaceRole(member.role)) {
-    role = member.role;
-  } else if (space.owner_id === userId) {
-    role = 'owner';
-  } else if (space.visibility === 'public') {
-    role = 'viewer';
-    isMember = false;
-  } else {
-    return null;
-  }
-
+  const isOwner = space.owner_id === userId;
   return {
-    role,
-    isMember,
-    canEdit: role === 'owner' || role === 'editor',
-    canManage: role === 'owner',
+    role: isOwner ? 'owner' : 'editor',
+    isMember: isOwner,
+    canEdit: true,
+    canManage: isOwner,
   };
 }
 

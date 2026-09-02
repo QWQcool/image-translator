@@ -179,10 +179,8 @@ export default function SpacesClient() {
                     </div>
 
                     <div className="mt-2 flex items-center justify-between text-[11px] text-ink-400">
-                      <span>
-                        {space.visibility === 'public' ? '🌐 公开（登录用户可见）' : '🔒 仅成员可见'}
-                      </span>
-                      <span>{space.member_count} 成员</span>
+                      <span>🌐 公共文件夹（登录用户可编辑）</span>
+                      <span>创建者：{space.owner_name ?? '—'}</span>
                     </div>
 
                     <div className="mt-3 flex gap-2 opacity-0 transition-opacity group-hover:opacity-100">
@@ -270,33 +268,9 @@ export default function SpacesClient() {
               placeholder="简单说明这个空间收集什么内容"
             />
           </div>
-          <div>
-            <span className="label">可见性</span>
-            <div className="grid grid-cols-2 gap-2">
-              {(
-                [
-                  { value: 'private', title: '仅成员可见', hint: '只有通过邀请加入的人能访问' },
-                  { value: 'public', title: '公开', hint: '所有登录用户可见，但非成员只能查看' },
-                ] as const
-              ).map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setDraft((d) => (d ? { ...d, visibility: option.value } : d))}
-                  className={`rounded-lg border p-2.5 text-left transition-colors ${
-                    draft?.visibility === option.value
-                      ? 'border-sky bg-sky/10'
-                      : 'border-ink-700 hover:border-sky/30'
-                  }`}
-                >
-                  <div className="text-sm font-medium text-ink-100">{option.title}</div>
-                  <div className="mt-0.5 text-[11px] leading-relaxed text-ink-500">
-                    {option.hint}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
+          <p className="rounded-lg bg-sky/10 px-3 py-2 text-[11px] leading-relaxed text-ink-500">
+            🌐 文件夹对所有登录用户开放：人人可看、可加图、可标注。只有创建者能改名或删除。
+          </p>
           {error && <p className="text-sm text-blush">{error}</p>}
         </div>
       </Modal>

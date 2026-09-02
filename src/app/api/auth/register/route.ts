@@ -10,10 +10,11 @@ import { clientIp, consumeRegisterAttempt, verifyInviteCode } from '@/lib/regist
 
 export async function POST(request: Request) {
   const ip = clientIp(request);
-  if (!consumeRegisterAttempt(ip)) {
+  const gate = consumeRegisterAttempt(ip);
+  if (!gate.ok) {
     return NextResponse.json(
-      { error: '注册尝试过于频繁，请一小时后再试' },
-      { status: 429, headers: { 'Retry-After': '3600' } },
+      { error: '注册尝试过于频繁，请稍后再试' },
+      { status: 429, headers: { 'Retry-After': String(gate.retryAfterSec) } },
     );
   }
 

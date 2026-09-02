@@ -10,39 +10,40 @@ export async function GET(request: Request) {
 
   const params = new URL(request.url).searchParams;
   const keyword = (params.get('q') ?? '').trim();
-  // my: 只看自己的；shared: 看所有用户共享出来的素材
-  const scope = params.get('scope') === 'shared' ? 'shared' : 'my';
+  // 开放图库：默认返回全部素材（公共池）。
+  // my/shared 保留是为了兼容旧前端书签，语义分别收窄为"我上传的"/"他人上传的"。
+  const scopeParam = params.get('scope');
+  const scope =
+    scopeParam === 'my' || scopeParam === 'shared' ? scopeParam : ('all' as const);
 
   const SELECT = `SELECT a.*, u.username AS owner_username
                     FROM assets a JOIN users u ON u.id = a.owner_id`;
   const FUZZY = `(a.title LIKE ? OR a.original_name LIKE ? OR IFNULL(a.source_author,'') LIKE ?)`;
+  const kwArgs = [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`];
+  const ORDER = `ORDER BY a.created_at DESC, a.id DESC`;
 
-  const rows =
-    scope === 'shared'
-      ? ((keyword
-          ? db
-              .prepare(
-                `${SELECT} WHERE a.visibility = 'shared' AND ${FUZZY}
-                  ORDER BY a.created_at DESC, a.id DESC`,
-              )
-              .all(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
-          : db
-              .prepare(
-                `${SELECT} WHERE a.visibility = 'shared' ORDER BY a.created_at DESC, a.id DESC`,
-              )
-              .all()) as Asset[])
-      : ((keyword
-          ? db
-              .prepare(
-                `${SELECT} WHERE a.owner_id = ? AND ${FUZZY}
-                  ORDER BY a.created_at DESC, a.id DESC`,
-              )
-              .all(user.id, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`)
-          : db
-              .prepare(
-                `${SELECT} WHERE a.owner_id = ? ORDER BY a.created_at DESC, a.id DESC`,
-              )
-              .all(user.id)) as Asset[]);
+  let rows: Asset[];
+  if (scope === 'my') {
+    rows = (
+      keyword
+        ? db
+            .prepare(`${SELECT} WHERE a.owner_id = ? AND ${FUZZY} ${ORDER}`)
+            .all(user.id, ...kwArgs)
+        : db.prepare(`${SELECT} WHERE a.owner_id = ? ${ORDER}`).all(user.id)
+    ) as Asset[];
+  } else if (scope === 'shared') {
+    rows = (
+      keyword
+        ? db.prepare(`${SELECT} WHERE a.owner_id <> ? AND ${FUZZY} ${ORDER}`).all(user.id, ...kwArgs)
+        : db.prepare(`${SELECT} WHERE a.owner_id <> ? ${ORDER}`).all(user.id)
+    ) as Asset[];
+  } else {
+    rows = (
+      keyword
+        ? db.prepare(`${SELECT} WHERE ${FUZZY} ${ORDER}`).all(...kwArgs)
+        : db.prepare(`${SELECT} ${ORDER}`).all()
+    ) as Asset[];
+  }
 
   return NextResponse.json({ assets: rows });
 }
@@ -62,9 +63,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: '请求体格式错误' }, { status: 400 });
   }
 
-  // 勾选后素材进入共享图库，其他登录用户都能看到并取用
-  const shared = form.get('shared') === 'true';
-  const visibility = shared ? 'shared' : 'private';
+  // 开放图库：上传即进入公共池，所有人可见可用（shared 字段保留只为兼容旧表单）
+  const visibility = 'shared';
 
   const files = form.getAll('files').filter((f): f is File => f instanceof File && f.size > 0);
   if (files.length === 0) {
@@ -144,9 +144,11 @@ export async function DELETE(request: Request) {
   }
 
   const placeholders = ids.map(() => '?').join(',');
+  // 开放图库：任何人都可以清理公共池里的图。删除是硬删除（文件一起删），
+  // 所以响应里带回"被多少个文件夹引用"，前端用它做二次确认。
   const targets = db
-    .prepare(`SELECT id, filename, thumb_filename FROM assets WHERE owner_id = ? AND id IN (${placeholders})`)
-    .all(user.id, ...ids) as { id: number; filename: string; thumb_filename: string | null }[];
+    .prepare(`SELECT id, owner_id, filename, thumb_filename FROM assets WHERE id IN (${placeholders})`)
+    .all(...ids) as { id: number; owner_id: number; filename: string; thumb_filename: string | null }[];
 
   // 删除会级联清掉所有空间里的引用，先算出来告诉用户影响面
   const usage =
@@ -164,5 +166,9 @@ export async function DELETE(request: Request) {
   // 外键 ON DELETE CASCADE 已清理 space_items 与 annotations
   await Promise.all(targets.map((a) => deleteImageFiles(a.filename, a.thumb_filename)));
 
-  return NextResponse.json({ deleted: targets.length, detachedFromSpaces: usage.n });
+  return NextResponse.json({
+    deleted: targets.length,
+    detachedFromSpaces: usage.n,
+    notOwned: targets.filter((a) => a.owner_id !== user.id).length,
+  });
 }

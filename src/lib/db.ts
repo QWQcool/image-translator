@@ -92,6 +92,39 @@ CREATE TABLE IF NOT EXISTS annotations (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_item ON annotations(item_id, order_index);
+
+-- 注册等敏感接口的限流计数。放库里而不是进程内存，
+-- 多副本部署 / dev 模式模块重载都不会让计数被清零。
+CREATE TABLE IF NOT EXISTS rate_limits (
+  bucket       TEXT PRIMARY KEY,
+  window_start INTEGER NOT NULL,
+  count        INTEGER NOT NULL,
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 协作房间：一张图一个房间。默认上锁，持有人点「共享编辑」后才开广播。
+-- expires_at 是持有人心跳续期时间，超时任何人都能接管锁。
+CREATE TABLE IF NOT EXISTS edit_rooms (
+  item_id    INTEGER PRIMARY KEY REFERENCES space_items(id) ON DELETE CASCADE,
+  holder_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  shared     INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 房间操作日志：实时协作的事件源。
+-- kind = paint(矢量笔画) / text(文字层快照) / annotations(标注快照) / meta(锁与共享状态)
+-- 客户端按 seq 回放；草稿保存会推进 paint_epoch，旧 epoch 的笔画日志可清理。
+CREATE TABLE IF NOT EXISTS room_ops (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id    INTEGER NOT NULL REFERENCES space_items(id) ON DELETE CASCADE,
+  seq        INTEGER NOT NULL,
+  author_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL,
+  payload    TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_room_ops_item ON room_ops(item_id, seq);
 `;
 
 function createConnection(): Database.Database {
@@ -153,6 +186,17 @@ function migrate(database: Database.Database): void {
   if (!latestSpaceColumns.some((column) => column.name === 'lp_phrases')) {
     database.exec(`ALTER TABLE spaces ADD COLUMN lp_phrases TEXT`);
   }
+
+  // 开放空间改造：历史遗留的私人空间/私人素材一次性转成公共，
+  // 之后 API 层也不再接受 private（幂等，重复执行无副作用）。
+  database.exec(`UPDATE spaces SET visibility = 'public' WHERE visibility <> 'public'`);
+  database.exec(`UPDATE assets SET visibility = 'shared' WHERE visibility <> 'shared'`);
+
+  // 房间垃圾回收：过期锁直接清掉，两周前的操作日志丢弃（防表无限增长）
+  database.exec(`DELETE FROM edit_rooms WHERE expires_at < (strftime('%s','now') * 1000 - 60000)`);
+  database.exec(
+    `DELETE FROM room_ops WHERE created_at < datetime('now', '-14 days')`,
+  );
 }
 
 // Next.js 开发模式下模块会被反复重载，用 globalThis 缓存连接避免句柄泄漏。
