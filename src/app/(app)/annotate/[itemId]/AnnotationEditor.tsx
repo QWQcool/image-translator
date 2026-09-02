@@ -332,7 +332,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               {entry.key && <span className="ml-1 text-[10px] opacity-60">{entry.key}</span>}
             </button>
           ))}
-          <button type="button" className="seg-btn opacity-50" disabled title="第 E 阶段接入">
+          <button type="button" className="seg-btn" onClick={() => router.push(`/typeset/${itemId}`)}>
             嵌字
           </button>
         </div>

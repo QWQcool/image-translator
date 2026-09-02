@@ -333,11 +333,11 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                   <Link
                     href={`/annotate/${item.id}`}
                     className="btn-primary flex-1 py-1 text-xs"
-                    onClick={(event) => {
-                      if (!canEdit) event.preventDefault();
-                    }}
                   >
                     {canEdit ? '标注' : '查看'}
+                  </Link>
+                  <Link href={`/typeset/${item.id}`} className="btn-ghost flex-1 py-1 text-xs">
+                    嵌字
                   </Link>
                   {canEdit && (
                     <button
