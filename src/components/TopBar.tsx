@@ -10,7 +10,15 @@ const NAV = [
   { href: '/ai', label: 'AI 设置' },
 ];
 
-export default function TopBar({ username }: { username: string }) {
+export default function TopBar({
+  username,
+  displayName,
+  avatarUrl,
+}: {
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+}) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -48,7 +56,22 @@ export default function TopBar({ username }: { username: string }) {
         </nav>
 
         <div className="ml-auto flex items-center gap-3">
-          <span className="hidden text-sm text-ink-400 sm:inline">{username}</span>
+          <Link
+            href="/profile"
+            className={`flex items-center gap-2 rounded-lg px-2 py-1 transition-colors ${
+              pathname.startsWith('/profile')
+                ? 'bg-sky/10'
+                : 'hover:bg-paper'
+            }`}
+            title="个人空间"
+          >
+            <img
+              src={avatarUrl ?? '/mascot/mascot-bust.png'}
+              alt=""
+              className="h-7 w-7 rounded-full object-cover object-top ring-2 ring-halo/70"
+            />
+            <span className="hidden text-sm text-ink-400 sm:inline">{displayName}</span>
+          </Link>
           <button type="button" onClick={logout} className="btn-ghost px-3 py-1.5 text-xs">
             退出
           </button>

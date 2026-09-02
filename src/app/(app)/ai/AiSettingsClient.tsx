@@ -74,7 +74,8 @@ export default function AiSettingsClient() {
         <h1 className="font-display text-xl text-ink-100">AI 设置</h1>
         <p className="mt-1 text-sm text-ink-400">
           填入你自己的 OpenAI 兼容服务（DeepSeek / GPT / GLM / Qwen…）。
-          OCR 走视觉对话模型，去字走图像编辑接口。Key 保存在服务器 data/ai.json（不进仓库），页面上只显示尾 4 位。
+          配置按账号各自保存，互不可见；谁配置了 token，谁就能用 AI 识别与 AI 去字。
+          Key 存在服务器数据库（不进仓库），页面上只显示尾 4 位。
         </p>
       </div>
 

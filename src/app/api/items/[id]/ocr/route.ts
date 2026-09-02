@@ -114,8 +114,8 @@ export async function POST(request: Request, { params }: Params) {
   const filePath = path.join(IMAGE_DIRS.IMAGES_DIR, item.filename);
   const image = await fs.readFile(filePath);
 
-  // 优先走创作者配置的 AI 视觉模型；没配置或失败再退回本机 sidecar
-  const aiConfig = await readAiConfig();
+  // 优先走"我自己"配置的 AI 视觉模型；没配置或失败再退回本机 sidecar
+  const aiConfig = readAiConfig(user.id);
   let blocks: OcrBlock[] | null = null;
   let engine: 'ai' | 'sidecar' = 'sidecar';
 
@@ -136,8 +136,9 @@ export async function POST(request: Request, { params }: Params) {
     if (!healthy) {
       return NextResponse.json(
         {
-          error:
-            '没有可用的识别引擎：既没配置 AI 视觉模型，本机识别进程也未启动。去「AI 设置」填一个 OpenAI 兼容的视觉模型，或启动 sidecar。',
+          error: aiConfigured(aiConfig, 'ocr')
+            ? 'AI 识别调用失败（检查 AI 设置里的 Base URL / Key / 模型名），本机识别进程也未启动。'
+            : '没有可用的识别引擎：去「AI 设置」填入你自己的 OpenAI 兼容视觉模型 token，或启动本机 sidecar。',
           sidecar: sidecarUrlHint(),
         },
         { status: 503 },

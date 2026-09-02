@@ -1,18 +1,12 @@
 import { NextResponse } from 'next/server';
+import { aiConfigured, maskKey, readAiConfig, writeAiConfig, type AiConfig } from '@/lib/ai';
 import { getCurrentUser } from '@/lib/auth';
-import {
-  aiConfigured,
-  maskKey,
-  readAiConfig,
-  writeAiConfig,
-  type AiConfig,
-} from '@/lib/ai';
 
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
 
-  const config = await readAiConfig();
+  const config = readAiConfig(user.id);
   return NextResponse.json({
     config: {
       baseUrl: config.baseUrl,
@@ -26,8 +20,8 @@ export async function GET() {
 }
 
 /**
- * 保存配置。apiKey 传空字符串 = 不改动现有 key，传 "clear" = 清除。
- * 开放空间：任何登录用户都能配置（互相认识的团队）。
+ * 保存"我自己"的 AI 配置：每人一份，互相看不见对方的 key。
+ * apiKey 传空字符串 = 不改动现有 key，传 "clear" = 清除。
  */
 export async function PUT(request: Request) {
   const user = await getCurrentUser();
@@ -45,7 +39,7 @@ export async function PUT(request: Request) {
     return NextResponse.json({ error: '请求体格式错误' }, { status: 400 });
   }
 
-  const current = await readAiConfig();
+  const current = readAiConfig(user.id);
   const baseUrl = (body.baseUrl ?? current.baseUrl).trim().replace(/\/+$/, '');
   const ocrModel = (body.ocrModel ?? current.ocrModel).trim();
   const imageModel = (body.imageModel ?? current.imageModel).trim();
@@ -59,7 +53,7 @@ export async function PUT(request: Request) {
   }
 
   const config: AiConfig = { baseUrl, apiKey, ocrModel, imageModel };
-  await writeAiConfig(config);
+  writeAiConfig(user.id, config);
 
   return NextResponse.json({
     config: {

@@ -69,9 +69,17 @@ export async function getCurrentUser(): Promise<User | null> {
   if (!Number.isInteger(uid) || uid <= 0) return null;
 
   const user = db
-    .prepare('SELECT id, username, created_at FROM users WHERE id = ?')
+    .prepare(
+      'SELECT id, username, display_name, avatar_filename, created_at FROM users WHERE id = ?',
+    )
     .get(uid) as User | undefined;
   return user ?? null;
+}
+
+/** 对外展示名：昵称为空时回退到注册用户名 */
+export function displayNameOf(user: { username: string; display_name: string | null }): string {
+  const name = (user.display_name ?? '').trim();
+  return name || user.username;
 }
 
 export function validateUsername(username: string): string | null {

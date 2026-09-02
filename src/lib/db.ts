@@ -192,6 +192,27 @@ function migrate(database: Database.Database): void {
   database.exec(`UPDATE spaces SET visibility = 'public' WHERE visibility <> 'public'`);
   database.exec(`UPDATE assets SET visibility = 'shared' WHERE visibility <> 'shared'`);
 
+  // 个人空间：昵称与头像（username 永远是注册账号名，日志与记录都用它）
+  const userColumns = database.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  if (!userColumns.some((column) => column.name === 'display_name')) {
+    database.exec(`ALTER TABLE users ADD COLUMN display_name TEXT`);
+  }
+  if (!userColumns.some((column) => column.name === 'avatar_filename')) {
+    database.exec(`ALTER TABLE users ADD COLUMN avatar_filename TEXT`);
+  }
+
+  // 每个用户自己的 AI 服务配置（OpenAI 兼容）。谁填了 token 谁能用 AI 能力。
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS ai_configs (
+      user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      base_url    TEXT NOT NULL DEFAULT '',
+      api_key     TEXT NOT NULL DEFAULT '',
+      ocr_model   TEXT NOT NULL DEFAULT '',
+      image_model TEXT NOT NULL DEFAULT '',
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   // 房间垃圾回收：过期锁直接清掉，两周前的操作日志丢弃（防表无限增长）
   database.exec(`DELETE FROM edit_rooms WHERE expires_at < (strftime('%s','now') * 1000 - 60000)`);
   database.exec(

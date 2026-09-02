@@ -76,7 +76,7 @@ export default function AuthForm({ nextPath }: { nextPath: string }) {
       <section className="auth-enter flex flex-1 flex-col items-center justify-center px-6 pb-2 pt-10 text-center lg:items-start lg:px-12 lg:py-16 lg:text-left">
         <img
           src="/mascot/mascot-stand.png"
-          alt="图译空间吉祥物：短发学院翻译员"
+          alt="图译空间吉祥物：戴着蓝色光环的 AI 翻译助手"
           className="h-44 w-auto object-contain drop-shadow-sm sm:h-56 lg:h-[26rem]"
         />
         <h1 className="font-display mt-4 text-3xl tracking-wide text-ink-100 sm:text-4xl">图译空间</h1>

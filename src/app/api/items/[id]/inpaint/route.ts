@@ -103,10 +103,10 @@ export async function POST(request: Request, { params }: Params) {
   let engine: 'lama' | 'telea' | 'ai' = 'telea';
   const mask = await maskPng(width, height, boxes);
 
-  // 引擎优先级：sidecar LaMa（本地、确定性最好）> AI 生成式（用户自己的 token）> telea（零依赖兜底）
+  // 引擎优先级：sidecar LaMa（本地、确定性最好）> AI 生成式（当前用户自己的 token）> telea（零依赖兜底）
   let aiPaint: Buffer | null = null;
   if (!(await sidecarHealth())) {
-    const aiConfig = await readAiConfig();
+    const aiConfig = readAiConfig(user.id);
     if (aiConfigured(aiConfig, 'inpaint')) {
       const size = width >= height ? '1536x1024' : '1024x1536';
       const padded = await sharp(original).rotate().png().toBuffer();

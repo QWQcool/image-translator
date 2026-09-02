@@ -1,6 +1,10 @@
 export type User = {
   id: number;
   username: string;
+  /** 对外展示的名字（个人空间里改的），可空；日志/记录一律还是 username */
+  display_name: string | null;
+  /** data/avatars/ 下的头像文件名，可空 */
+  avatar_filename: string | null;
   created_at: string;
 };
 

@@ -1,10 +1,9 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { DATA_DIR } from './db';
+import { db } from './db';
 
 /**
- * AI 网关配置：创作者填自己的 OpenAI 兼容服务（DeepSeek / GPT / GLM / Qwen…）。
- * 存 data/ai.json（data/ 已在 .gitignore），前端永远拿不到完整 key。
+ * AI 网关配置：每个用户填自己的 OpenAI 兼容服务（DeepSeek / GPT / GLM / Qwen…）。
+ * 存在 ai_configs 表里，谁配置了 token 谁能用 AI 能力；key 永不下发前端。
+ * 日志与记录（created_by 之类）仍用注册用户名，与 AI 配置无关。
  */
 export type AiConfig = {
   /** 例如 https://api.deepseek.com/v1 */
@@ -16,27 +15,40 @@ export type AiConfig = {
   imageModel: string;
 };
 
-const AI_PATH = path.join(DATA_DIR, 'ai.json');
-const DEFAULTS: AiConfig = { baseUrl: '', apiKey: '', ocrModel: '', imageModel: '' };
+type AiConfigRow = {
+  user_id: number;
+  base_url: string;
+  api_key: string;
+  ocr_model: string;
+  image_model: string;
+};
 
-export async function readAiConfig(): Promise<AiConfig> {
-  try {
-    const raw = await fs.readFile(AI_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as Partial<AiConfig>;
-    return {
-      baseUrl: String(parsed.baseUrl ?? '').replace(/\/+$/, ''),
-      apiKey: String(parsed.apiKey ?? ''),
-      ocrModel: String(parsed.ocrModel ?? ''),
-      imageModel: String(parsed.imageModel ?? ''),
-    };
-  } catch {
-    return { ...DEFAULTS };
-  }
+export function readAiConfig(userId: number): AiConfig {
+  const row = db
+    .prepare(
+      'SELECT user_id, base_url, api_key, ocr_model, image_model FROM ai_configs WHERE user_id = ?',
+    )
+    .get(userId) as AiConfigRow | undefined;
+  if (!row) return { baseUrl: '', apiKey: '', ocrModel: '', imageModel: '' };
+  return {
+    baseUrl: row.base_url.replace(/\/+$/, ''),
+    apiKey: row.api_key,
+    ocrModel: row.ocr_model,
+    imageModel: row.image_model,
+  };
 }
 
-export async function writeAiConfig(config: AiConfig): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(AI_PATH, JSON.stringify(config, null, 2), 'utf8');
+export function writeAiConfig(userId: number, config: AiConfig): void {
+  db.prepare(
+    `INSERT INTO ai_configs (user_id, base_url, api_key, ocr_model, image_model, updated_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(user_id) DO UPDATE SET
+         base_url = excluded.base_url,
+         api_key = excluded.api_key,
+         ocr_model = excluded.ocr_model,
+         image_model = excluded.image_model,
+         updated_at = excluded.updated_at`,
+  ).run(userId, config.baseUrl, config.apiKey, config.ocrModel, config.imageModel);
 }
 
 /** 对外只暴露尾 4 位，避免整段 key 泄露到前端 */
