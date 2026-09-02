@@ -74,6 +74,7 @@ function paint(
 
 export default function AnnotationCanvas({
   imageSrc,
+  previewSrc,
   imageWidth,
   imageHeight,
   annotations,
@@ -84,6 +85,7 @@ export default function AnnotationCanvas({
   readOnly,
 }: {
   imageSrc: string;
+  previewSrc?: string;
   imageWidth: number;
   imageHeight: number;
   annotations: DraftAnnotation[];
@@ -119,11 +121,28 @@ export default function AnnotationCanvas({
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
 
+  const originalImgRef = useRef<HTMLImageElement | null>(null);
+
   useEffect(() => {
-    const element = new Image();
-    element.onload = () => setImg(element);
-    element.src = imageSrc;
-  }, [imageSrc]);
+    let cancelled = false;
+    originalImgRef.current = null;
+
+    function load(src: string, isOriginal: boolean) {
+      const element = new Image();
+      element.onload = () => {
+        if (cancelled) return;
+        if (isOriginal) originalImgRef.current = element;
+        setImg(element);
+      };
+      element.src = src;
+    }
+
+    if (previewSrc) load(previewSrc, false);
+    load(imageSrc, true);
+    return () => {
+      cancelled = true;
+    };
+  }, [imageSrc, previewSrc]);
 
   /** 计算图片适应视口后的基准显示尺寸 */
   const fitToViewport = useCallback(() => {
@@ -398,7 +417,8 @@ export default function AnnotationCanvas({
   }
 
   function exportPng() {
-    if (!img) return;
+    const source = originalImgRef.current ?? img;
+    if (!source) return;
     const canvas = document.createElement('canvas');
     canvas.width = imageWidth;
     canvas.height = imageHeight;
@@ -406,7 +426,7 @@ export default function AnnotationCanvas({
     if (!ctx) return;
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, imageWidth, imageHeight);
-    paint(ctx, img, imageWidth, imageHeight, annotations);
+    paint(ctx, source, imageWidth, imageHeight, annotations);
     canvas.toBlob((blob) => {
       if (!blob) return;
       const url = URL.createObjectURL(blob);

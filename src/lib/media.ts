@@ -1,11 +1,19 @@
+export function originalUrl(filename: string): string {
+  return `/api/media/original/${encodeURIComponent(filename)}`;
+}
+
+/** @deprecated 使用 originalUrl；保留别名以免旧调用处漏改 */
 export function imageUrl(filename: string): string {
-  return `/api/media/images/${encodeURIComponent(filename)}`;
+  return originalUrl(filename);
 }
 
 export function thumbUrl(thumbFilename: string | null, filename: string): string {
-  return thumbFilename
-    ? `/api/media/thumbs/${encodeURIComponent(thumbFilename)}`
-    : imageUrl(filename);
+  return `/api/media/thumb/${encodeURIComponent(thumbFilename || filename)}`;
+}
+
+export function previewUrl(filename: string): string {
+  const stem = filename.replace(/\.[^.]+$/, '');
+  return `/api/media/preview/${encodeURIComponent(`${stem}.webp`)}`;
 }
 
 export function formatBytes(bytes: number): string {

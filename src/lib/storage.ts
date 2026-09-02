@@ -6,6 +6,7 @@ import { DATA_DIR } from './db';
 
 export const IMAGES_DIR = path.join(DATA_DIR, 'images');
 const THUMBS_DIR = path.join(DATA_DIR, 'thumbs');
+const PREVIEWS_DIR = path.join(DATA_DIR, 'previews');
 
 const EXT_BY_MIME: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -18,9 +19,8 @@ const EXT_BY_MIME: Record<string, string> = {
 
 export const SUPPORTED_MIME_TYPES = Object.keys(EXT_BY_MIME);
 
-/** 原图最长边上限。标注用途不需要 4K 原图，这一项直接决定存储成本。 */
-const MAX_EDGE = 1800;
 const THUMB_WIDTH = 520;
+const PREVIEW_EDGE = 2000;
 
 export type StoredImage = {
   filename: string;
@@ -28,13 +28,18 @@ export type StoredImage = {
   width: number;
   height: number;
   sizeBytes: number;
-  /** 实际落盘的格式，可能与上传格式不同（统一转 WebP） */
+  /** 原文件 MIME，与上传格式一致 */
   storedMimeType: string;
 };
+
+function stemOf(filename: string): string {
+  return filename.replace(/\.[^.]+$/, '');
+}
 
 export async function ensureImageDirs(): Promise<void> {
   await fs.mkdir(IMAGES_DIR, { recursive: true });
   await fs.mkdir(THUMBS_DIR, { recursive: true });
+  await fs.mkdir(PREVIEWS_DIR, { recursive: true });
 }
 
 /**
@@ -65,67 +70,56 @@ export class ConcurrencyLimiter {
 export const imageLimiter = new ConcurrencyLimiter(2);
 
 /**
- * 落盘一张图片：压缩原图 + 生成缩略图。
- *
- * 原图统一转为 WebP（GIF 动图除外，保持原格式以免丢失动画），
- * 并限制最长边。实测可把平均体积压到原始 JPEG 的 40~50%，
- * 这是整个方案里性价比最高的存储/流量优化手段。
+ * 落盘一张图片：原文件原样保存，另生成网格缩略图和编辑器用预览图。
  */
 export async function storeImage(input: Buffer, mimeType: string): Promise<StoredImage> {
   await ensureImageDirs();
-  if (!EXT_BY_MIME[mimeType]) {
+  const ext = EXT_BY_MIME[mimeType];
+  if (!ext) {
     throw new Error(`不支持的图片格式: ${mimeType}`);
   }
 
   const id = crypto.randomUUID();
-  const isGif = mimeType === 'image/gif';
-  const filename = `${id}.${isGif ? 'gif' : 'webp'}`;
+  const filename = `${id}.${ext}`;
   const thumbFilename = `${id}.webp`;
+  const previewFilename = `${id}.webp`;
 
-  const meta = await sharp(input, { animated: false }).metadata();
-  const sourceWidth = meta.width ?? 0;
-  const sourceHeight = meta.height ?? 0;
+  await fs.writeFile(path.join(IMAGES_DIR, filename), input);
 
-  let width = sourceWidth;
-  let height = sourceHeight;
-  let storedMimeType: string;
+  const meta = await sharp(input, { animated: false, failOn: 'none' }).rotate().metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
 
-  if (isGif) {
-    // 动图不做有损转换，直接落盘原文件
-    await fs.writeFile(path.join(IMAGES_DIR, filename), input);
-    storedMimeType = 'image/gif';
-  } else {
-    const pipeline = sharp(input)
-      .rotate()
-      .resize({
-        width: MAX_EDGE,
-        height: MAX_EDGE,
-        fit: 'inside',
-        withoutEnlargement: true,
-      })
-      .webp({ quality: 82, effort: 4 });
-    const output = await pipeline.toBuffer({ resolveWithObject: true });
-    await fs.writeFile(path.join(IMAGES_DIR, filename), output.data);
-    width = output.info.width;
-    height = output.info.height;
-    storedMimeType = 'image/webp';
-  }
-
-  await sharp(input, { animated: false })
+  await sharp(input, { animated: false, failOn: 'none' })
     .rotate()
     .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
     .webp({ quality: 78 })
     .toFile(path.join(THUMBS_DIR, thumbFilename));
+
+  try {
+    await sharp(input, { animated: false, failOn: 'none' })
+      .rotate()
+      .resize({
+        width: PREVIEW_EDGE,
+        height: PREVIEW_EDGE,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp({ quality: 85 })
+      .toFile(path.join(PREVIEWS_DIR, previewFilename));
+  } catch {
+    // 预览图失败不影响原图落盘
+  }
 
   const stat = await fs.stat(path.join(IMAGES_DIR, filename));
 
   return {
     filename,
     thumbFilename,
-    width: width || sourceWidth,
-    height: height || sourceHeight,
+    width,
+    height,
     sizeBytes: stat.size,
-    storedMimeType,
+    storedMimeType: mimeType === 'image/jpg' ? 'image/jpeg' : mimeType,
   };
 }
 
@@ -133,10 +127,13 @@ export async function deleteImageFiles(
   filename: string,
   thumbFilename: string | null,
 ): Promise<void> {
+  const stem = stemOf(filename);
   await safeUnlink(path.join(IMAGES_DIR, filename));
   if (thumbFilename) {
     await safeUnlink(path.join(THUMBS_DIR, thumbFilename));
   }
+  await safeUnlink(path.join(THUMBS_DIR, `${stem}.webp`));
+  await safeUnlink(path.join(PREVIEWS_DIR, `${stem}.webp`));
 }
 
 async function safeUnlink(target: string): Promise<void> {
@@ -147,4 +144,4 @@ async function safeUnlink(target: string): Promise<void> {
   }
 }
 
-export const IMAGE_DIRS = { IMAGES_DIR, THUMBS_DIR };
+export const IMAGE_DIRS = { IMAGES_DIR, THUMBS_DIR, PREVIEWS_DIR };

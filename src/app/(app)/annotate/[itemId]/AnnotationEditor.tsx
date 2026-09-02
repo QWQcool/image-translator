@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
-import { imageUrl } from '@/lib/media';
+import { originalUrl, previewUrl } from '@/lib/media';
 import { newKey, type DraftAnnotation } from '@/lib/annotation';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
 import AnnotationCanvas from './AnnotationCanvas';
@@ -232,7 +232,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
 
       <div className="flex min-h-0 flex-1 gap-5">
         <AnnotationCanvas
-          imageSrc={imageUrl(asset.filename)}
+          imageSrc={originalUrl(asset.filename)}
+          previewSrc={previewUrl(asset.filename)}
           imageWidth={imageWidth}
           imageHeight={imageHeight}
           annotations={annotations}
