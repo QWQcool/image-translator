@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { cookies } from 'next/headers';
+import { NextResponse } from 'next/server';
 import { SignJWT, jwtVerify } from 'jose';
 import { db } from './db';
 import type { User } from './types';
@@ -70,10 +71,27 @@ export async function getCurrentUser(): Promise<User | null> {
 
   const user = db
     .prepare(
-      'SELECT id, username, display_name, avatar_filename, created_at FROM users WHERE id = ?',
+      'SELECT id, username, display_name, avatar_filename, is_admin, created_at FROM users WHERE id = ?',
     )
     .get(uid) as User | undefined;
   return user ?? null;
+}
+
+/**
+ * 管理员判定：users.is_admin（0/1）。站点唯一保留的权限差异——
+ * 管理员可生成/作废邀请码，与空间权限无关（空间权限已扁平化）。
+ * 每次请求都基于 getCurrentUser() 的 DB 查询结果判定，改库即时生效。
+ */
+export function isAdminUser(user: User | null | undefined): boolean {
+  return user?.is_admin === 1;
+}
+
+/** 管理员接口统一守卫：非管理员返回 403 响应，管理员返回 null 放行 */
+export function adminForbidden(user: User | null): NextResponse | null {
+  if (!isAdminUser(user)) {
+    return NextResponse.json({ error: '仅管理员可执行此操作' }, { status: 403 });
+  }
+  return null;
 }
 
 /** 对外展示名：昵称为空时回退到注册用户名 */

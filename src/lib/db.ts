@@ -343,6 +343,29 @@ function migrate(database: Database.Database): void {
   database.exec(
     `DELETE FROM room_ops WHERE created_at < datetime('now', '-14 days')`,
   );
+
+  // 管理员标记（0/1）：站点唯一保留的权限差异——管理员可发放邀请码，与空间无关。
+  // 迁移时一次性把最早注册的用户（id 最小）设为管理员，之后不再自动变更。
+  if (!userColumns.some((column) => column.name === 'is_admin')) {
+    database.exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`);
+    database.exec(
+      `UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)`,
+    );
+  }
+
+  // 邀请码表：管理员在页面上生成/作废，注册时消费（env INVITE_CODE 仍是本地便捷通道）。
+  // used_by/used_at 在码被注册消耗时写入，明文 code 全库唯一。
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS invite_codes (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      code       TEXT NOT NULL UNIQUE,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      used_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      used_at    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes(code);
+  `);
 }
 
 // Next.js 开发模式下模块会被反复重载，用 globalThis 缓存连接避免句柄泄漏。

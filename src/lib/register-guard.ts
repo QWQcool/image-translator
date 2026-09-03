@@ -126,23 +126,66 @@ export function consumeRegisterAttempt(ip: string): RateLimitResult {
   return consumeRateLimit('register:global', MAX_GLOBAL);
 }
 
-export function verifyInviteCode(
-  input: string | undefined,
-): { ok: true } | { ok: false; error: string } {
-  const expected = process.env.INVITE_CODE ?? '';
-  if (!expected) {
-    return { ok: false, error: '当前未开放注册' };
-  }
+/**
+ * 邀请码校验结果。
+ * - mode 'env'：命中环境变量 INVITE_CODE（本地便捷通道，可反复使用）
+ * - mode 'table'：命中 invite_codes 表中未使用的码，注册成功时需调用
+ *   consumeInviteCode 在同一事务内标记 used_by/used_at
+ */
+export type InviteCheck =
+  | { ok: true; mode: 'env' }
+  | { ok: true; mode: 'table'; tableCodeId: number }
+  | { ok: false; error: string };
 
+/**
+ * 校验邀请码：env INVITE_CODE 命中（本地便捷通道，保留）或
+ * invite_codes 表中未使用的码，二选一。
+ * 必须在注册事务内调用，防止两个并发请求同时通过校验、重复消费同一个码。
+ */
+export function checkInviteCode(input: string | undefined): InviteCheck {
   const provided = (input ?? '').trim();
   if (!provided) {
     return { ok: false, error: '请填写邀请码' };
   }
 
-  const left = crypto.createHash('sha256').update(provided).digest();
-  const right = crypto.createHash('sha256').update(expected).digest();
-  if (!crypto.timingSafeEqual(left, right)) {
-    return { ok: false, error: '邀请码无效' };
+  // 通道一：环境变量 INVITE_CODE（本地部署便捷通道，保留，可反复使用）
+  const expected = process.env.INVITE_CODE ?? '';
+  if (expected) {
+    const left = crypto.createHash('sha256').update(provided).digest();
+    const right = crypto.createHash('sha256').update(expected).digest();
+    if (crypto.timingSafeEqual(left, right)) {
+      return { ok: true, mode: 'env' };
+    }
   }
-  return { ok: true };
+
+  // 通道二：管理员发放的邀请码（表内未使用的码）
+  const row = db
+    .prepare('SELECT id FROM invite_codes WHERE code = ? AND used_by IS NULL')
+    .get(provided) as { id: number } | undefined;
+  if (row) {
+    return { ok: true, mode: 'table', tableCodeId: row.id };
+  }
+
+  // env 未配置且表码也没命中：沿用「未开放注册」的旧文案，避免泄露部署细节
+  if (!expected) {
+    return { ok: false, error: '当前未开放注册' };
+  }
+  return { ok: false, error: '邀请码无效' };
+}
+
+/**
+ * 消费表内邀请码：标记 used_by/used_at。
+ * 必须与 INSERT users 在同一事务内执行；changes !== 1 说明码刚被并发抢用，整体回滚。
+ */
+export function consumeInviteCode(codeId: number, userId: number): void {
+  const result = db
+    .prepare(
+      `UPDATE invite_codes
+          SET used_by = ?, used_at = datetime('now')
+        WHERE id = ? AND used_by IS NULL`,
+    )
+    .run(userId, codeId);
+  if (result.changes !== 1) {
+    throw new Error('INVITE_CODE_CONSUMED');
+  }
 }

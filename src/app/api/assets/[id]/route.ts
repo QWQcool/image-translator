@@ -30,9 +30,10 @@ export async function PATCH(request: Request, { params }: Params) {
   if (!title) return NextResponse.json({ error: '名称不能为空' }, { status: 400 });
   if (title.length > 200) return NextResponse.json({ error: '名称过长' }, { status: 400 });
 
+  // 权限扁平化：任何登录用户都可给共享图库里的素材改名（不再限上传者本人）
   const result = db
-    .prepare('UPDATE assets SET title = ? WHERE id = ? AND owner_id = ?')
-    .run(title, id, user.id);
+    .prepare('UPDATE assets SET title = ? WHERE id = ? AND deleted_at IS NULL')
+    .run(title, id);
   if (result.changes === 0) return NextResponse.json({ error: '图片不存在' }, { status: 404 });
 
   logOp(user.id, 'update', 'asset', id, title, '素材改名');

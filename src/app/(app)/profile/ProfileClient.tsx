@@ -2,12 +2,14 @@
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
+import InviteAdminCard from './InviteAdminCard';
 
 type Profile = {
   id: number;
   username: string;
   display_name: string | null;
   avatar_url: string | null;
+  is_admin: boolean;
   created_at: string;
 };
 
@@ -180,6 +182,9 @@ export default function ProfileClient() {
           </p>
         )}
       </div>
+
+      {/* 权限扁平化后唯一保留的特权：管理员发放注册邀请码 */}
+      {profile?.is_admin && <InviteAdminCard />}
     </div>
   );
 }

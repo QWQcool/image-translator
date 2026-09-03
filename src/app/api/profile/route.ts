@@ -10,6 +10,7 @@ function profileOf(user: {
   username: string;
   display_name: string | null;
   avatar_filename: string | null;
+  is_admin: number;
   created_at: string;
 }) {
   return {
@@ -17,6 +18,8 @@ function profileOf(user: {
     username: user.username,
     display_name: (user.display_name ?? '').trim() || null,
     avatar_url: user.avatar_filename ? `/api/profile/avatar/${user.avatar_filename}` : null,
+    /** 管理员标记：仅用于前端决定是否渲染「邀请码管理」卡片，权限判定在接口层 */
+    is_admin: user.is_admin === 1,
     created_at: user.created_at,
   };
 }
@@ -54,7 +57,7 @@ export async function PATCH(request: Request) {
   }
 
   const updated = db
-    .prepare('SELECT id, username, display_name, avatar_filename, created_at FROM users WHERE id = ?')
+    .prepare('SELECT id, username, display_name, avatar_filename, is_admin, created_at FROM users WHERE id = ?')
     .get(user.id) as Parameters<typeof profileOf>[0];
   return NextResponse.json({ profile: profileOf(updated), removedAvatar });
 }
@@ -94,7 +97,7 @@ export async function POST(request: Request) {
   await deleteAvatar(user.avatar_filename);
 
   const updated = db
-    .prepare('SELECT id, username, display_name, avatar_filename, created_at FROM users WHERE id = ?')
+    .prepare('SELECT id, username, display_name, avatar_filename, is_admin, created_at FROM users WHERE id = ?')
     .get(user.id) as Parameters<typeof profileOf>[0];
   return NextResponse.json({ profile: profileOf(updated) });
 }

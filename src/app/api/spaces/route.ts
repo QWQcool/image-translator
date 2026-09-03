@@ -7,8 +7,9 @@ import { addMember } from '@/lib/permissions';
 import type { Space, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
 
 /**
- * 可见范围：我参与的（任意角色）+ 我创建的 + 所有公开空间。
- * 后两者在不是成员时一律按 viewer 处理。
+ * 可见范围：所有公开空间 + 我参与的 + 我创建的。
+ * 权限扁平化后所有登录用户对所有空间都有完整权限，role 仅用于展示
+ * （owner 标记「我创建的」分组），不再有 viewer 只读态。
  */
 const LIST_SQL = `
   SELECT s.*,
@@ -30,9 +31,8 @@ const LIST_SQL = `
            WHERE si.space_id = s.id
            ORDER BY si.sort_order, si.id LIMIT 1) AS cover_filename,
          CASE
-           WHEN m.role IS NOT NULL THEN m.role
            WHEN s.owner_id = ? THEN 'owner'
-           ELSE 'viewer'
+           ELSE 'editor'
          END AS role
     FROM spaces s
     LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = ?
@@ -59,7 +59,8 @@ export async function GET(request: Request) {
 
   const spaces: SpaceWithCounts[] = rows.map((row) => ({
     ...row,
-    can_edit: row.role === 'owner' || row.role === 'editor',
+    // 权限扁平化：登录用户对所有空间都可编辑
+    can_edit: true,
     is_owner: row.role === 'owner',
   }));
 

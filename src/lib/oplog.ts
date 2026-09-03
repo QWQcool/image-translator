@@ -18,9 +18,11 @@ export type OpAction =
   | 'purge'
   | 'ai_ocr'
   | 'ai_inpaint'
-  | 'ai_translate';
+  | 'ai_translate'
+  | 'invite_create'
+  | 'invite_delete';
 
-export type OpTargetType = 'space' | 'item' | 'asset' | 'member' | 'ai';
+export type OpTargetType = 'space' | 'item' | 'asset' | 'member' | 'ai' | 'invite';
 
 /**
  * 写入一条操作日志。日志失败绝不阻断业务主流程，

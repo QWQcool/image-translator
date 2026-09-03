@@ -5,6 +5,8 @@ export type User = {
   display_name: string | null;
   /** data/avatars/ 下的头像文件名，可空 */
   avatar_filename: string | null;
+  /** 管理员标记（0/1）。站点唯一保留的权限差异：管理员可发放邀请码，与空间无关 */
+  is_admin: number;
   created_at: string;
 };
 
@@ -66,10 +68,11 @@ export type SpaceMember = {
 
 export type SpaceAccess = {
   role: SpaceRole;
-  /** 通过成员表或所有权获得权限；公开空间的旁观者为 false */
+  /** 历史字段：权限扁平化后登录用户恒为 true，仅保留兼容 */
   isMember: boolean;
+  /** 权限扁平化：登录用户恒为 true */
   canEdit: boolean;
-  /** 仅 owner：管理成员、修改空间信息、删除空间 */
+  /** 权限扁平化：登录用户恒为 true（改名/删除空间等不再限创建者） */
   canManage: boolean;
 };
 

@@ -9,11 +9,13 @@ export function isSpaceRole(value: unknown): value is SpaceRole {
 }
 
 /**
- * 判定当前用户对某个空间的权限。返回 null 表示完全不可见。
+ * 判定当前用户对某个空间的权限。返回 null 表示完全不可见（仅发生在空间不存在时）。
  *
- * 开放空间模型：站点内没有私人空间，所有登录用户对所有文件夹都有编辑权；
- * 只有文件夹创建者保留管理权（改名/改描述/删除文件夹）。
- * space_members 表保留只是为了兼容历史数据与将来的"文件夹级可见性"，不再参与鉴权。
+ * 权限扁平化模型：**所有登录用户对所有空间一律拥有完整权限**——
+ * 上传/改名/排序/删除图片、编辑标注、改空间信息（名称/描述）、删除空间、管理成员，
+ * 不区分创建者/编辑者层级。站点内唯一保留的权限差异是
+ * 「管理员可生成/作废邀请码」，由 users.is_admin 控制，与空间无关。
+ * space_members 表与 spaces.owner_id 保留只为兼容历史数据与展示「我创建的」，不再参与鉴权。
  */
 export function getSpaceAccess(spaceId: number, userId: number): SpaceAccess | null {
   const space = db
@@ -21,12 +23,13 @@ export function getSpaceAccess(spaceId: number, userId: number): SpaceAccess | n
     .get(spaceId) as { id: number; owner_id: number; visibility: SpaceVisibility } | undefined;
   if (!space) return null;
 
+  // role 仅作为展示信息保留（owner 标记「我创建的」分组），不再影响任何权限判定
   const isOwner = space.owner_id === userId;
   return {
     role: isOwner ? 'owner' : 'editor',
-    isMember: isOwner,
+    isMember: true,
     canEdit: true,
-    canManage: isOwner,
+    canManage: true,
   };
 }
 
@@ -54,7 +57,11 @@ export function addMember(spaceId: number, userId: number, role: SpaceRole): voi
   ).run(spaceId, userId, role);
 }
 
-/** 统一的鉴权响应：无访问权返回 404，有访问权但权限不足返回 403 */
+/**
+ * 统一的鉴权响应：无访问权返回 404，权限不足返回 403。
+ * 权限扁平化后登录用户恒有 canEdit/canManage，403 分支实际不会触发，
+ * 保留只为防御未来的权限收紧与类型完整性。
+ */
 export function accessError(
   access: SpaceAccess | null,
   require: 'view' | 'edit' | 'manage',
