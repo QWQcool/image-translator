@@ -9,6 +9,8 @@ import type { LabelPlusGroup } from '@/lib/types';
 export default function LabelPlusPanel({
   annotations,
   selectedKey,
+  selectedKeys,
+  onToggleDoubtful,
   groups,
   phrases,
   defaultGroupId,
@@ -27,6 +29,10 @@ export default function LabelPlusPanel({
 }: {
   annotations: DraftAnnotation[];
   selectedKey: string | null;
+  /** 多选集合（含 selectedKey），在集合内的卡片都高亮 */
+  selectedKeys?: string[];
+  /** 存疑切换（单张） */
+  onToggleDoubtful?: (key: string) => void;
   groups: LabelPlusGroup[];
   phrases: string[];
   defaultGroupId: number;
@@ -214,7 +220,7 @@ export default function LabelPlusPanel({
       )}
 
       {pins.map((pin, index) => {
-        const active = pin.key === selectedKey;
+        const active = pin.key === selectedKey || (selectedKeys?.includes(pin.key) ?? false);
         const group = groups.find((g) => g.id === pin.group_id);
         return (
           <div
@@ -266,6 +272,27 @@ export default function LabelPlusPanel({
               </span>
               <div className="flex items-center gap-2 text-[11px] text-ink-500">
                 {pin.updated_by_username && <span>{pin.updated_by_username}</span>}
+                {/* 存疑徽标 + 切换按钮（样式随状态变化） */}
+                {!readOnly && onToggleDoubtful && (
+                  <button
+                    type="button"
+                    onClick={() => onToggleDoubtful(pin.key)}
+                    title="标记 / 取消存疑（Alt+X）"
+                    className={`rounded px-1.5 py-0.5 text-[10px] ${
+                      pin.doubtful
+                        ? 'bg-amber-500/20 font-medium text-amber-600'
+                        : 'text-ink-500 hover:bg-ink-700/40 hover:text-ink-200'
+                    }`}
+                  >
+                    存疑
+                  </button>
+                )}
+                {/* 只读时无切换按钮，用静态徽标展示状态（可编辑态由上方按钮承担） */}
+                {readOnly && pin.doubtful && (
+                  <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
+                    存疑
+                  </span>
+                )}
                 {!readOnly && (
                   <button
                     type="button"

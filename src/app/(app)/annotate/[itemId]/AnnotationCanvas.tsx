@@ -126,7 +126,9 @@ export default function AnnotationCanvas({
   imageHeight,
   annotations,
   selectedKey,
+  selectedKeys,
   onSelect,
+  onMultiSelect,
   onChange,
   fileName,
   readOnly,
@@ -142,7 +144,11 @@ export default function AnnotationCanvas({
   imageHeight: number;
   annotations: DraftAnnotation[];
   selectedKey: string | null;
+  /** 多选集合（含 selectedKey），用于高亮与橡皮筋加选 */
+  selectedKeys?: string[];
   onSelect: (key: string | null) => void;
+  /** Ctrl+橡皮筋松开时回调；additive = 加选（Ctrl+Shift） */
+  onMultiSelect?: (keys: string[], additive: boolean) => void;
   onChange: (next: DraftAnnotation[]) => void;
   fileName: string;
   readOnly: boolean;
@@ -162,14 +168,20 @@ export default function AnnotationCanvas({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [spaceDown, setSpaceDown] = useState(false);
   const [draft, setDraft] = useState<DraftAnnotation | null>(null);
+  // Ctrl+橡皮筋选框（stage 坐标，松开时把相交标注并入选中集）
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(
+    null,
+  );
 
   const dragRef = useRef<{
-    mode: 'none' | 'pan' | 'draw' | 'move' | 'resize';
+    mode: 'none' | 'pan' | 'draw' | 'move' | 'resize' | 'marquee';
     key?: string;
     handle?: Handle;
     start: { x: number; y: number };
     startPan: { x: number; y: number };
     snapshot?: DraftAnnotation;
+    /**橡皮筋是否加选（Ctrl+Shift） */
+    additive?: boolean;
   }>({ mode: 'none', start: { x: 0, y: 0 }, startPan: { x: 0, y: 0 } });
 
   // 标注数据的最新引用，供高频指针事件读取而不重复绑定回调
@@ -187,6 +199,9 @@ export default function AnnotationCanvas({
   selectedKeyRef.current = selectedKey;
 
   const originalImgRef = useRef<HTMLImageElement | null>(null);
+
+  // 生效中的选中集：多选集合缺省时退化为 selectedKey 单选
+  const selection = selectedKeys ?? (selectedKey ? [selectedKey] : []);
 
   useEffect(() => {
     let cancelled = false;
@@ -366,6 +381,27 @@ export default function AnnotationCanvas({
     return hitTestPin(point) ?? (modeRef.current === 'browse' ? hitTestBox(point) : null);
   }
 
+  /** 标注与橡皮筋选框是否相交：pin 按中心点落入，box 按矩形重叠 */
+  function intersectsMarquee(
+    annotation: DraftAnnotation,
+    rect: { x: number; y: number; w: number; h: number },
+  ): boolean {
+    if (isPin(annotation)) {
+      return (
+        annotation.x >= rect.x &&
+        annotation.x <= rect.x + rect.w &&
+        annotation.y >= rect.y &&
+        annotation.y <= rect.y + rect.h
+      );
+    }
+    return (
+      annotation.x < rect.x + rect.w &&
+      annotation.x + annotation.w > rect.x &&
+      annotation.y < rect.y + rect.h &&
+      annotation.y + annotation.h > rect.y
+    );
+  }
+
   /**
    * 图片外（深色背景区）按下 → 直接进入平移，任何模式一致；
    * 落点在图片内则不处理，交给 wrapper 的原有逻辑（画框/选标号/移动等）。
@@ -406,6 +442,20 @@ export default function AnnotationCanvas({
     if (event.button !== 0) return;
     // 只读模式下左键不产生任何编辑行为，但平移缩放仍可用
     if (readOnly) return;
+
+    // Ctrl+拖拽：橡皮筋多选（Ctrl+Shift 为加选），不与创建框 / 放标号的拖拽冲突
+    if (event.ctrlKey) {
+      const startPoint = stageCoords(event);
+      dragRef.current = {
+        mode: 'marquee',
+        additive: event.shiftKey,
+        start: startPoint,
+        startPan: pan,
+      };
+      setMarquee({ x0: startPoint.x, y0: startPoint.y, x1: startPoint.x, y1: startPoint.y });
+      wrapper.setPointerCapture(event.pointerId);
+      return;
+    }
 
     const point = stageCoords(event);
     const currentMode = modeRef.current;
@@ -497,6 +547,12 @@ export default function AnnotationCanvas({
       return;
     }
 
+    if (drag.mode === 'marquee') {
+      const current = stageCoords(event);
+      setMarquee((m) => (m ? { ...m, x1: current.x, y1: current.y } : m));
+      return;
+    }
+
     const point = stageCoords(event);
 
     if (drag.mode === 'draw') {
@@ -581,8 +637,26 @@ export default function AnnotationCanvas({
     }
   }
 
-  function onPointerUp() {
+  function onPointerUp(event: React.PointerEvent) {
     const drag = dragRef.current;
+    if (drag.mode === 'marquee') {
+      const p = stageCoords(event);
+      const nx0 = clamp01(Math.min(drag.start.x, p.x) / base.w);
+      const ny0 = clamp01(Math.min(drag.start.y, p.y) / base.h);
+      const nx1 = clamp01(Math.max(drag.start.x, p.x) / base.w);
+      const ny1 = clamp01(Math.max(drag.start.y, p.y) / base.h);
+      const rect = { x: nx0, y: ny0, w: nx1 - nx0, h: ny1 - ny0 };
+      let hits: string[];
+      if (rect.w < 0.005 && rect.h < 0.005) {
+        // 几乎没拖动 = Ctrl+单击：退化为点选（pin 优先，框选次之）
+        const hit = hitTestPin(p) ?? hitTestBox(p);
+        hits = hit ? [hit.key] : [];
+      } else {
+        hits = annotationsRef.current.filter((a) => intersectsMarquee(a, rect)).map((a) => a.key);
+      }
+      onMultiSelect?.(hits, drag.additive ?? false);
+      setMarquee(null);
+    }
     if (drag.mode === 'draw' && draft) {
       if (draft.w > 0.01 && draft.h > 0.01) {
         onChange([...annotationsRef.current, draft]);
@@ -707,7 +781,7 @@ export default function AnnotationCanvas({
               if (hidePins) return null;
               const pinIndex = annotations.filter((a) => isPin(a)).indexOf(annotation) + 1;
               const color = groupColor(annotation.group_id || 1);
-              const active = annotation.key === selectedKey;
+              const active = selection.includes(annotation.key);
               const size = 22 / zoom;
               return (
                 <div
@@ -726,7 +800,12 @@ export default function AnnotationCanvas({
                       height: size,
                       fontSize: Math.max(10, 12 / zoom),
                       background: color,
-                      outline: active ? '2px solid #E8C547' : '2px solid rgba(255,255,255,0.85)',
+                      // 选中 = 黄色描边；存疑 = amber 描边
+                      outline: active
+                        ? '2px solid #E8C547'
+                        : annotation.doubtful
+                          ? '2px solid #F59E0B'
+                          : '2px solid rgba(255,255,255,0.85)',
                     }}
                   >
                     {pinIndex}
@@ -755,6 +834,8 @@ export default function AnnotationCanvas({
             }
 
             const active = annotation.key === selectedKey && !readOnly && mode === 'box';
+            // 多选中的框也高亮（但不显示缩放手柄，手柄只跟随主选中项）
+            const inSelection = selection.includes(annotation.key);
             const left = annotation.x * base.w;
             const top = annotation.y * base.h;
             const width = annotation.w * base.w;
@@ -769,7 +850,9 @@ export default function AnnotationCanvas({
                 <div
                   className="absolute inset-0"
                   style={{
-                    outline: `1px solid ${active ? '#4da3ff' : 'rgba(255,255,255,0.4)'}`,
+                    outline: `1px solid ${
+                      active || inSelection ? '#4da3ff' : 'rgba(255,255,255,0.4)'
+                    }`,
                     boxShadow: active ? '0 0 0 1px rgba(0,0,0,0.55)' : undefined,
                   }}
                 />
@@ -806,6 +889,21 @@ export default function AnnotationCanvas({
               </div>
             );
           })}
+
+          {/* Ctrl+橡皮筋选框：半透明 sky 色矩形 */}
+          {marquee && (
+            <div
+              className="pointer-events-none absolute"
+              style={{
+                left: Math.min(marquee.x0, marquee.x1),
+                top: Math.min(marquee.y0, marquee.y1),
+                width: Math.abs(marquee.x1 - marquee.x0),
+                height: Math.abs(marquee.y1 - marquee.y0),
+                background: 'rgba(77,163,255,0.18)',
+                outline: '1px solid #4da3ff',
+              }}
+            />
+          )}
         </div>
       </div>
     </div>

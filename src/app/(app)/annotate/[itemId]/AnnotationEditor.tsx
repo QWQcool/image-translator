@@ -7,7 +7,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import EmptyState from '@/components/EmptyState';
 import { originalUrl, previewUrl, thumbUrl } from '@/lib/media';
 import { isPin, newKey, parseRuns, type DraftAnnotation } from '@/lib/annotation';
-import { parseGroups, parsePhrases } from '@/lib/labelplus';
+import { groupColor, parseGroups, parsePhrases } from '@/lib/labelplus';
 import { useCollabRoom } from '@/lib/use-collab-room';
 import type { Asset, LabelPlusGroup, SpaceAccess, SpaceItem } from '@/lib/types';
 import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
@@ -43,8 +43,14 @@ function hydrate(row: DraftAnnotation): DraftAnnotation {
     comment: row.comment ?? '',
     runs: parseRuns(row.runs),
     text_opacity: typeof row.text_opacity === 'number' ? row.text_opacity : 1,
+    doubtful: Boolean(row.doubtful),
   };
 }
+
+/** 历史栈上限，防止长会话内存膨胀 */
+const HISTORY_LIMIT = 100;
+/** 连续手势（拖拽移动/缩放）在这个毫秒窗口内合并为一条历史记录 */
+const HISTORY_COALESCE_MS = 400;
 
 export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const router = useRouter();
@@ -56,6 +62,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const [spaceName, setSpaceName] = useState('');
   const [annotations, setAnnotations] = useState<DraftAnnotation[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // 多选集合：空 = 单选模式（selectedKey 生效）；Ctrl+橡皮筋 / Ctrl+Shift+加选时填充
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<string | null>(null);
@@ -73,8 +81,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const phraseCursor = useRef(0);
   const [ocrOpen, setOcrOpen] = useState(false);
   const [translateOpen, setTranslateOpen] = useState(false);
-  /** 待确认删除的标注 key（面板按钮与 Delete 键统一走二次确认） */
-  const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  /** 待确认删除的标注 key 集合（单删 / 批删统一走二次确认） */
+  const [confirmKeys, setConfirmKeys] = useState<string[] | null>(null);
   const [neighbors, setNeighbors] = useState<{
     prevId: number | null;
     nextId: number | null;
@@ -86,6 +94,72 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const canEditRef = useRef(false);
+
+  // ---- 撤销 / 重做历史栈（ref 存数据，histVersion 只用于触发重渲染更新按钮禁用态）----
+  const pastRef = useRef<DraftAnnotation[][]>([]);
+  const futureRef = useRef<DraftAnnotation[][]>([]);
+  const lastPushAtRef = useRef(0);
+  const [histVersion, setHistVersion] = useState(0);
+
+  /** 把当前状态压入 past：连续手势合并，栈满淘汰最旧，同时清空 future */
+  const pushHistory = useCallback((snapshot: DraftAnnotation[]) => {
+    const past = pastRef.current;
+    const now = Date.now();
+    const last = past[past.length - 1];
+    // 与上一条内容完全一致时跳过（无意义变更）
+    const sameAsLast =
+      last &&
+      last.length === snapshot.length &&
+      last.every((row, index) => row.key === snapshot[index].key) &&
+      JSON.stringify(last) === JSON.stringify(snapshot);
+    if (sameAsLast) return;
+    if (last && now - lastPushAtRef.current < HISTORY_COALESCE_MS) {
+      // 连续手势窗口内：保留手势起点快照，后续中间态不入栈
+      lastPushAtRef.current = now;
+      futureRef.current = [];
+      setHistVersion((v) => v + 1);
+      return;
+    }
+    past.push(snapshot);
+    if (past.length > HISTORY_LIMIT) past.shift();
+    lastPushAtRef.current = now;
+    futureRef.current = [];
+    setHistVersion((v) => v + 1);
+  }, []);
+
+  /** 清空历史（加载 / 收到协作者快照后调用，避免撤销跳到过期状态） */
+  const resetHistory = useCallback(() => {
+    pastRef.current = [];
+    futureRef.current = [];
+    lastPushAtRef.current = 0;
+    setHistVersion((v) => v + 1);
+  }, []);
+
+  /** 绕过历史栈的状态写入：服务端规范快照 / 协作者覆盖时使用，不能被撤销 */
+  const setAnnotationsRaw = useCallback((next: DraftAnnotation[]) => {
+    setAnnotations(next);
+  }, []);
+
+  const undo = useCallback(() => {
+    if (!canEditRef.current || pastRef.current.length === 0) return;
+    const prev = pastRef.current.pop()!;
+    futureRef.current.push(annotationsRef.current);
+    // 重置合并窗口：撤销后的新编辑必须重新入栈，不能被并入上一手势
+    lastPushAtRef.current = 0;
+    setAnnotations(prev);
+    setDirty(true);
+    setHistVersion((v) => v + 1);
+  }, []);
+
+  const redo = useCallback(() => {
+    if (!canEditRef.current || futureRef.current.length === 0) return;
+    const next = futureRef.current.pop()!;
+    pastRef.current.push(annotationsRef.current);
+    lastPushAtRef.current = 0;
+    setAnnotations(next);
+    setDirty(true);
+    setHistVersion((v) => v + 1);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -106,9 +180,11 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       setSpaceName(detail.space?.name ?? '');
       setTitle(detail.item?.title ?? '');
       setAccess(detail.access ?? null);
-      setAnnotations((annotationData.annotations ?? []).map((row: DraftAnnotation) => hydrate(row)));
+      setAnnotationsRaw((annotationData.annotations ?? []).map((row: DraftAnnotation) => hydrate(row)));
+      resetHistory();
       setDirty(false);
       setSelectedKey(null);
+      setSelectedKeys([]);
       setGroups(parseGroups(detail.labelplus?.groups));
       setPhrases(parsePhrases(detail.labelplus?.phrases));
       setNeighbors({
@@ -121,7 +197,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     } finally {
       setLoading(false);
     }
-  }, [itemId, router]);
+  }, [itemId, router, setAnnotationsRaw, resetHistory]);
 
   useEffect(() => {
     if (!Number.isInteger(itemId) || itemId <= 0) {
@@ -131,10 +207,14 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     void load();
   }, [itemId, load, router]);
 
-  const applyChange = useCallback((next: DraftAnnotation[]) => {
-    setAnnotations(next);
-    setDirty(true);
-  }, []);
+  const applyChange = useCallback(
+    (next: DraftAnnotation[]) => {
+      pushHistory(annotationsRef.current);
+      setAnnotations(next);
+      setDirty(true);
+    },
+    [pushHistory],
+  );
 
   const collab = useCollabRoom(Number.isInteger(itemId) ? itemId : 0);
 
@@ -147,7 +227,9 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     if (op.kind === 'annotations') {
       const rows = (op.payload as { annotations?: unknown[] } | null)?.annotations;
       if (!Array.isArray(rows)) return;
-      setAnnotations((rows as DraftAnnotation[]).map((row) => hydrate(row)));
+      // 协作者快照绕过历史栈并清空：本地撤销不能跳回同步前的旧状态
+      setAnnotationsRaw((rows as DraftAnnotation[]).map((row) => hydrate(row)));
+      resetHistory();
       setDirty(false);
       setSyncNote('已同步协作者的标注更新');
       window.setTimeout(() => setSyncNote(null), 4000);
@@ -171,10 +253,11 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
         setError(data.error ?? '保存失败');
         return;
       }
-      setAnnotations((prev) =>
+      // 服务端规范快照绕过历史栈写入（key 沿用本地，历史栈保持可用）
+      setAnnotationsRaw(
         (data.annotations ?? []).map((row: DraftAnnotation, index: number) => ({
           ...hydrate(row),
-          key: prev[index]?.key ?? newKey(),
+          key: annotationsRef.current[index]?.key ?? newKey(),
         })),
       );
       setDirty(false);
@@ -217,10 +300,69 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
 
   const pins = useMemo(() => annotations.filter(isPin), [annotations]);
 
-  /** 删除入口统一收口：先弹确认，再由 ConfirmDialog 执行真正的删除 */
+  // histVersion 只作为重渲染信号：栈内容在 ref 里，禁用态在渲染时读取
+  const canUndo = useMemo(() => pastRef.current.length > 0, [histVersion]);
+  const canRedo = useMemo(() => futureRef.current.length > 0, [histVersion]);
+
+  /** 生效中的选中集：多选集合优先，否则退化为 selectedKey 单选 */
+  const effectiveSelectedKeys = useMemo(
+    () => (selectedKeys.length > 0 ? selectedKeys : selectedKey ? [selectedKey] : []),
+    [selectedKeys, selectedKey],
+  );
+
+  /** 单选（面板点击 / 画布单击）：清空多选集合 */
+  const selectOne = useCallback((key: string | null) => {
+    setSelectedKeys([]);
+    setSelectedKey(key);
+  }, []);
+
+  /** Ctrl+橡皮筋松开时回调：additive = Ctrl+Shift 加选 */
+  const handleMultiSelect = useCallback(
+    (keys: string[], additive: boolean) => {
+      if (!canEditRef.current) return;
+      const base = additive
+        ? Array.from(new Set([...effectiveSelectedKeys, ...keys]))
+        : keys;
+      setSelectedKeys(base);
+      setSelectedKey(base[0] ?? null);
+    },
+    [effectiveSelectedKeys],
+  );
+
+  /** 批量归组：把选中集里所有标注的 group_id 一次性改掉 */
+  const batchSetGroup = useCallback(
+    (id: number) => {
+      if (!canEditRef.current || effectiveSelectedKeys.length === 0) return;
+      const keySet = new Set(effectiveSelectedKeys);
+      applyChange(
+        annotationsRef.current.map((row) =>
+          keySet.has(row.key) ? { ...row, group_id: id } : row,
+        ),
+      );
+    },
+    [effectiveSelectedKeys, applyChange],
+  );
+
+  /** 存疑切换（Alt+X / 面板按钮）：多选时批量统一为第一个选中项的反值 */
+  const toggleDoubtful = useCallback(
+    (keys: string[]) => {
+      if (!canEditRef.current || keys.length === 0) return;
+      const keySet = new Set(keys);
+      const first = annotationsRef.current.find((row) => keySet.has(row.key));
+      const target = !(first?.doubtful ?? false);
+      applyChange(
+        annotationsRef.current.map((row) =>
+          keySet.has(row.key) ? { ...row, doubtful: target } : row,
+        ),
+      );
+    },
+    [applyChange],
+  );
+
+  /** 删除入口统一收口：先弹确认（支持批量），再由 ConfirmDialog 执行真正的删除 */
   const requestRemove = useCallback((key: string | null) => {
     if (!key || !canEditRef.current) return;
-    setConfirmKey(key);
+    setConfirmKeys([key]);
   }, []);
 
   /** 标号列表拖动排序：只重排 pin 的相对顺序，框选标注位置不动 */
@@ -281,11 +423,12 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       const next = annotationsRef.current.map((row) =>
         row.id !== undefined && byId.has(row.id) ? { ...row, text: byId.get(row.id)! } : row,
       );
-      setAnnotations(next);
+      // AI 采纳是用户主动修改，走 applyChange 入历史栈，可撤销
+      applyChange(next);
       setTranslateOpen(false);
       void save(next);
     },
-    [save],
+    [applyChange, save],
   );
 
   const selectPinByOffset = useCallback(
@@ -293,6 +436,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       if (pins.length === 0) return;
       const index = pins.findIndex((p) => p.key === selectedKey);
       const next = pins[(index < 0 ? 0 : index + delta + pins.length) % pins.length];
+      setSelectedKeys([]);
       setSelectedKey(next.key);
     },
     [pins, selectedKey],
@@ -321,10 +465,31 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       }
       if (event.key === 'Escape') {
         setPhraseMenuOpen(false);
+        // Escape 清空多选（单选保留）
+        setSelectedKeys([]);
         return;
       }
 
       if (typing) return;
+
+      // 撤销 / 重做：Ctrl+Z 撤销，Ctrl+Y 或 Ctrl+Shift+Z 重做
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redo();
+        return;
+      }
+      // Alt+X 切换存疑（多选时批量切换全部）
+      if (event.altKey && (event.key === 'x' || event.key === 'X')) {
+        event.preventDefault();
+        toggleDoubtful(effectiveSelectedKeys);
+        return;
+      }
 
       // A 快速插入预置短语（连按循环切换短语），对应官方"快速插入预置文本"
       if ((event.key === 'a' || event.key === 'A') && canEdit && phrases.length > 0) {
@@ -350,12 +515,17 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       if (/^[1-9]$/.test(event.key)) {
         const id = Number(event.key);
         setDefaultGroupId(id);
-        if (selectedKey && canEdit) {
-          applyChange(
-            annotationsRef.current.map((row) =>
-              row.key === selectedKey && isPin(row) ? { ...row, group_id: id } : row,
-            ),
-          );
+        // 单选 = 原有行为（仅 pin 归组）；多选 = 批量归组（含框选标注）
+        if (canEdit && effectiveSelectedKeys.length > 0) {
+          if (effectiveSelectedKeys.length === 1) {
+            applyChange(
+              annotationsRef.current.map((row) =>
+                row.key === selectedKey && isPin(row) ? { ...row, group_id: id } : row,
+              ),
+            );
+          } else {
+            batchSetGroup(id);
+          }
         }
       }
       if (event.key === 'ArrowLeft') {
@@ -376,9 +546,9 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       }
 
       if (!canEdit) return;
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedKey) {
+      if ((event.key === 'Delete' || event.key === 'Backspace') && effectiveSelectedKeys.length > 0) {
         event.preventDefault();
-        setConfirmKey(selectedKey);
+        setConfirmKeys(effectiveSelectedKeys);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -386,6 +556,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   }, [
     annotations,
     selectedKey,
+    effectiveSelectedKeys,
     save,
     applyChange,
     canEdit,
@@ -394,6 +565,10 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     selectPinByOffset,
     phrases,
     insertPhraseAtSelected,
+    undo,
+    redo,
+    toggleDoubtful,
+    batchSetGroup,
   ]);
 
   useEffect(() => {
@@ -475,6 +650,28 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           </button>
         </div>
 
+        {/* 撤销 / 重做：栈空或只读时禁用 */}
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            className="btn-ghost px-2 py-1 text-xs"
+            disabled={!canUndo}
+            onClick={undo}
+            title="撤销（Ctrl+Z）"
+          >
+            撤销
+          </button>
+          <button
+            type="button"
+            className="btn-ghost px-2 py-1 text-xs"
+            disabled={!canRedo}
+            onClick={redo}
+            title="重做（Ctrl+Y / Ctrl+Shift+Z）"
+          >
+            重做
+          </button>
+        </div>
+
         <span className="ml-auto flex items-center gap-2">
           {collab.room?.holderName && !collab.room.isHolder && !collab.room.shared && (
             <span className="rounded bg-amber-500/20 px-2 py-1 text-xs text-amber-700">
@@ -528,7 +725,9 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               imageHeight={imageHeight}
               annotations={annotations}
               selectedKey={selectedKey}
-              onSelect={setSelectedKey}
+              selectedKeys={effectiveSelectedKeys}
+              onSelect={selectOne}
+              onMultiSelect={handleMultiSelect}
               onChange={applyChange}
               fileName={asset.original_name ?? asset.filename}
               readOnly={!canEdit}
@@ -538,6 +737,40 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               defaultGroupId={defaultGroupId}
               followSelection={mode === 'input'}
             />
+            {/* 多选浮动工具条：批量删除 / 批量归组 */}
+            {effectiveSelectedKeys.length > 1 && canEdit && (
+              <div className="absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-ink-700 bg-cloud px-3 py-2 shadow-card">
+                <span className="text-xs text-ink-400">已选 {effectiveSelectedKeys.length} 项</span>
+                <button
+                  type="button"
+                  className="btn-danger px-2 py-1 text-xs"
+                  onClick={() => setConfirmKeys(effectiveSelectedKeys)}
+                >
+                  删除 ({effectiveSelectedKeys.length})
+                </button>
+                <div className="flex items-center gap-1">
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((id) => (
+                    <button
+                      key={id}
+                      type="button"
+                      className="h-5 w-5 rounded-full text-[10px] text-white"
+                      style={{ background: groupColor(id) }}
+                      title={`批量归到分组 ${id}`}
+                      onClick={() => batchSetGroup(id)}
+                    >
+                      {id}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="btn-ghost px-2 py-1 text-xs"
+                  onClick={() => setSelectedKeys([])}
+                >
+                  取消
+                </button>
+              </div>
+            )}
             {mode === 'box' &&
               (() => {
                 const selectedBox = annotations.find(
@@ -611,13 +844,15 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               <LabelPlusPanel
                 annotations={annotations}
                 selectedKey={selectedKey}
+                selectedKeys={effectiveSelectedKeys}
+                onToggleDoubtful={(key) => toggleDoubtful([key])}
                 groups={groups}
                 phrases={phrases}
                 defaultGroupId={defaultGroupId}
                 reviewMode={mode === 'review'}
                 phraseMenuOpen={phraseMenuOpen}
                 onClosePhraseMenu={() => setPhraseMenuOpen(false)}
-                onSelect={setSelectedKey}
+                onSelect={selectOne}
                 onChange={applyChange}
                 readOnly={!canEdit}
                 canManageGroups={canEdit}
@@ -638,8 +873,10 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               <AnnotationPanel
                 annotations={annotations.filter((a) => !isPin(a))}
                 selectedKey={selectedKey}
+                selectedKeys={effectiveSelectedKeys}
+                onToggleDoubtful={(key) => toggleDoubtful([key])}
                 imageHeight={imageHeight}
-                onSelect={setSelectedKey}
+                onSelect={selectOne}
                 onChange={(nextBoxes) => {
                   applyChange([...nextBoxes, ...annotations.filter(isPin)]);
                 }}
@@ -665,17 +902,23 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
         />
       )}
       <ConfirmDialog
-        open={confirmKey !== null}
+        open={confirmKeys !== null}
         title="删除标注"
-        message="确认删除选中的标注？删除后会随下次保存写入服务器，无法恢复。"
+        message={
+          confirmKeys && confirmKeys.length > 1
+            ? `确认删除选中的 ${confirmKeys.length} 个标注？删除后会随下次保存写入服务器，无法恢复。`
+            : '确认删除选中的标注？删除后会随下次保存写入服务器，无法恢复。'
+        }
         onConfirm={() => {
-          const key = confirmKey;
-          setConfirmKey(null);
-          if (!key) return;
-          applyChange(annotationsRef.current.filter((annotation) => annotation.key !== key));
-          if (selectedKey === key) setSelectedKey(null);
+          const keys = confirmKeys;
+          setConfirmKeys(null);
+          if (!keys || keys.length === 0) return;
+          const keySet = new Set(keys);
+          applyChange(annotationsRef.current.filter((annotation) => !keySet.has(annotation.key)));
+          setSelectedKeys([]);
+          if (selectedKey && keySet.has(selectedKey)) setSelectedKey(null);
         }}
-        onCancel={() => setConfirmKey(null)}
+        onCancel={() => setConfirmKeys(null)}
       />
     </div>
   );

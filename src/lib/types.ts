@@ -115,6 +115,8 @@ export type Annotation = {
   runs?: string | null;
   /** 文字不透明度 0~1（默认 1） */
   text_opacity?: number | null;
+  /** 疑点标记（库里存 0/1，前端归一化为 boolean） */
+  doubtful?: boolean;
   updated_by: number | null;
   updated_by_username?: string | null;
 };

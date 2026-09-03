@@ -22,6 +22,8 @@ export type DraftAnnotation = {
   runs?: TextRun[] | null;
   /** 文字不透明度 0~1（默认 1；底色透明度由 bg_color 自己表达） */
   text_opacity?: number | null;
+  /** 疑点标记（存疑）：画布 amber 描边 + 面板徽标，随保存/协作链路走 */
+  doubtful?: boolean;
   updated_by?: number | null;
   updated_by_username?: string | null;
 };
@@ -46,6 +48,7 @@ export const DEFAULT_ANNOTATION: Omit<DraftAnnotation, 'key' | 'x' | 'y' | 'w' |
   source_text: '',
   comment: '',
   text_opacity: 1,
+  doubtful: false,
 };
 
 /** 解析数据库里的 runs JSON（坏数据一律回退 null = 单段继承标注级样式） */

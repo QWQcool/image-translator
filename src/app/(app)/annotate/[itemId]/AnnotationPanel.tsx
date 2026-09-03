@@ -12,6 +12,8 @@ const ALIGN_OPTIONS: Array<{ value: DraftAnnotation['align']; label: string }> =
 export default function AnnotationPanel({
   annotations,
   selectedKey,
+  selectedKeys,
+  onToggleDoubtful,
   imageHeight,
   onSelect,
   onChange,
@@ -20,6 +22,10 @@ export default function AnnotationPanel({
 }: {
   annotations: DraftAnnotation[];
   selectedKey: string | null;
+  /** 多选集合（含 selectedKey），在集合内的卡片都高亮 */
+  selectedKeys?: string[];
+  /** 存疑切换（单张） */
+  onToggleDoubtful?: (key: string) => void;
   imageHeight: number;
   onSelect: (key: string) => void;
   onChange: (next: DraftAnnotation[]) => void;
@@ -56,7 +62,7 @@ export default function AnnotationPanel({
   return (
     <div className="space-y-3">
       {annotations.map((annotation, index) => {
-        const active = annotation.key === selectedKey;
+        const active = annotation.key === selectedKey || (selectedKeys?.includes(annotation.key) ?? false);
         const bg = splitBgColor(annotation.bg_color);
         const fontSizePx = Math.round(annotation.font_size_ratio * imageHeight);
 
@@ -75,6 +81,27 @@ export default function AnnotationPanel({
                   {Math.round(annotation.x * 100)}, {Math.round(annotation.y * 100)} ·{' '}
                   {Math.round(annotation.w * 100)}×{Math.round(annotation.h * 100)}
                 </span>
+                {/* 存疑徽标 + 切换按钮 */}
+                {!readOnly && onToggleDoubtful && (
+                  <button
+                    type="button"
+                    onClick={() => onToggleDoubtful(annotation.key)}
+                    title="标记 / 取消存疑（Alt+X）"
+                    className={`rounded px-1.5 py-0.5 text-[10px] ${
+                      annotation.doubtful
+                        ? 'bg-amber-500/20 font-medium text-amber-600'
+                        : 'text-ink-500 hover:bg-ink-700/40 hover:text-ink-200'
+                    }`}
+                  >
+                    存疑
+                  </button>
+                )}
+                {/* 只读时无切换按钮，用静态徽标展示状态（可编辑态由上方按钮承担） */}
+                {readOnly && annotation.doubtful && (
+                  <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
+                    存疑
+                  </span>
+                )}
                 {!readOnly && (
                   <button
                     type="button"

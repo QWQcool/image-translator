@@ -201,8 +201,10 @@ function migrate(database: Database.Database): void {
   addAnnotationColumn('comment', `comment TEXT NOT NULL DEFAULT ''`);
   addAnnotationColumn('updated_by', `updated_by INTEGER`);
   // Stage 5 富文本：runs 分段 JSON + 标注级文字不透明度
-  const runsColumnAdded = addAnnotationColumn('runs', `runs TEXT`);
+  const runsColumnAdded =   addAnnotationColumn('runs', `runs TEXT`);
   addAnnotationColumn('text_opacity', `text_opacity REAL NOT NULL DEFAULT 1`);
+  // 疑点标记：0/1，编辑器 Alt+X 切换
+  addAnnotationColumn('doubtful', `doubtful INTEGER NOT NULL DEFAULT 0`);
   // 老数据补 runs：仅在本列刚创建时执行一次（一次性守卫）。
   // 之后的 runs=NULL 是用户「清除段落样式/改纯文本」的正常状态，
   // 不能在每次启动/模块重载时重新回填。

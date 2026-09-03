@@ -54,6 +54,7 @@ type IncomingAnnotation = {
   comment?: string;
   runs?: unknown;
   text_opacity?: unknown;
+  doubtful?: unknown;
 };
 
 const ALIGNS = new Set(['left', 'center', 'right']);
@@ -174,6 +175,7 @@ export async function PUT(request: Request, { params }: Params) {
       text,
       runs: runsNormalized?.runs ?? null,
       text_opacity: clampOpacity(row.text_opacity),
+      doubtful: row.doubtful ? 1 : 0,
       font_size_ratio: Math.min(0.5, Math.max(0.004, Number(row.font_size_ratio) || 0.035)),
       color: /^#[0-9a-fA-F]{6}$/.test(row.color ?? '') ? row.color : '#FFFFFF',
       bg_color: /^#[0-9a-fA-F]{8}$|^#[0-9a-fA-F]{6}$/.test(row.bg_color ?? '')
@@ -193,9 +195,9 @@ export async function PUT(request: Request, { params }: Params) {
   const clear = db.prepare('DELETE FROM annotations WHERE item_id = ?');
   const insert = db.prepare(
     `INSERT INTO annotations
-       (item_id, x, y, w, h, text, runs, text_opacity, font_size_ratio, color, bg_color, align, font_weight,
+       (item_id, x, y, w, h, text, runs, text_opacity, doubtful, font_size_ratio, color, bg_color, align, font_weight,
         order_index, kind, group_id, source_text, comment, updated_by)
-     VALUES (@item_id, @x, @y, @w, @h, @text, @runs, @text_opacity, @font_size_ratio, @color, @bg_color, @align, @font_weight,
+     VALUES (@item_id, @x, @y, @w, @h, @text, @runs, @text_opacity, @doubtful, @font_size_ratio, @color, @bg_color, @align, @font_weight,
         @order_index, @kind, @group_id, @source_text, @comment, @updated_by)`,
   );
   const touch = db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`);
