@@ -361,6 +361,11 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 AI 批量处理
               </button>
             )}
+            {items.length > 0 && (
+              <Link href={`/spaces/${spaceId}/reader`} className="btn-ghost">
+                阅读
+              </Link>
+            )}
             <ExportMenu spaceId={spaceId} disabled={items.length === 0} />
             {canManage && (
               <button
