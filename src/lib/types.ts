@@ -111,6 +111,10 @@ export type Annotation = {
   group_id: number;
   source_text: string;
   comment: string;
+  /** 富文本分段 JSON 字符串（null = 单段继承标注级样式）；text 为纯文本冗余 */
+  runs?: string | null;
+  /** 文字不透明度 0~1（默认 1） */
+  text_opacity?: number | null;
   updated_by: number | null;
   updated_by_username?: string | null;
 };

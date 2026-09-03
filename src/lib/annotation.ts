@@ -18,8 +18,20 @@ export type DraftAnnotation = {
   group_id: number;
   source_text: string;
   comment: string;
+  /** 富文本分段（JSON 存储）；字段省略 = 继承标注级样式。text 列仍是纯文本冗余 */
+  runs?: TextRun[] | null;
+  /** 文字不透明度 0~1（默认 1；底色透明度由 bg_color 自己表达） */
+  text_opacity?: number | null;
   updated_by?: number | null;
   updated_by_username?: string | null;
+};
+
+/** 富文本分段：字段省略 = 继承标注级样式 */
+export type TextRun = {
+  text: string;
+  color?: string;
+  fontSizeRatio?: number;
+  fontWeight?: number;
 };
 
 export const DEFAULT_ANNOTATION: Omit<DraftAnnotation, 'key' | 'x' | 'y' | 'w' | 'h'> = {
@@ -33,7 +45,94 @@ export const DEFAULT_ANNOTATION: Omit<DraftAnnotation, 'key' | 'x' | 'y' | 'w' |
   group_id: 1,
   source_text: '',
   comment: '',
+  text_opacity: 1,
 };
+
+/** 解析数据库里的 runs JSON（坏数据一律回退 null = 单段继承标注级样式） */
+export function parseRuns(raw: unknown): TextRun[] | null {
+  if (typeof raw !== 'string' || raw === '') return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const runs: TextRun[] = [];
+    for (const item of parsed) {
+      const row = item as { text?: unknown; color?: unknown; fontSizeRatio?: unknown; fontWeight?: unknown };
+      if (typeof row.text !== 'string' || row.text === '') continue;
+      runs.push({
+        text: row.text,
+        ...(typeof row.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(row.color)
+          ? { color: row.color }
+          : {}),
+        ...(typeof row.fontSizeRatio === 'number' && Number.isFinite(row.fontSizeRatio)
+          ? { fontSizeRatio: row.fontSizeRatio }
+          : {}),
+        ...(row.fontWeight === 400 || row.fontWeight === 700 ? { fontWeight: row.fontWeight } : {}),
+      });
+    }
+    return runs.length > 0 ? runs : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 两个 run 的样式字段是否完全一致（undefined 视为相等） */
+function sameStyle(a: TextRun, b: TextRun): boolean {
+  return a.color === b.color && a.fontSizeRatio === b.fontSizeRatio && a.fontWeight === b.fontWeight;
+}
+
+/**
+ * 规范化 runs：合并相邻同款段落、剔除空段。
+ * 结果只剩单段且无任何覆盖样式时返回 null（不必存 runs）。
+ */
+export function normalizeRuns(runs: TextRun[] | null | undefined): TextRun[] | null {
+  if (!runs || runs.length === 0) return null;
+  const merged: TextRun[] = [];
+  for (const run of runs) {
+    if (!run.text) continue;
+    const last = merged[merged.length - 1];
+    if (last && sameStyle(last, run)) last.text += run.text;
+    else merged.push({ ...run });
+  }
+  if (merged.length === 0) return null;
+  if (merged.length === 1) {
+    const only = merged[0];
+    if (only.color === undefined && only.fontSizeRatio === undefined && only.fontWeight === undefined) {
+      return null;
+    }
+  }
+  return merged;
+}
+
+/**
+ * 把样式套用到 [start, end) 选区：按选区边界拆分 run，命中段覆盖样式。
+ * 输入 runs 为 null 时视为整段无样式。返回前会做合并规范化。
+ */
+export function applyRunStyle(
+  runs: TextRun[] | null | undefined,
+  text: string,
+  start: number,
+  end: number,
+  patch: Partial<Omit<TextRun, 'text'>>,
+): TextRun[] {
+  const source = runs && runs.length > 0 ? runs : [{ text }];
+  const out: TextRun[] = [];
+  let pos = 0;
+  for (const run of source) {
+    const runStart = pos;
+    const runEnd = pos + run.text.length;
+    pos = runEnd;
+    if (runEnd <= start || runStart >= end) {
+      out.push({ ...run });
+      continue;
+    }
+    const from = Math.max(start, runStart) - runStart;
+    const to = Math.min(end, runEnd) - runStart;
+    if (from > 0) out.push({ ...run, text: run.text.slice(0, from) });
+    out.push({ ...run, text: run.text.slice(from, to), ...patch });
+    if (to < run.text.length) out.push({ ...run, text: run.text.slice(to) });
+  }
+  return normalizeRuns(out) ?? [{ text }];
+}
 
 export function isPin(annotation: { kind?: string; w: number; h: number }): boolean {
   return annotation.kind === 'pin' || (annotation.w <= 0 && annotation.h <= 0 && annotation.kind !== 'box');
@@ -41,6 +140,88 @@ export function isPin(annotation: { kind?: string; w: number; h: number }): bool
 
 export const CANVAS_FONT =
   '700 {size}px system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+
+/** 标注的 runs 是否带有覆盖样式（决定画布走富文本排版还是单段快路径） */
+export function hasRunOverrides(runs: TextRun[] | null | undefined): boolean {
+  if (!runs) return false;
+  return runs.some(
+    (run) => run.color !== undefined || run.fontSizeRatio !== undefined || run.fontWeight !== undefined,
+  );
+}
+
+/** 把标注展开成带样式的字符流（runs 字段省略处继承标注级样式） */
+export function styledCharsOf(
+  annotation: {
+    text: string;
+    font_size_ratio: number;
+    color: string;
+    font_weight: number;
+    runs?: TextRun[] | null;
+  },
+  canvasHeight: number,
+): Array<{ ch: string; color: string; size: number; weight: number }> {
+  const base = Math.max(4, annotation.font_size_ratio * canvasHeight);
+  const runs = annotation.runs && annotation.runs.length > 0 ? annotation.runs : [{ text: annotation.text }];
+  const chars: Array<{ ch: string; color: string; size: number; weight: number }> = [];
+  for (const run of runs) {
+    const size = Math.max(4, base * (run.fontSizeRatio ?? 1));
+    const weight = run.fontWeight ?? annotation.font_weight;
+    const color = run.color ?? annotation.color;
+    for (const ch of run.text) chars.push({ ch, color, size, weight });
+  }
+  return chars;
+}
+
+export type StyledLine = {
+  chars: Array<{ ch: string; color: string; size: number; weight: number; width: number }>;
+  width: number;
+  height: number;
+};
+
+/**
+ * 富文本逐行排版：按框宽逐字符断行（每字符用自己的字号/字重测量），
+ * 总高超出框高时整体按 0.92 缩小字号重排，与 layoutText 的收缩策略一致。
+ */
+export function layoutRunLines(
+  ctx: CanvasRenderingContext2D,
+  chars: Array<{ ch: string; color: string; size: number; weight: number }>,
+  maxWidth: number,
+  maxHeight: number,
+  fallbackLineHeight: number,
+): StyledLine[] {
+  let shrink = 1;
+  let result: StyledLine[] = [];
+  for (let attempt = 0; attempt < 14; attempt += 1) {
+    result = [];
+    let current: StyledLine['chars'] = [];
+    let lineWidth = 0;
+    let lineHeight = 0;
+    const pushLine = () => {
+      result.push({ chars: current, width: lineWidth, height: lineHeight || fallbackLineHeight });
+      current = [];
+      lineWidth = 0;
+      lineHeight = 0;
+    };
+    for (const char of chars) {
+      const size = Math.max(4, char.size * shrink);
+      if (char.ch === '\n') {
+        pushLine();
+        continue;
+      }
+      ctx.font = CANVAS_FONT.replace('700', String(char.weight)).replace('{size}', String(size));
+      const width = ctx.measureText(char.ch).width;
+      if (current.length > 0 && lineWidth + width > maxWidth) pushLine();
+      current.push({ ...char, size, width });
+      lineWidth += width;
+      lineHeight = Math.max(lineHeight, size * 1.25);
+    }
+    pushLine();
+    const total = result.reduce((sum, line) => sum + line.height, 0);
+    if (total <= maxHeight || shrink <= 0.35) break;
+    shrink *= 0.92;
+  }
+  return result;
+}
 
 let keySeed = 0;
 export function newKey(): string {

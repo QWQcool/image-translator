@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import { originalUrl, previewUrl, thumbUrl } from '@/lib/media';
-import { isPin, newKey, type DraftAnnotation } from '@/lib/annotation';
+import { isPin, newKey, parseRuns, type DraftAnnotation } from '@/lib/annotation';
 import { parseGroups, parsePhrases } from '@/lib/labelplus';
 import { useCollabRoom } from '@/lib/use-collab-room';
 import type { Asset, LabelPlusGroup, SpaceAccess, SpaceItem } from '@/lib/types';
@@ -13,6 +13,7 @@ import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
 import AnnotationPanel from './AnnotationPanel';
 import LabelPlusPanel from './LabelPlusPanel';
 import OcrModal from './OcrModal';
+import TextRenderPanel from './TextRenderPanel';
 import TranslateModal from './TranslateModal';
 
 const MODES: Array<{ id: EditorMode; key: string; label: string }> = [
@@ -39,6 +40,8 @@ function hydrate(row: DraftAnnotation): DraftAnnotation {
     group_id: row.group_id || 1,
     source_text: row.source_text ?? '',
     comment: row.comment ?? '',
+    runs: parseRuns(row.runs),
+    text_opacity: typeof row.text_opacity === 'number' ? row.text_opacity : 1,
   };
 }
 
@@ -489,23 +492,47 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
 
       <div className="flex min-h-0 flex-1 gap-5">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <AnnotationCanvas
-            imageSrc={originalUrl(asset.filename)}
-            previewSrc={previewUrl(asset.filename)}
-            imageWidth={imageWidth}
-            imageHeight={imageHeight}
-            annotations={annotations}
-            selectedKey={selectedKey}
-            onSelect={setSelectedKey}
-            onChange={applyChange}
-            fileName={asset.original_name ?? asset.filename}
-            readOnly={!canEdit}
-            mode={mode}
-            hidePins={hidePins}
-            showGroupNames={showGroupNames || mode === 'review'}
-            defaultGroupId={defaultGroupId}
-            followSelection={mode === 'input'}
-          />
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            <AnnotationCanvas
+              imageSrc={originalUrl(asset.filename)}
+              previewSrc={previewUrl(asset.filename)}
+              imageWidth={imageWidth}
+              imageHeight={imageHeight}
+              annotations={annotations}
+              selectedKey={selectedKey}
+              onSelect={setSelectedKey}
+              onChange={applyChange}
+              fileName={asset.original_name ?? asset.filename}
+              readOnly={!canEdit}
+              mode={mode}
+              hidePins={hidePins}
+              showGroupNames={showGroupNames || mode === 'review'}
+              defaultGroupId={defaultGroupId}
+              followSelection={mode === 'input'}
+            />
+            {mode === 'box' &&
+              (() => {
+                const selectedBox = annotations.find(
+                  (a) => a.key === selectedKey && !isPin(a),
+                );
+                if (!selectedBox) return null;
+                return (
+                  <div className="absolute bottom-3 left-3 z-10">
+                    <TextRenderPanel
+                      annotation={selectedBox}
+                      readOnly={!canEdit}
+                      onChange={(patch) =>
+                        applyChange(
+                          annotations.map((a) =>
+                            a.key === selectedBox.key ? { ...a, ...patch } : a,
+                          ),
+                        )
+                      }
+                    />
+                  </div>
+                );
+              })()}
+          </div>
           {neighbors.items.length > 1 && (
             <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
               {neighbors.items.map((entry) => (

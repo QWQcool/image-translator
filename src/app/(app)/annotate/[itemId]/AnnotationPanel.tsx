@@ -92,7 +92,9 @@ export default function AnnotationPanel({
               placeholder={readOnly ? '（只读）' : '输入要显示在图片上的文字…'}
               value={annotation.text}
               disabled={readOnly}
-              onChange={(event) => patch(annotation.key, { text: event.target.value })}
+              onChange={(event) =>
+                patch(annotation.key, { text: event.target.value, runs: null })
+              }
               onFocus={() => onSelect(annotation.key)}
             />
 
@@ -156,6 +158,25 @@ export default function AnnotationPanel({
                     className="h-1 flex-1 accent-sky"
                   />
                 </label>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="w-10 shrink-0 text-[11px] text-ink-500">不透明</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={Math.round((annotation.text_opacity ?? 1) * 100)}
+                  disabled={readOnly}
+                  onChange={(event) =>
+                    patch(annotation.key, { text_opacity: Number(event.target.value) / 100 })
+                  }
+                  className="h-1 flex-1 accent-sky"
+                />
+                <span className="w-9 shrink-0 text-right text-[11px] text-ink-400">
+                  {Math.round((annotation.text_opacity ?? 1) * 100)}%
+                </span>
               </div>
 
               <div className="flex items-center gap-2">

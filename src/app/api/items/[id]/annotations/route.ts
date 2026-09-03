@@ -52,9 +52,71 @@ type IncomingAnnotation = {
   group_id?: number;
   source_text?: string;
   comment?: string;
+  runs?: unknown;
+  text_opacity?: unknown;
 };
 
 const ALIGNS = new Set(['left', 'center', 'right']);
+
+/**
+ * 规范化富文本分段：校验颜色/字号倍率(0.5~2)/粗细，合并相邻同款。
+ * 全默认（单段无覆盖）时返回 null，runs 列不存；text 由 runs 拼接（纯文本冗余）。
+ */
+function normalizeRunsInput(raw: unknown): { runs: string | null; text: string } | null {
+  let list: unknown[];
+  if (typeof raw === 'string' && raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return null;
+      list = parsed;
+    } catch {
+      return null;
+    }
+  } else if (Array.isArray(raw)) {
+    list = raw;
+  } else {
+    return null;
+  }
+
+  const merged: Array<{ text: string; color?: string; fontSizeRatio?: number; fontWeight?: number }> = [];
+  for (const item of list) {
+    const row = item as { text?: unknown; color?: unknown; fontSizeRatio?: unknown; fontWeight?: unknown };
+    if (typeof row.text !== 'string' || row.text === '') continue;
+    const run = {
+      text: row.text,
+      ...(typeof row.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(row.color)
+        ? { color: row.color }
+        : {}),
+      ...(typeof row.fontSizeRatio === 'number' && Number.isFinite(row.fontSizeRatio)
+        ? { fontSizeRatio: Math.min(2, Math.max(0.5, row.fontSizeRatio)) }
+        : {}),
+      ...(row.fontWeight === 400 || row.fontWeight === 700 ? { fontWeight: row.fontWeight } : {}),
+    };
+    const last = merged[merged.length - 1];
+    if (
+      last &&
+      last.color === run.color &&
+      last.fontSizeRatio === run.fontSizeRatio &&
+      last.fontWeight === run.fontWeight
+    ) {
+      last.text += run.text;
+    } else {
+      merged.push(run);
+    }
+  }
+  if (merged.length === 0) return null;
+  const allDefault = merged.every(
+    (r) => r.color === undefined && r.fontSizeRatio === undefined && r.fontWeight === undefined,
+  );
+  if (allDefault) return { runs: null, text: merged.map((r) => r.text).join('') };
+  return { runs: JSON.stringify(merged), text: merged.map((r) => r.text).join('') };
+}
+
+function clampOpacity(value: unknown): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 1;
+  return Math.min(1, Math.max(0, num));
+}
 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -102,12 +164,16 @@ export async function PUT(request: Request, { params }: Params) {
     const y = clamp01(row.y);
     const kind = row.kind === 'pin' ? 'pin' : 'box';
     const groupId = Number.isInteger(row.group_id) ? Math.min(9, Math.max(1, Number(row.group_id))) : 1;
+    const runsNormalized = normalizeRunsInput(row.runs);
+    const text = runsNormalized ? runsNormalized.text : String(row.text ?? '');
     return {
       x,
       y,
       w: kind === 'pin' ? 0 : Math.max(0, Math.min(1 - x, clamp01(row.w))),
       h: kind === 'pin' ? 0 : Math.max(0, Math.min(1 - y, clamp01(row.h))),
-      text: String(row.text ?? ''),
+      text,
+      runs: runsNormalized?.runs ?? null,
+      text_opacity: clampOpacity(row.text_opacity),
       font_size_ratio: Math.min(0.5, Math.max(0.004, Number(row.font_size_ratio) || 0.035)),
       color: /^#[0-9a-fA-F]{6}$/.test(row.color ?? '') ? row.color : '#FFFFFF',
       bg_color: /^#[0-9a-fA-F]{8}$|^#[0-9a-fA-F]{6}$/.test(row.bg_color ?? '')
@@ -127,9 +193,9 @@ export async function PUT(request: Request, { params }: Params) {
   const clear = db.prepare('DELETE FROM annotations WHERE item_id = ?');
   const insert = db.prepare(
     `INSERT INTO annotations
-       (item_id, x, y, w, h, text, font_size_ratio, color, bg_color, align, font_weight,
+       (item_id, x, y, w, h, text, runs, text_opacity, font_size_ratio, color, bg_color, align, font_weight,
         order_index, kind, group_id, source_text, comment, updated_by)
-     VALUES (@item_id, @x, @y, @w, @h, @text, @font_size_ratio, @color, @bg_color, @align, @font_weight,
+     VALUES (@item_id, @x, @y, @w, @h, @text, @runs, @text_opacity, @font_size_ratio, @color, @bg_color, @align, @font_weight,
         @order_index, @kind, @group_id, @source_text, @comment, @updated_by)`,
   );
   const touch = db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`);

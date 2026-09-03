@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS annotations (
   group_id        INTEGER NOT NULL DEFAULT 1,
   source_text     TEXT NOT NULL DEFAULT '',
   comment         TEXT NOT NULL DEFAULT '',
+  -- 富文本分段（JSON 数组，字段省略=继承标注级样式）；text 列保留为纯文本冗余
+  runs            TEXT,
+  text_opacity    REAL NOT NULL DEFAULT 1,
   updated_by      INTEGER,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -187,16 +190,31 @@ function migrate(database: Database.Database): void {
   const annotationColumns = database
     .prepare('PRAGMA table_info(annotations)')
     .all() as Array<{ name: string }>;
-  const addAnnotationColumn = (name: string, ddl: string) => {
-    if (!annotationColumns.some((column) => column.name === name)) {
-      database.exec(`ALTER TABLE annotations ADD COLUMN ${ddl}`);
-    }
+  const addAnnotationColumn = (name: string, ddl: string): boolean => {
+    if (annotationColumns.some((column) => column.name === name)) return false;
+    database.exec(`ALTER TABLE annotations ADD COLUMN ${ddl}`);
+    return true;
   };
   addAnnotationColumn('kind', `kind TEXT NOT NULL DEFAULT 'box'`);
   addAnnotationColumn('group_id', `group_id INTEGER NOT NULL DEFAULT 1`);
   addAnnotationColumn('source_text', `source_text TEXT NOT NULL DEFAULT ''`);
   addAnnotationColumn('comment', `comment TEXT NOT NULL DEFAULT ''`);
   addAnnotationColumn('updated_by', `updated_by INTEGER`);
+  // Stage 5 富文本：runs 分段 JSON + 标注级文字不透明度
+  const runsColumnAdded = addAnnotationColumn('runs', `runs TEXT`);
+  addAnnotationColumn('text_opacity', `text_opacity REAL NOT NULL DEFAULT 1`);
+  // 老数据补 runs：仅在本列刚创建时执行一次（一次性守卫）。
+  // 之后的 runs=NULL 是用户「清除段落样式/改纯文本」的正常状态，
+  // 不能在每次启动/模块重载时重新回填。
+  if (runsColumnAdded) {
+    const legacyRuns = database
+      .prepare("SELECT id, text FROM annotations WHERE runs IS NULL AND text <> ''")
+      .all() as Array<{ id: number; text: string }>;
+    const fillRun = database.prepare('UPDATE annotations SET runs = ? WHERE id = ?');
+    for (const row of legacyRuns) {
+      fillRun.run(JSON.stringify([{ text: row.text }]), row.id);
+    }
+  }
 
   const latestSpaceColumns = database
     .prepare('PRAGMA table_info(spaces)')

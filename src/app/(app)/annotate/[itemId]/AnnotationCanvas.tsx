@@ -1,7 +1,17 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { clamp01, isPin, layoutText, newKey, type DraftAnnotation } from '@/lib/annotation';
+import {
+  CANVAS_FONT,
+  clamp01,
+  hasRunOverrides,
+  isPin,
+  layoutRunLines,
+  layoutText,
+  newKey,
+  styledCharsOf,
+  type DraftAnnotation,
+} from '@/lib/annotation';
 import { groupColor } from '@/lib/labelplus';
 
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
@@ -49,28 +59,61 @@ function paint(
     const text = annotation.text.trim();
     if (!text) continue;
 
-    const { lines, fontSize, lineHeight } = layoutText(
-      ctx,
-      text,
-      Math.max(8, w - padding * 2),
-      annotation.font_weight,
-      annotation.font_size_ratio * height,
-      Math.max(8, h - padding * 2),
-    );
-
-    ctx.fillStyle = annotation.color;
+    const innerWidth = Math.max(8, w - padding * 2);
+    const innerHeight = Math.max(8, h - padding * 2);
+    // 文字不透明度（底色透明度由 bg_color 表达，互不影响）
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, Math.max(0, annotation.text_opacity ?? 1));
     ctx.textBaseline = 'top';
-    const blockHeight = lines.length * lineHeight;
-    let cursorY = y + (h - blockHeight) / 2;
 
-    for (const line of lines) {
-      const lineWidth = ctx.measureText(line).width;
-      let cursorX = x + padding;
-      if (annotation.align === 'center') cursorX = x + (w - lineWidth) / 2;
-      else if (annotation.align === 'right') cursorX = x + w - padding - lineWidth;
-      ctx.fillText(line, cursorX, cursorY);
-      cursorY += lineHeight;
+    if (hasRunOverrides(annotation.runs)) {
+      // 富文本路径：按 runs 逐段排版绘制，保证导出与预览一致
+      const chars = styledCharsOf(annotation, height);
+      const lines = layoutRunLines(
+        ctx,
+        chars,
+        innerWidth,
+        innerHeight,
+        Math.max(4, annotation.font_size_ratio * height * 1.25),
+      );
+      const blockHeight = lines.reduce((sum, line) => sum + line.height, 0);
+      let cursorY = y + (h - blockHeight) / 2;
+      for (const line of lines) {
+        let cursorX = x + padding;
+        if (annotation.align === 'center') cursorX = x + (w - line.width) / 2;
+        else if (annotation.align === 'right') cursorX = x + w - padding - line.width;
+        for (const char of line.chars) {
+          ctx.font = CANVAS_FONT.replace('700', String(char.weight)).replace('{size}', String(char.size));
+          ctx.fillStyle = char.color;
+          ctx.fillText(char.ch, cursorX, cursorY + (line.height - char.size * 1.25) / 2);
+          cursorX += char.width;
+        }
+        cursorY += line.height;
+      }
+    } else {
+      const { lines, fontSize, lineHeight } = layoutText(
+        ctx,
+        text,
+        innerWidth,
+        annotation.font_weight,
+        annotation.font_size_ratio * height,
+        innerHeight,
+      );
+
+      ctx.fillStyle = annotation.color;
+      const blockHeight = lines.length * lineHeight;
+      let cursorY = y + (h - blockHeight) / 2;
+
+      for (const line of lines) {
+        const lineWidth = ctx.measureText(line).width;
+        let cursorX = x + padding;
+        if (annotation.align === 'center') cursorX = x + (w - lineWidth) / 2;
+        else if (annotation.align === 'right') cursorX = x + w - padding - lineWidth;
+        ctx.fillText(line, cursorX, cursorY);
+        cursorY += lineHeight;
+      }
     }
+    ctx.restore();
   }
 }
 
