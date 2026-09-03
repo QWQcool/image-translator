@@ -88,6 +88,49 @@ npm run dev                    # http://localhost:3000
 
 ---
 
+## 本地部署（单机体验）
+
+给 AI 的部署提示词——把下面整段复制给任意 AI 助手（CodeBuddy / Claude / ChatGPT 等），
+它就能在一台干净的电脑上把项目跑起来：
+
+```text
+请帮我把开源项目「图译空间」部署到这台电脑上做本地体验。
+
+项目信息：
+- 技术栈：Next.js 15（App Router）+ TypeScript + better-sqlite3 + sharp，需要 Node.js ≥ 20
+- 数据库与上传的图片都存在项目根目录的 data/ 文件夹（首次运行自动创建，无需手动建库）
+- 本地体验请用开发模式运行（npm run dev）：此模式下登录 Cookie 不要求 HTTPS，
+  而 npm start（生产模式）的 Cookie 带 Secure 标记，http://localhost 下会无法登录
+
+请按以下步骤执行：
+1. 确认本机 Node.js ≥ 20 且 npm 可用，没有就先安装
+2. 进入项目目录（若未克隆，先 git clone 仓库地址：<在此填入仓库地址>）
+3. 执行 npm install
+4. 在项目根目录创建 .env.local，内容至少包含：
+   SESSION_SECRET=<运行 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))" 生成随机串>
+   DATA_DIR=data
+   INVITE_CODE=<自定义一个邀请码，注册页面需要填写；留空则关闭注册>
+5. 运行 npm run dev，确认 http://localhost:3000 能打开登录页
+6. 用页面上的「注册」创建账号（填写第 4 步的邀请码）并登录
+7. 验证核心流程：新建空间 → 上传一张图片 → 进入标注编辑器画框填写译文并保存 → 空间详情页点「阅读」翻页
+8. 全部通过后汇报：访问地址、邀请码、data/ 目录位置，以及过程中遇到的问题与解决方式
+
+常见问题：
+- 3000 端口被占用：npm run dev -- -p 3001
+- better-sqlite3 安装失败：需要本机 C++ 构建工具链（Windows 装 VS Build Tools，Ubuntu 装 build-essential），
+  或删除 node_modules 后重试 npm install 让它下载预编译产物
+- 数据备份 = 直接复制整个 data/ 目录；.env.local 与 data/ 都不要提交进 git（已在 .gitignore）
+- AI 功能（OCR / 翻译 / 去字）是可选项：登录后进「AI 设置」填自己的 OpenAI 兼容服务即可，不填不影响其它功能
+```
+
+### 本机识别进程（可选）
+
+不配置 AI token 时的离线兜底：`node sidecar/stub.mjs` 会在 8765 端口提供一个
+OpenAI 风格的本地识别服务（`.env.local` 里 `SIDECAR_URL=http://127.0.0.1:8765`）。
+当前为协议占位实现，接上真实 OCR / LaMa 模型后无需改前端即可生效。
+
+---
+
 ## 部署到公网
 
 ### 1. 构建与启动
@@ -104,6 +147,8 @@ npm start                      # 默认 3000 端口
 SESSION_SECRET=<随机长字符串>   # 必填，缺失会直接抛错
 DATA_DIR=data                   # 可选，数据库与图片的存放目录
 PORT=3000                       # 可选
+TRUST_PROXY=1                   # 可选；部署在 Nginx 等反代后时置 1，注册/登录限流按真实 IP 分桶
+SIDECAR_URL=http://127.0.0.1:8765  # 可选；本机识别进程（离线 OCR / 去字兜底）
 ```
 
 ### 2. 数据持久化
