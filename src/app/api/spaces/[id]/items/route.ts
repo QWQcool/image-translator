@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { hardDeleteItems } from '@/lib/hard-delete';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import type { SpaceItem } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
 
-/** 把图库中的图片加入空间 */
+/** 把图库中的图片加入空间（旧入口，界面已改为直接上传，保留兼容） */
 export async function POST(request: Request, { params }: Params) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
@@ -33,7 +34,7 @@ export async function POST(request: Request, { params }: Params) {
   const denied = accessError(getSpaceAccess(spaceId, user.id), 'edit');
   if (denied) return denied;
 
-  // 可用范围＝自己的素材 ＋ 共享图库中被他人共享出来的素材；回收站里的素材不可加入
+  // 可用范围＝自己的素材 ＋ 共享图库中被他人共享出来的素材；历史软删除素材不可加入
   const placeholders = assetIds.map(() => '?').join(',');
   const assets = db
     .prepare(
@@ -77,4 +78,55 @@ export async function POST(request: Request, { params }: Params) {
     .all(spaceId) as SpaceItem[];
 
   return NextResponse.json({ items, added: assets.length }, { status: 201 });
+}
+
+/**
+ * 批量删除空间条目：彻底删除（条目 + 标注 + 不再被引用的素材与磁盘文件）。
+ * 删除即删除，不再有回收站。
+ */
+export async function DELETE(request: Request, { params }: Params) {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
+
+  const spaceId = Number((await params).id);
+  if (!Number.isInteger(spaceId) || spaceId <= 0) {
+    return NextResponse.json({ error: '参数错误' }, { status: 400 });
+  }
+
+  let body: { itemIds?: number[] };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: '请求体格式错误' }, { status: 400 });
+  }
+
+  const itemIds = [...new Set((body.itemIds ?? []).filter((id) => Number.isInteger(id)))];
+  if (itemIds.length === 0) {
+    return NextResponse.json({ error: '没有选择要删除的图片' }, { status: 400 });
+  }
+
+  const denied = accessError(getSpaceAccess(spaceId, user.id), 'edit');
+  if (denied) return denied;
+
+  // 只删属于该空间的条目，防止跨空间误删
+  const placeholders = itemIds.map(() => '?').join(',');
+  const owned = db
+    .prepare(
+      `SELECT id FROM space_items WHERE space_id = ? AND id IN (${placeholders})`,
+    )
+    .all(spaceId, ...itemIds) as Array<{ id: number }>;
+  if (owned.length === 0) {
+    return NextResponse.json({ error: '条目不属于该空间' }, { status: 404 });
+  }
+
+  const result = await hardDeleteItems(
+    owned.map((row) => row.id),
+    user.id,
+  );
+
+  return NextResponse.json({
+    deleted: result.deleted,
+    assetsDeleted: result.assetsDeleted,
+    assetsKept: result.assetsKept,
+  });
 }

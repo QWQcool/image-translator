@@ -36,15 +36,24 @@ const LIST_SQL = `
          END AS role
     FROM spaces s
     LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = ?
-   WHERE m.user_id IS NOT NULL OR s.owner_id = ? OR s.visibility = 'public'
+   WHERE (m.user_id IS NOT NULL OR s.owner_id = ? OR s.visibility = 'public') __SEARCH__
    ORDER BY (m.user_id IS NULL), s.updated_at DESC, s.id DESC
 `;
 
-export async function GET() {
+export async function GET(request: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
 
-  const rows = db.prepare(LIST_SQL).all(user.id, user.id, user.id) as Array<
+  // 全局查找：LIKE 匹配空间名 / 描述
+  const keyword = (new URL(request.url).searchParams.get('q') ?? '').trim();
+  const searchClause = keyword
+    ? `AND (s.name LIKE ? OR IFNULL(s.description, '') LIKE ?)`
+    : '';
+  const searchArgs = keyword ? [`%${keyword}%`, `%${keyword}%`] : [];
+
+  const rows = db
+    .prepare(LIST_SQL.replace('__SEARCH__', searchClause))
+    .all(user.id, user.id, user.id, ...searchArgs) as Array<
     Omit<SpaceWithCounts, 'can_edit' | 'is_owner'>
   >;
 

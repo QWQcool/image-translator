@@ -10,6 +10,7 @@ export type OpAction =
   | 'update'
   | 'delete'
   | 'upload'
+  | 'sort'
   | 'space_create'
   | 'space_delete'
   | 'member'

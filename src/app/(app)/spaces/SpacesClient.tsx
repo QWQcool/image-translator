@@ -24,11 +24,15 @@ export default function SpacesClient() {
   const [pendingDelete, setPendingDelete] = useState<SpaceWithCounts | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 全局查找：LIKE 匹配空间名 / 描述（走 API q 参数）
+  const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (q: string = '') => {
     setLoading(true);
     try {
-      const res = await fetch('/api/spaces');
+      const suffix = q ? `?q=${encodeURIComponent(q)}` : '';
+      const res = await fetch(`/api/spaces${suffix}`);
       const data = await res.json();
       setSpaces(Array.isArray(data.spaces) ? data.spaces : []);
     } finally {
@@ -36,9 +40,15 @@ export default function SpacesClient() {
     }
   }, []);
 
+  // 搜索防抖
   useEffect(() => {
-    void load();
-  }, [load]);
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  useEffect(() => {
+    void load(debouncedQuery);
+  }, [debouncedQuery, load]);
 
   async function saveDraft() {
     if (!draft) return;
@@ -72,7 +82,7 @@ export default function SpacesClient() {
         return;
       }
       setDraft(null);
-      await load();
+      await load(debouncedQuery);
     } finally {
       setSaving(false);
     }
@@ -87,7 +97,7 @@ export default function SpacesClient() {
       setError('删除失败');
       return;
     }
-    await load();
+    await load(debouncedQuery);
   }
 
   const groups = [
@@ -102,11 +112,17 @@ export default function SpacesClient() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <button type="button" className="btn-primary" onClick={() => setDraft({ ...EMPTY_DRAFT })}>
           新建空间
         </button>
         <span className="text-sm text-ink-500">共 {spaces.length} 个可见空间</span>
+        <input
+          className="input ml-auto w-56 py-1.5 text-xs"
+          placeholder="搜索空间名称 / 描述…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
       </div>
 
       {error && <p className="notice-error">{error}</p>}
@@ -116,9 +132,9 @@ export default function SpacesClient() {
       ) : spaces.length === 0 ? (
         <EmptyState
           showMascot
-          kaomoji="(´∀｀)♡"
-          title="还没有空间"
-          hint="新建一个空间，然后去「图库」把图片加进来"
+          kaomoji={debouncedQuery ? '(・・?)' : '(´∀｀)♡'}
+          title={debouncedQuery ? '没有匹配的空间' : '还没有空间'}
+          hint={debouncedQuery ? '换个关键词试试' : '新建一个空间，进入后直接上传图片'}
         />
       ) : (
         groups.map((group) => (
@@ -292,8 +308,8 @@ export default function SpacesClient() {
       >
         <p className="text-sm text-ink-200">
           将删除空间「{pendingDelete?.name}」及其中的 {pendingDelete?.item_count ?? 0} 张图片与{' '}
-          {pendingDelete?.annotation_count ?? 0} 条标注，所有协作者都会失去访问权。
-          图库中的原始素材不会被删除。
+          {pendingDelete?.annotation_count ?? 0} 条标注，所有协作者都会失去访问权，
+          <strong className="text-blush">此操作不可撤销</strong>。
         </p>
       </Modal>
     </div>

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { hardDeleteItems } from '@/lib/hard-delete';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import type { Asset, Space, SpaceAccess, SpaceItem } from '@/lib/types';
@@ -195,7 +196,7 @@ export async function PATCH(request: Request, { params }: Params) {
   });
 }
 
-/** 从空间移除（不删除图库素材与磁盘文件） */
+/** 删除条目：彻底删除（条目 + 标注 + 不再被引用的素材与磁盘文件） */
 export async function DELETE(_request: Request, { params }: Params) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
@@ -209,12 +210,15 @@ export async function DELETE(_request: Request, { params }: Params) {
   if (denied || !accessible) {
     return denied ?? NextResponse.json({ error: '条目不存在' }, { status: 404 });
   }
-  const item = accessible.item;
 
-  db.prepare('DELETE FROM space_items WHERE id = ?').run(id);
-  db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`).run(item.space_id);
+  const result = await hardDeleteItems([id], user.id);
+  if (result.deleted === 0) {
+    return NextResponse.json({ error: '条目不存在' }, { status: 404 });
+  }
 
-  logOp(user.id, 'delete', 'item', id, item.title || `条目 ${id}`, '从空间移除条目（素材保留在图库）');
-
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+    assetsDeleted: result.assetsDeleted,
+    assetsKept: result.assetsKept,
+  });
 }

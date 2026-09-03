@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { hardDeleteAssets } from '@/lib/hard-delete';
 import { logOp } from '@/lib/oplog';
 import type { Asset } from '@/lib/types';
 
@@ -40,7 +41,7 @@ export async function PATCH(request: Request, { params }: Params) {
   });
 }
 
-/** 单个删除：与批量删除一致走软删除（进回收站），磁盘文件保留 */
+/** 单个删除：与批量删除一致走彻底删除（含磁盘文件） */
 export async function DELETE(_request: Request, { params }: Params) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
@@ -49,32 +50,14 @@ export async function DELETE(_request: Request, { params }: Params) {
   if (!id) return NextResponse.json({ error: '参数错误' }, { status: 400 });
 
   const asset = db
-    .prepare(
-      'SELECT id, owner_id, title, original_name FROM assets WHERE id = ? AND owner_id = ? AND deleted_at IS NULL',
-    )
-    .get(id, user.id) as
-    | { id: number; owner_id: number; title: string | null; original_name: string | null }
-    | undefined;
-  if (!asset) return NextResponse.json({ error: '图片不存在或已在回收站' }, { status: 404 });
+    .prepare('SELECT id FROM assets WHERE id = ? AND deleted_at IS NULL')
+    .get(id) as { id: number } | undefined;
+  if (!asset) return NextResponse.json({ error: '图片不存在' }, { status: 404 });
 
-  // 与批量删除保持一致：告知用户这次删除影响了多少处协作空间引用
-  const usage = db
-    .prepare('SELECT COUNT(*) AS n FROM space_items WHERE asset_id = ?')
-    .get(id) as { n: number };
+  const result = await hardDeleteAssets([id], user.id);
+  if (result.deleted === 0) {
+    return NextResponse.json({ error: '图片不存在' }, { status: 404 });
+  }
 
-  db.transaction(() => {
-    db.prepare('DELETE FROM space_items WHERE asset_id = ?').run(id);
-    db.prepare(`UPDATE assets SET deleted_at = datetime('now') WHERE id = ?`).run(id);
-  })();
-
-  logOp(
-    user.id,
-    'delete',
-    'asset',
-    asset.id,
-    asset.title ?? asset.original_name ?? `素材 ${asset.id}`,
-    '移入回收站',
-  );
-
-  return NextResponse.json({ ok: true, detachedFromSpaces: usage.n });
+  return NextResponse.json({ ok: true, detachedFromSpaces: result.detachedFromSpaces });
 }

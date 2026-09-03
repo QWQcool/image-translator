@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { hardDeleteAssets } from '@/lib/hard-delete';
 import { logOp } from '@/lib/oplog';
 import { imageLimiter, storeImage, SUPPORTED_MIME_TYPES } from '@/lib/storage';
 import type { Asset } from '@/lib/types';
@@ -11,22 +12,19 @@ export async function GET(request: Request) {
 
   const params = new URL(request.url).searchParams;
   const keyword = (params.get('q') ?? '').trim();
-  // 开放图库：默认返回全部素材（公共池，已过滤回收站里的软删除素材）。
-  // my/shared 保留是为了兼容旧前端书签，语义分别收窄为"我上传的"/"他人上传的"；
-  // trash 只返回软删除素材（回收站视图）。
+  // 开放图库：默认返回全部素材（公共池，历史软删除素材继续过滤掉）。
+  // my/shared 保留是为了兼容旧前端书签，语义分别收窄为"我上传的"/"他人上传的"。
   const scopeParam = params.get('scope');
   const scope =
-    scopeParam === 'my' || scopeParam === 'shared' || scopeParam === 'trash'
-      ? scopeParam
-      : ('all' as const);
+    scopeParam === 'my' || scopeParam === 'shared' ? scopeParam : ('all' as const);
 
   const SELECT = `SELECT a.*, u.username AS owner_username
                     FROM assets a JOIN users u ON u.id = a.owner_id`;
   const FUZZY = `(a.title LIKE ? OR a.original_name LIKE ? OR IFNULL(a.source_author,'') LIKE ?)`;
   const kwArgs = [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`];
   const ORDER = `ORDER BY a.created_at DESC, a.id DESC`;
-  // 默认只看未删除的；trash 视图只看已删除的
-  const LIVE = scope === 'trash' ? 'a.deleted_at IS NOT NULL' : 'a.deleted_at IS NULL';
+  // 回收站已移除，历史软删除数据依旧不可见
+  const LIVE = 'a.deleted_at IS NULL';
 
   let rows: Asset[];
   if (scope === 'my') {
@@ -143,8 +141,8 @@ export async function POST(request: Request) {
 }
 
 /**
- * 批量删除图库图片：软删除（置 deleted_at + 解绑空间引用），磁盘文件保留。
- * 真正清文件走回收站的「彻底删除」。
+ * 批量删除图库图片：彻底删除（素材行 + 空间条目 + 标注 + 磁盘文件）。
+ * 回收站已移除，删除即删除。
  */
 export async function DELETE(request: Request) {
   const user = await getCurrentUser();
@@ -162,52 +160,13 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: '未提供要删除的图片' }, { status: 400 });
   }
 
-  const placeholders = ids.map(() => '?').join(',');
-  // 开放图库：任何人都可以清理公共池里的图。这里是软删除，
-  // 文件保留在磁盘与图库行里，可从回收站恢复。
-  const targets = db
-    .prepare(
-      `SELECT id, owner_id, title, original_name FROM assets
-        WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
-    )
-    .all(...ids) as { id: number; owner_id: number; title: string | null; original_name: string | null }[];
-
-  if (targets.length === 0) {
-    return NextResponse.json({ error: '图片不存在或已在回收站' }, { status: 404 });
-  }
-
-  const targetIds = targets.map((asset) => asset.id);
-  const ph2 = targetIds.map(() => '?').join(',');
-  // 先统计影响面（解绑后 cascade 会清掉这些行，无法再查）
-  const usage = db
-    .prepare(`SELECT COUNT(*) AS n FROM space_items WHERE asset_id IN (${ph2})`)
-    .get(...targetIds) as { n: number };
-  // 解绑空间引用（标注随外键级联删除），素材本身进回收站
-  const unbind = db.prepare('DELETE FROM space_items WHERE asset_id = ?');
-  const softDelete = db.prepare(
-    `UPDATE assets SET deleted_at = datetime('now') WHERE id = ?`,
-  );
-  db.transaction(() => {
-    for (const id of targetIds) {
-      unbind.run(id);
-      softDelete.run(id);
-    }
-  })();
-
-  for (const asset of targets) {
-    logOp(
-      user.id,
-      'delete',
-      'asset',
-      asset.id,
-      asset.title ?? asset.original_name ?? `素材 ${asset.id}`,
-      '移入回收站',
-    );
+  const result = await hardDeleteAssets(ids, user.id);
+  if (result.deleted === 0) {
+    return NextResponse.json({ error: '图片不存在' }, { status: 404 });
   }
 
   return NextResponse.json({
-    deleted: targets.length,
-    detachedFromSpaces: usage.n,
-    notOwned: targets.filter((a) => a.owner_id !== user.id).length,
+    deleted: result.deleted,
+    detachedFromSpaces: result.detachedFromSpaces,
   });
 }

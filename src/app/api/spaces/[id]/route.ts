@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { hardDeleteItems } from '@/lib/hard-delete';
 import { normalizeStyles } from '@/lib/labelplus';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
@@ -13,7 +14,7 @@ function parseId(raw: string): number | null {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-export async function GET(_request: Request, { params }: Params) {
+export async function GET(request: Request, { params }: Params) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
 
@@ -26,6 +27,13 @@ export async function GET(_request: Request, { params }: Params) {
 
   const space = db.prepare('SELECT * FROM spaces WHERE id = ?').get(id) as Space | undefined;
   if (!space) return NextResponse.json({ error: '空间不存在' }, { status: 404 });
+
+  // 空间内搜索：LIKE 匹配条目标题 / 素材原始文件名
+  const keyword = (new URL(request.url).searchParams.get('q') ?? '').trim();
+  const searchClause = keyword
+    ? 'AND (IFNULL(si.title, \'\') LIKE ? OR IFNULL(a.original_name, \'\') LIKE ?)'
+    : '';
+  const searchArgs = keyword ? [`%${keyword}%`, `%${keyword}%`] : [];
 
   const items = db
     .prepare(
@@ -48,10 +56,10 @@ export async function GET(_request: Request, { params }: Params) {
               a.created_at    AS a_created_at
          FROM space_items si
          JOIN assets a ON a.id = si.asset_id
-        WHERE si.space_id = ?
+        WHERE si.space_id = ? ${searchClause}
         ORDER BY si.sort_order, si.id`,
     )
-    .all(id) as Array<
+    .all(id, ...searchArgs) as Array<
     SpaceItem & {
       annotation_count: number;
       a_id: number;
@@ -234,10 +242,21 @@ export async function DELETE(_request: Request, { params }: Params) {
     | { name: string }
     | undefined;
 
+  // 删除即删除：先彻底删除空间内全部条目（标注与不再被引用的素材文件一并清理），
+  // 再删空间行。被其它空间共用的素材会自动保留。
+  const itemIds = db
+    .prepare('SELECT id FROM space_items WHERE space_id = ?')
+    .all(id) as Array<{ id: number }>;
+  if (itemIds.length > 0) {
+    await hardDeleteItems(
+      itemIds.map((row) => row.id),
+      user.id,
+    );
+  }
+
   db.prepare('DELETE FROM spaces WHERE id = ?').run(id);
 
   logOp(user.id, 'space_delete', 'space', id, space?.name ?? `空间 ${id}`);
 
-  // 只解绑空间与图片的关联，磁盘上的素材保留在图库中
   return NextResponse.json({ ok: true });
 }

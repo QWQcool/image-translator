@@ -2,12 +2,11 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { thumbUrl } from '@/lib/media';
 import type { Space, SpaceAccess, SpaceItem, SpaceVisibility } from '@/lib/types';
-import AddImagesModal from './AddImagesModal';
 import AiBatchModal from './AiBatchModal';
 import ExportMenu from './ExportMenu';
 import { ROLE_LABEL } from './MembersPanel';
@@ -18,7 +17,6 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [access, setAccess] = useState<SpaceAccess | null>(null);
   const [items, setItems] = useState<SpaceItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [addOpen, setAddOpen] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -29,33 +27,110 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     visibility: 'private' as SpaceVisibility,
   });
   const [pendingDeleteItem, setPendingDeleteItem] = useState<SpaceItem | null>(null);
+  const [pendingDeleteItems, setPendingDeleteItems] = useState<SpaceItem[] | null>(null);
   const [pendingDeleteSpace, setPendingDeleteSpace] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 图库并入空间：直接上传（多选 + 粘贴）
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // 空间内搜索（走 API q 参数）
+  const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  // 多选删除
+  const [selection, setSelection] = useState<Set<number>>(() => new Set());
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/spaces/${spaceId}`);
-      if (res.status === 404 || res.status === 403) {
-        router.replace('/spaces');
-        return;
+  const canEdit = access?.canEdit ?? false;
+  const searching = debouncedQuery.length > 0;
+
+  const load = useCallback(
+    async (q: string = '') => {
+      setLoading(true);
+      try {
+        const suffix = q ? `?q=${encodeURIComponent(q)}` : '';
+        const res = await fetch(`/api/spaces/${spaceId}${suffix}`);
+        if (res.status === 404 || res.status === 403) {
+          router.replace('/spaces');
+          return;
+        }
+        const data = await res.json();
+        setSpace(data.space ?? null);
+        setAccess(data.access ?? null);
+        setItems(Array.isArray(data.items) ? data.items : []);
+      } finally {
+        setLoading(false);
       }
-      const data = await res.json();
-      setSpace(data.space ?? null);
-      setAccess(data.access ?? null);
-      setItems(Array.isArray(data.items) ? data.items : []);
-    } finally {
-      setLoading(false);
-    }
-  }, [spaceId, router]);
+    },
+    [spaceId, router],
+  );
 
   useEffect(() => {
     if (!Number.isInteger(spaceId) || spaceId <= 0) {
       router.replace('/spaces');
-      return;
     }
-    void load();
-  }, [spaceId, load, router]);
+  }, [spaceId, router]);
+
+  // 搜索防抖：输入停顿后按 q 参数重新拉取
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  useEffect(() => {
+    void load(debouncedQuery);
+  }, [debouncedQuery, load]);
+
+  // 清空选择当列表变化（搜索切换后选中项可能不可见）
+  useEffect(() => {
+    setSelection((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(items.map((i) => i.id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [items]);
+
+  const uploadFiles = useCallback(
+    async (fileList: File[]) => {
+      const files = fileList.filter((f) => f.size > 0 && f.type.startsWith('image/'));
+      if (files.length === 0) return;
+      setUploading(true);
+      setError(null);
+      try {
+        const form = new FormData();
+        for (const file of files) form.append('files', file);
+        const res = await fetch(`/api/spaces/${spaceId}/assets`, {
+          method: 'POST',
+          body: form,
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error ?? '上传失败');
+          return;
+        }
+        if (Array.isArray(data.errors) && data.errors.length > 0) {
+          setError(data.errors.join('；'));
+        }
+        await load(debouncedQuery);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [spaceId, load, debouncedQuery],
+  );
+
+  // 粘贴图片直接上传到当前空间
+  useEffect(() => {
+    if (!canEdit) return;
+    const onPaste = (event: ClipboardEvent) => {
+      const files = Array.from(event.clipboardData?.files ?? []);
+      if (files.length > 0) {
+        event.preventDefault();
+        void uploadFiles(files);
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [canEdit, uploadFiles]);
 
   async function saveSpace() {
     if (!space) return;
@@ -80,7 +155,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     }
     setRenamingSpace(false);
     setError(null);
-    await load();
+    await load(debouncedQuery);
   }
 
   async function saveItemTitle(itemId: number) {
@@ -97,20 +172,52 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     });
     if (!res.ok) {
       setError('重命名失败');
-      await load();
+      await load(debouncedQuery);
     }
   }
 
-  async function removeItem() {
-    const item = pendingDeleteItem;
-    setPendingDeleteItem(null);
-    if (!item) return;
-    const res = await fetch(`/api/items/${item.id}`, { method: 'DELETE' });
+  /** 上移 / 下移：与相邻条目交换位置后把完整顺序发给服务端 */
+  async function moveItem(itemId: number, dir: -1 | 1) {
+    const index = items.findIndex((i) => i.id === itemId);
+    const target = index + dir;
+    if (index < 0 || target < 0 || target >= items.length) return;
+    const next = [...items];
+    [next[index], next[target]] = [next[target], next[index]];
+    setItems(next);
+    const res = await fetch(`/api/spaces/${spaceId}/items/reorder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order: next.map((i) => i.id) }),
+    });
     if (!res.ok) {
-      setError('移除失败');
+      setError('排序失败');
+      await load(debouncedQuery);
+    }
+  }
+
+  /** 彻底删除（单个或批量）：条目 + 标注 + 不再被引用的素材文件 */
+  async function removeItems(itemIds: number[]) {
+    if (itemIds.length === 0) return;
+    const res = await fetch(`/api/spaces/${spaceId}/items`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itemIds }),
+    });
+    if (!res.ok) {
+      setError('删除失败');
       return;
     }
-    await load();
+    setSelection(new Set());
+    await load(debouncedQuery);
+  }
+
+  function toggleSelect(id: number) {
+    setSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   async function deleteSpace() {
@@ -129,9 +236,9 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   }
   if (!space || !access) return null;
 
-  const canEdit = access.canEdit;
   const canManage = access.canManage;
   const totalAnnotations = items.reduce((sum, item) => sum + (item.annotation_count ?? 0), 0);
+  const selectedItems = items.filter((item) => selection.has(item.id));
 
   return (
     <div className="space-y-6">
@@ -204,10 +311,50 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
 
         {!renamingSpace && (
           <div className="flex flex-wrap items-center gap-2">
+            <input
+              className="input w-48 py-1.5 text-xs"
+              placeholder="搜索图片名称…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
             {canEdit && (
-              <button type="button" className="btn-primary" onClick={() => setAddOpen(true)}>
-                添加图片
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={uploading}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  {uploading ? '上传中…' : '上传图片'}
+                </button>
+                {selectedItems.length > 0 ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn-danger"
+                      onClick={() => setPendingDeleteItems(selectedItems)}
+                    >
+                      删除所选（{selectedItems.length}）
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() => setSelection(new Set())}
+                    >
+                      取消选择
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    onClick={() => setSelection(new Set(items.map((i) => i.id)))}
+                    disabled={items.length === 0}
+                  >
+                    全选
+                  </button>
+                )}
+              </>
             )}
             {canEdit && items.length > 0 && (
               <button type="button" className="btn-ghost" onClick={() => setBatchOpen(true)}>
@@ -242,137 +389,226 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       {items.length === 0 ? (
         <EmptyState
           showMascot
-          kaomoji="(๑•̀ㅂ•́)و✧"
-          title="这个空间还没有图片"
-          hint={canEdit ? '点击「添加图片」从图库中挑选' : '等待有编辑权限的成员添加'}
+          kaomoji={searching ? '(・・?)' : '(๑•̀ㅂ•́)و✧'}
+          title={searching ? '没有匹配的图片' : '这个空间还没有图片'}
+          hint={
+            searching
+              ? '换个关键词试试'
+              : canEdit
+                ? '点击「上传图片」或直接 Ctrl+V 粘贴图片'
+                : '等待有编辑权限的成员添加'
+          }
         />
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
-          {items.map((item) => (
-            <div key={item.id} className="card group overflow-hidden">
-              <Link
-                href={`/annotate/${item.id}`}
-                className="block"
-                onClick={(event) => {
-                  if (!canEdit) event.preventDefault();
-                }}
-              >
-                <div className="relative aspect-[4/3] w-full overflow-hidden bg-paper">
-                  <img
-                    src={thumbUrl(item.asset?.thumb_filename ?? null, item.asset?.filename ?? '')}
-                    alt={item.title ?? ''}
-                    loading="lazy"
-                    className={`h-full w-full object-cover transition-transform ${
-                      canEdit ? 'group-hover:scale-[1.03]' : ''
-                    }`}
-                  />
-                  {(item.annotation_count ?? 0) > 0 && (
-                    <span className="absolute right-2 top-2 rounded-md bg-sky/90 px-1.5 py-0.5 text-[11px] font-medium text-white">
-                      {item.annotation_count} 标注
-                    </span>
-                  )}
-                </div>
-              </Link>
+          {items.map((item, index) => {
+            const selected = selection.has(item.id);
+            return (
+              <div key={item.id} className="card group relative overflow-hidden">
+                <Link
+                  href={`/annotate/${item.id}`}
+                  className="block"
+                  onClick={(event) => {
+                    if (!canEdit) event.preventDefault();
+                  }}
+                >
+                  <div className="relative aspect-[4/3] w-full overflow-hidden bg-paper">
+                    <img
+                      src={thumbUrl(item.asset?.thumb_filename ?? null, item.asset?.filename ?? '')}
+                      alt={item.title ?? ''}
+                      loading="lazy"
+                      className={`h-full w-full object-cover transition-transform ${
+                        canEdit ? 'group-hover:scale-[1.03]' : ''
+                      }`}
+                    />
+                    {(item.annotation_count ?? 0) > 0 && (
+                      <span className="absolute right-2 top-2 rounded-md bg-sky/90 px-1.5 py-0.5 text-[11px] font-medium text-white">
+                        {item.annotation_count} 标注
+                      </span>
+                    )}
+                  </div>
+                </Link>
 
-              <div className="p-3">
-                {editingId === item.id && canEdit ? (
-                  <input
-                    autoFocus
-                    className="input px-2 py-1 text-xs"
-                    value={editingTitle}
-                    onChange={(e) => setEditingTitle(e.target.value)}
-                    onBlur={() => void saveItemTitle(item.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void saveItemTitle(item.id);
-                      if (e.key === 'Escape') setEditingId(null);
-                    }}
-                  />
-                ) : (
+                {canEdit && (
                   <button
                     type="button"
-                    disabled={!canEdit}
-                    onClick={() => {
-                      setEditingId(item.id);
-                      setEditingTitle(item.title ?? '');
-                    }}
-                    className={`block w-full truncate text-left text-xs ${
-                      canEdit ? 'text-ink-200 hover:text-sky-deep' : 'cursor-default text-ink-400'
+                    onClick={() => toggleSelect(item.id)}
+                    className={`absolute left-2 top-2 z-10 flex h-5 w-5 items-center justify-center rounded border text-[11px] font-bold transition-colors ${
+                      selected
+                        ? 'border-sky bg-sky text-white'
+                        : 'border-white/60 bg-cloud/70 text-transparent hover:border-sky'
                     }`}
-                    title={canEdit ? '点击重命名' : undefined}
+                    title={selected ? '取消选择' : '选择'}
                   >
-                    {item.title || '未命名'}
+                    ✓
                   </button>
                 )}
 
-                <p className="mt-1 truncate text-[11px] text-ink-400">
-                  {item.asset?.width && item.asset?.height
-                    ? `${item.asset.width}×${item.asset.height}`
-                    : ''}
-                </p>
-
-                <div className="mt-2.5 flex gap-2">
-                  <Link
-                    href={`/annotate/${item.id}`}
-                    className="btn-primary flex-1 py-1 text-xs"
-                  >
-                    {canEdit ? '标注' : '查看'}
-                  </Link>
-                  <Link href={`/typeset/${item.id}`} className="btn-ghost flex-1 py-1 text-xs">
-                    嵌字
-                  </Link>
-                  {canEdit && (
+                <div className="p-3">
+                  {editingId === item.id && canEdit ? (
+                    <input
+                      autoFocus
+                      className="input px-2 py-1 text-xs"
+                      value={editingTitle}
+                      onChange={(e) => setEditingTitle(e.target.value)}
+                      onBlur={() => void saveItemTitle(item.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void saveItemTitle(item.id);
+                        if (e.key === 'Escape') setEditingId(null);
+                      }}
+                    />
+                  ) : (
                     <button
                       type="button"
-                      className="btn-danger flex-1 py-1 text-xs"
-                      onClick={() => setPendingDeleteItem(item)}
+                      disabled={!canEdit}
+                      onClick={() => {
+                        setEditingId(item.id);
+                        setEditingTitle(item.title ?? '');
+                      }}
+                      className={`block w-full truncate text-left text-xs ${
+                        canEdit ? 'text-ink-200 hover:text-sky-deep' : 'cursor-default text-ink-400'
+                      }`}
+                      title={canEdit ? '点击重命名' : undefined}
                     >
-                      移除
+                      {item.title || '未命名'}
                     </button>
+                  )}
+
+                  <p className="mt-1 truncate text-[11px] text-ink-400">
+                    {item.asset?.width && item.asset?.height
+                      ? `${item.asset.width}×${item.asset.height}`
+                      : ''}
+                  </p>
+
+                  <div className="mt-2.5 flex gap-2">
+                    <Link
+                      href={`/annotate/${item.id}`}
+                      className="btn-primary flex-1 py-1 text-xs"
+                    >
+                      {canEdit ? '标注' : '查看'}
+                    </Link>
+                    <Link href={`/typeset/${item.id}`} className="btn-ghost flex-1 py-1 text-xs">
+                      嵌字
+                    </Link>
+                  </div>
+
+                  {canEdit && (
+                    <div className="mt-2 flex gap-2">
+                      {!searching && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-ghost px-2.5 py-1 text-xs"
+                            disabled={index === 0}
+                            title="上移"
+                            onClick={() => void moveItem(item.id, -1)}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-ghost px-2.5 py-1 text-xs"
+                            disabled={index === items.length - 1}
+                            title="下移"
+                            onClick={() => void moveItem(item.id, 1)}
+                          >
+                            ↓
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        className="btn-danger ml-auto px-2.5 py-1 text-xs"
+                        onClick={() => setPendingDeleteItem(item)}
+                      >
+                        删除
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
-      )}
-
-      {canEdit && (
-        <AddImagesModal
-          open={addOpen}
-          spaceId={spaceId}
-          existingAssetIds={items.map((i) => i.asset_id)}
-          onClose={() => setAddOpen(false)}
-          onAdded={() => void load()}
-        />
       )}
 
       {batchOpen && canEdit && (
         <AiBatchModal
           items={items.map((i) => ({ id: i.id, title: i.title }))}
           onClose={() => setBatchOpen(false)}
-          onDone={() => void load()}
+          onDone={() => void load(debouncedQuery)}
         />
       )}
 
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = '';
+          void uploadFiles(files);
+        }}
+      />
+
       <Modal
         open={pendingDeleteItem !== null}
-        title="从空间移除图片"
+        title="删除图片"
         onClose={() => setPendingDeleteItem(null)}
         footer={
           <>
             <button type="button" className="btn-ghost" onClick={() => setPendingDeleteItem(null)}>
               取消
             </button>
-            <button type="button" className="btn-danger" onClick={() => void removeItem()}>
-              确认移除
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={() => {
+                const item = pendingDeleteItem;
+                setPendingDeleteItem(null);
+                if (item) void removeItems([item.id]);
+              }}
+            >
+              确认删除
             </button>
           </>
         }
       >
         <p className="text-sm text-ink-200">
-          将把「{pendingDeleteItem?.title || '未命名'}」从本空间移除，其
-          {pendingDeleteItem?.annotation_count ?? 0} 条标注会一并删除。
-          图库中的原始素材保留，可重新加入其它空间。
+          将彻底删除「{pendingDeleteItem?.title || '未命名'}」及其
+          {pendingDeleteItem?.annotation_count ?? 0} 条标注与磁盘文件，
+          <strong className="text-blush">此操作不可撤销</strong>。
+        </p>
+      </Modal>
+
+      <Modal
+        open={pendingDeleteItems !== null}
+        title="批量删除图片"
+        onClose={() => setPendingDeleteItems(null)}
+        footer={
+          <>
+            <button type="button" className="btn-ghost" onClick={() => setPendingDeleteItems(null)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={() => {
+                const targets = pendingDeleteItems;
+                setPendingDeleteItems(null);
+                if (targets) void removeItems(targets.map((i) => i.id));
+              }}
+            >
+              确认删除
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-ink-200">
+          将彻底删除所选 {pendingDeleteItems?.length ?? 0} 张图片及其全部标注与磁盘文件，
+          <strong className="text-blush">此操作不可撤销</strong>。
         </p>
       </Modal>
 
@@ -397,7 +633,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       >
         <p className="text-sm text-ink-200">
           将删除空间「{space.name}」及其中全部 {items.length} 张图片与 {totalAnnotations} 条标注，
-          所有协作者都会失去访问权；图库中的原始素材不会被删除。
+          所有协作者都会失去访问权，<strong className="text-blush">此操作不可撤销</strong>。
         </p>
       </Modal>
     </div>
