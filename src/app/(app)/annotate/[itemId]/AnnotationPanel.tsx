@@ -69,6 +69,7 @@ export default function AnnotationPanel({
         return (
           <div
             key={annotation.key}
+            data-annotation-key={annotation.key}
             onMouseDown={() => onSelect(annotation.key)}
             className={`rounded-lg border p-3 transition-colors ${
               active ? 'border-sky bg-sky/5' : 'border-ink-700 bg-cloud'

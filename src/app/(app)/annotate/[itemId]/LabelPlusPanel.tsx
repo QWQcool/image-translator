@@ -2,8 +2,10 @@
 
 import { useState } from 'react';
 import EmptyState from '@/components/EmptyState';
+import Modal from '@/components/Modal';
 import { isPin, type DraftAnnotation } from '@/lib/annotation';
 import { groupColor } from '@/lib/labelplus';
+import { checkText, fixText, type TextIssue } from '@/lib/text-check';
 import type { LabelPlusGroup } from '@/lib/types';
 
 export default function LabelPlusPanel({
@@ -56,6 +58,45 @@ export default function LabelPlusPanel({
   // 拖动排序：dragKey = 正在被拖动的标号，overKey = 悬停目标（高亮用）
   const [dragKey, setDragKey] = useState<string | null>(null);
   const [overKey, setOverKey] = useState<string | null>(null);
+  // 标点检查：结果按标号分组；null = 未检查
+  const [checkResults, setCheckResults] = useState<
+    Array<{ key: string; index: number; issues: TextIssue[] }> | null
+  >(null);
+  const [allOk, setAllOk] = useState(false);
+
+  /** 检查当前图所有 pin 译文（纯前端，不阻塞导出/翻译） */
+  function runCheck() {
+    const found: Array<{ key: string; index: number; issues: TextIssue[] }> = [];
+    pins.forEach((pin, index) => {
+      const issues = checkText(pin.text);
+      if (issues.length > 0) found.push({ key: pin.key, index, issues });
+    });
+    setCheckResults(found.length > 0 ? found : []);
+    setAllOk(found.length === 0);
+    if (found.length === 0) {
+      window.setTimeout(() => setAllOk(false), 3000);
+    }
+  }
+
+  /** 一键修复：只修 fixable 项（走 applyChange 保存链路，可撤销） */
+  function applyFixes() {
+    onChange(
+      annotations.map((row) =>
+        isPin(row) && row.text ? { ...row, text: fixText(row.text) } : row,
+      ),
+    );
+    setCheckResults(null);
+  }
+
+  /** 点检查结果：选中对应标号卡片并滚动过去 */
+  function focusPin(key: string) {
+    onSelect(key);
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-annotation-key="${key}"]`)
+        ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+  }
 
   function patch(key: string, updates: Partial<DraftAnnotation>) {
     onChange(annotations.map((item) => (item.key === key ? { ...item, ...updates } : item)));
@@ -168,6 +209,16 @@ export default function LabelPlusPanel({
               分组
             </button>
           )}
+          {/* 标点规范检查（纯前端提示，不阻塞导出/翻译） */}
+          <button
+            type="button"
+            onClick={runCheck}
+            className="btn-ghost ml-auto px-2 py-0.5 text-[11px]"
+            title="检查本图所有标号译文的标点规范"
+          >
+            检查
+          </button>
+          {allOk && <span className="text-[11px] text-emerald-600">全部规范</span>}
         </div>
       )}
 
@@ -225,6 +276,7 @@ export default function LabelPlusPanel({
         return (
           <div
             key={pin.key}
+            data-annotation-key={pin.key}
             onMouseDown={() => onSelect(pin.key)}
             onDragOver={(event) => {
               if (dragKey && dragKey !== pin.key) {
@@ -361,6 +413,63 @@ export default function LabelPlusPanel({
           </div>
         );
       })}
+
+      {/* 标点检查结果弹层：点击问题定位到对应卡片 */}
+      <Modal
+        open={checkResults !== null}
+        title="标点规范检查"
+        onClose={() => setCheckResults(null)}
+        footer={
+          <>
+            <button type="button" className="btn-ghost" onClick={() => setCheckResults(null)}>
+              关闭
+            </button>
+            {!readOnly && checkResults && checkResults.length > 0 && (
+              <button type="button" className="btn-primary" onClick={applyFixes}>
+                一键修复
+              </button>
+            )}
+          </>
+        }
+      >
+        {checkResults && checkResults.length === 0 ? (
+          <p className="text-sm text-emerald-600">全部规范，没有发现问题。</p>
+        ) : (
+          <div className="max-h-80 space-y-3 overflow-y-auto">
+            {checkResults?.map((group) => (
+              <div key={group.key} className="rounded-lg border border-ink-700 p-2">
+                <button
+                  type="button"
+                  className="text-xs font-medium text-sky-deep hover:underline"
+                  onClick={() => focusPin(group.key)}
+                >
+                  标号 {group.index + 1}（{group.issues.length} 个问题）
+                </button>
+                <ul className="mt-1 space-y-1">
+                  {group.issues.map((issue, i) => (
+                    <li key={i} className="text-[11px] text-ink-300">
+                      <span
+                        className={`mr-1 rounded px-1 py-0.5 text-[10px] ${
+                          issue.fixable
+                            ? 'bg-sky/15 text-sky-deep'
+                            : 'bg-amber-500/15 text-amber-600'
+                        }`}
+                      >
+                        {issue.rule}
+                      </span>
+                      {issue.message}
+                      <span className="ml-1 text-ink-500">{issue.snippet}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            <p className="text-[11px] text-ink-500">
+              蓝色规则可自动修复（省略号 / 多余空行 / 首尾空白），amber 规则仅提示。
+            </p>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

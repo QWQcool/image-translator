@@ -107,6 +107,42 @@ export function normalizeRuns(runs: TextRun[] | null | undefined): TextRun[] | n
 }
 
 /**
+ * 对单条标注做字面量查找替换（空间内批量替换与当前图全部替换共用，避免两份实现漂移）。
+ * 同时处理 text / source_text / runs（富文本逐段替换后按 PUT 保存路径的规范化语义合并），
+ * 保证 runs 与 text 同步，避免下次保存时替换被 runsNormalized.text 静默回退。
+ * changed = 三者任一发生实际变化。
+ */
+export function replaceInAnnotation(
+  row: { text: string; source_text: string; runs?: TextRun[] | null },
+  find: string,
+  replace: string,
+  includeSource: boolean,
+): { text: string; source_text: string; runs: TextRun[] | null; changed: boolean } {
+  if (!find) {
+    return { text: row.text, source_text: row.source_text, runs: row.runs ?? null, changed: false };
+  }
+
+  const text = row.text.split(find).join(replace);
+  const source_text = includeSource
+    ? row.source_text.split(find).join(replace)
+    : row.source_text;
+
+  // 富文本：逐段替换后再规范化（合并相邻同款、剔除被替换成空串的段）
+  let runs = row.runs ?? null;
+  if (runs && runs.length > 0) {
+    const mapped = runs.map((run) => ({ ...run, text: run.text.split(find).join(replace) }));
+    runs = normalizeRuns(mapped);
+  }
+
+  const changed =
+    text !== row.text ||
+    source_text !== row.source_text ||
+    JSON.stringify(runs) !== JSON.stringify(row.runs ?? null);
+
+  return { text, source_text, runs, changed };
+}
+
+/**
  * 把样式套用到 [start, end) 选区：按选区边界拆分 run，命中段覆盖样式。
  * 输入 runs 为 null 时视为整段无样式。返回前会做合并规范化。
  */

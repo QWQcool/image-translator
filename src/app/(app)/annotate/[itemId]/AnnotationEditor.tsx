@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import EmptyState from '@/components/EmptyState';
@@ -12,6 +12,7 @@ import { useCollabRoom } from '@/lib/use-collab-room';
 import type { Asset, LabelPlusGroup, SpaceAccess, SpaceItem } from '@/lib/types';
 import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
 import AnnotationPanel from './AnnotationPanel';
+import FindBar from './FindBar';
 import LabelPlusPanel from './LabelPlusPanel';
 import OcrModal from './OcrModal';
 import TextRenderPanel from './TextRenderPanel';
@@ -54,6 +55,7 @@ const HISTORY_COALESCE_MS = 400;
 
 export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +83,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const phraseCursor = useRef(0);
   const [ocrOpen, setOcrOpen] = useState(false);
   const [translateOpen, setTranslateOpen] = useState(false);
+  // 查找 / 替换浮动条
+  const [findOpen, setFindOpen] = useState(false);
   /** 待确认删除的标注 key 集合（单删 / 批删统一走二次确认） */
   const [confirmKeys, setConfirmKeys] = useState<string[] | null>(null);
   const [neighbors, setNeighbors] = useState<{
@@ -442,6 +446,24 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     [pins, selectedKey],
   );
 
+  // 空间内搜索跳转：/annotate/[itemId]?focus=<annotationId> 自动选中对应标注
+  const focusParam = searchParams.get('focus');
+  const focusAppliedRef = useRef<number | null>(null);
+  useEffect(() => {
+    const focusId = Number(focusParam);
+    if (!Number.isInteger(focusId) || focusId <= 0 || loading) return;
+    if (focusAppliedRef.current === focusId) return;
+    const row = annotationsRef.current.find((a) => a.id === focusId);
+    if (!row) return; // 标注还没到位时等下一次 annotations 更新
+    focusAppliedRef.current = focusId;
+    selectOne(row.key);
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-annotation-key="${row.key}"]`)
+        ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+  }, [focusParam, loading, annotations, selectOne]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -465,12 +487,20 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       }
       if (event.key === 'Escape') {
         setPhraseMenuOpen(false);
+        setFindOpen(false);
         // Escape 清空多选（单选保留）
         setSelectedKeys([]);
         return;
       }
 
       if (typing) return;
+
+      // Ctrl+F 打开查找条（typing 时不拦截，输入框里保留浏览器原生行为）
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        setFindOpen(true);
+        return;
+      }
 
       // 撤销 / 重做：Ctrl+Z 撤销，Ctrl+Y 或 Ctrl+Shift+Z 重做
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
@@ -670,6 +700,14 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           >
             重做
           </button>
+          <button
+            type="button"
+            className="btn-ghost px-2 py-1 text-xs"
+            onClick={() => setFindOpen(true)}
+            title="查找 / 替换（Ctrl+F）"
+          >
+            查找
+          </button>
         </div>
 
         <span className="ml-auto flex items-center gap-2">
@@ -737,6 +775,17 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               defaultGroupId={defaultGroupId}
               followSelection={mode === 'input'}
             />
+            {/* 查找 / 替换浮动条 */}
+            {findOpen && (
+              <FindBar
+                annotations={annotations}
+                spaceId={item.space_id}
+                canEdit={canEdit}
+                onSelect={selectOne}
+                onChange={applyChange}
+                onClose={() => setFindOpen(false)}
+              />
+            )}
             {/* 多选浮动工具条：批量删除 / 批量归组 */}
             {effectiveSelectedKeys.length > 1 && canEdit && (
               <div className="absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-ink-700 bg-cloud px-3 py-2 shadow-card">
@@ -897,6 +946,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       {translateOpen && (
         <TranslateModal
           itemId={itemId}
+          spaceId={item.space_id}
+          canEdit={canEdit}
           onClose={() => setTranslateOpen(false)}
           onApply={applyTranslations}
         />

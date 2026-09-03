@@ -47,6 +47,8 @@ export type Space = {
   lp_phrases?: string | null;
   /** 嵌字分组样式预设（JSON：{[groupId]: LpStyle}） */
   lp_styles?: string | null;
+  /** 术语表（JSON 数组 [{from,to,note?}]） */
+  lp_glossary?: string | null;
 };
 
 /** owner 可增删改并管理成员；editor 可增删改；viewer 只读 */

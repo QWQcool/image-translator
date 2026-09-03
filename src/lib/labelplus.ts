@@ -50,6 +50,50 @@ export function parsePhrases(raw: string | null | undefined): string[] {
   }
 }
 
+/** 术语表条目：原文词 → 译文词（可选备注），空间级全员共用 */
+export type GlossaryEntry = { from: string; to: string; note?: string };
+
+/** 单条术语白名单清洗：from/to 必填，长度截断 */
+function cleanGlossaryEntry(item: unknown): GlossaryEntry | null {
+  if (!item || typeof item !== 'object') return null;
+  const row = item as { from?: unknown; to?: unknown; note?: unknown };
+  const from = typeof row.from === 'string' ? row.from.trim().slice(0, 60) : '';
+  const to = typeof row.to === 'string' ? row.to.trim().slice(0, 60) : '';
+  if (!from || !to) return null;
+  const note = typeof row.note === 'string' ? row.note.trim().slice(0, 100) : '';
+  return note ? { from, to, note } : { from, to };
+}
+
+/** 解析空间里存的 lp_glossary JSON（损坏/缺省返回空表），上限 200 条 */
+export function parseGlossary(raw: string | null | undefined): GlossaryEntry[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const out: GlossaryEntry[] = [];
+    for (const item of parsed) {
+      const clean = cleanGlossaryEntry(item);
+      if (clean) out.push(clean);
+      if (out.length >= 200) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** 清洗任意输入为合法术语表（API 校验与前端保存共用），上限 200 条 */
+export function normalizeGlossaryInput(input: unknown): GlossaryEntry[] {
+  if (!Array.isArray(input)) return [];
+  const out: GlossaryEntry[] = [];
+  for (const item of input) {
+    const clean = cleanGlossaryEntry(item);
+    if (clean) out.push(clean);
+    if (out.length >= 200) break;
+  }
+  return out;
+}
+
 export type LpLabel = { x: number; y: number; groupId: number; text: string };
 export type LpFile = { filename: string; labels: LpLabel[] };
 export type LpDocument = { groups: string[]; files: LpFile[] };

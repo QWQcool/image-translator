@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { hardDeleteItems } from '@/lib/hard-delete';
-import { normalizeStyles } from '@/lib/labelplus';
+import { normalizeGlossaryInput, normalizeStyles } from '@/lib/labelplus';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import type { Asset, Space, SpaceItem, SpaceVisibility } from '@/lib/types';
@@ -134,6 +134,7 @@ export async function PATCH(request: Request, { params }: Params) {
     visibility?: string;
     lp_groups?: Array<{ id: number; name: string }>;
     lp_styles?: Record<string, unknown>;
+    lp_glossary?: unknown;
   };
   try {
     body = await request.json();
@@ -191,12 +192,23 @@ export async function PATCH(request: Request, { params }: Params) {
     lpStylesJson = JSON.stringify(normalizeStyles(body.lp_styles));
   }
 
+  // 术语表：与 lp_groups 同级（公共工作数据），edit 级权限即可修改；
+  // 显式传空数组 = 清空，与 lp_groups 的「留空停用」语义不同
+  let lpGlossaryJson: string | null | undefined;
+  if (body.lp_glossary !== undefined) {
+    if (!Array.isArray(body.lp_glossary)) {
+      return NextResponse.json({ error: 'lp_glossary 必须是数组' }, { status: 400 });
+    }
+    lpGlossaryJson = JSON.stringify(normalizeGlossaryInput(body.lp_glossary));
+  }
+
   if (
     name === undefined &&
     description === undefined &&
     visibility === undefined &&
     lpGroupsJson === undefined &&
-    lpStylesJson === undefined
+    lpStylesJson === undefined &&
+    lpGlossaryJson === undefined
   ) {
     return NextResponse.json({ error: '没有需要更新的字段' }, { status: 400 });
   }
@@ -208,9 +220,10 @@ export async function PATCH(request: Request, { params }: Params) {
             visibility = COALESCE(?, visibility),
             lp_groups = COALESCE(?, lp_groups),
             lp_styles = COALESCE(?, lp_styles),
+            lp_glossary = COALESCE(?, lp_glossary),
             updated_at = datetime('now')
       WHERE id = ?`,
-  ).run(name ?? null, description ?? null, visibility ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, id);
+  ).run(name ?? null, description ?? null, visibility ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, lpGlossaryJson ?? null, id);
 
   // 日志：只记管理类改动（名称/描述/可见性），分组表与样式的编辑很频繁，不刷屏
   const changed: string[] = [];

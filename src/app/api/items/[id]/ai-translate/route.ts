@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { aiConfigured, resolveAiConfig } from '@/lib/ai';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { parseGlossary } from '@/lib/labelplus';
 import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 
@@ -29,7 +30,7 @@ export async function POST(request: Request, { params }: Params) {
   const denied = accessError(item ? getSpaceAccess(item.space_id, user.id) : null, 'edit');
   if (denied || !item) return denied ?? NextResponse.json({ error: '条目不存在' }, { status: 404 });
 
-  let body: { providerId?: number };
+  let body: { providerId?: number; fullGlossary?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -59,11 +60,32 @@ export async function POST(request: Request, { params }: Params) {
     );
   }
 
-  // 组装对话上下文：图片内容描述 + 全部原文（含彼此的顺序，帮助模型理解剧情连贯性）
+  // 组装对话上下文：图片内容描述 + 术语表 + 全部原文（含彼此的顺序，帮助模型理解剧情连贯性）
   const contextLines: string[] = [];
   if (item.ai_context) {
     contextLines.push(`图片内容描述：${item.ai_context}`);
   }
+
+  // 术语表注入：默认只注入原文中字面出现（不区分大小写）的术语；
+  // fullGlossary=true 时附加整表（上限 150 条防 token 爆炸）
+  const space = db.prepare('SELECT lp_glossary FROM spaces WHERE id = ?').get(item.space_id) as
+    | { lp_glossary: string | null }
+    | undefined;
+  const glossary = parseGlossary(space?.lp_glossary);
+  const allSource = pins.map((pin) => pin.source_text).join('\n').toLowerCase();
+  const matchedGlossary = glossary.filter((entry) =>
+    allSource.includes(entry.from.toLowerCase()),
+  );
+  const injectedGlossary = body.fullGlossary
+    ? glossary.slice(0, 150)
+    : matchedGlossary.slice(0, 150);
+  if (injectedGlossary.length > 0) {
+    const glossaryLines = injectedGlossary
+      .map((entry) => `- ${entry.from} → ${entry.to}${entry.note ? `（${entry.note}）` : ''}`)
+      .join('\n');
+    contextLines.push(`术语表（翻译必须优先采用）：\n${glossaryLines}`);
+  }
+
   const sourceList = pins.map((pin) => ({ id: pin.id, text: pin.source_text }));
 
   let translated: Record<number, string> = {};
@@ -132,5 +154,9 @@ export async function POST(request: Request, { params }: Params) {
     `AI 翻译，生成 ${proposals.length} 条译文建议`,
   );
 
-  return NextResponse.json({ proposals, context: item.ai_context });
+  return NextResponse.json({
+    proposals,
+    context: item.ai_context,
+    glossaryHits: matchedGlossary.length,
+  });
 }

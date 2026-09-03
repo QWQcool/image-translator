@@ -236,6 +236,11 @@ function migrate(database: Database.Database): void {
       .run(JSON.stringify(DEFAULT_LP_STYLES));
   }
 
+  // 术语表（JSON 数组 [{from,to,note?}]，空间级全员共用），AI 翻译时注入
+  if (!latestSpaceColumns.some((column) => column.name === 'lp_glossary')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN lp_glossary TEXT NOT NULL DEFAULT '[]'`);
+  }
+
   // 开放空间改造：历史遗留的私人空间/私人素材一次性转成公共，
   // 之后 API 层也不再接受 private（幂等，重复执行无副作用）。
   database.exec(`UPDATE spaces SET visibility = 'public' WHERE visibility <> 'public'`);
