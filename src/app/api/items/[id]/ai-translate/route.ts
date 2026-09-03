@@ -30,7 +30,7 @@ export async function POST(request: Request, { params }: Params) {
   const denied = accessError(item ? getSpaceAccess(item.space_id, user.id) : null, 'edit');
   if (denied || !item) return denied ?? NextResponse.json({ error: '条目不存在' }, { status: 404 });
 
-  let body: { providerId?: number; fullGlossary?: boolean };
+  let body: { providerId?: number; fullGlossary?: boolean; applyTranslations?: boolean };
   try {
     body = await request.json();
   } catch {
@@ -145,17 +145,42 @@ export async function POST(request: Request, { params }: Params) {
     translated: translated[pin.id] ?? '',
   }));
 
+  /**
+   * applyTranslations=true：服务端直接把译文写入对应 pin 的 text（事务、记 updated_by/updated_at）。
+   * 场景：一键整页机翻没有编辑器本地状态，无法走「编辑器本地回填 + 保存」，必须服务端落库。
+   * 不传时行为完全不变（编辑器内仍走本地回填）。
+   */
+  let applied = 0;
+  if (body.applyTranslations) {
+    const valid = proposals.filter((row) => row.translated.trim() !== '');
+    if (valid.length > 0) {
+      const update = db.prepare(
+        `UPDATE annotations
+            SET text = ?, updated_by = ?, updated_at = datetime('now')
+          WHERE id = ? AND item_id = ? AND kind = 'pin'`,
+      );
+      db.transaction(() => {
+        for (const row of valid) {
+          applied += Number(update.run(row.translated, user.id, row.id, itemId).changes);
+        }
+      })();
+    }
+  }
+
   logOp(
     user.id,
     'ai_translate',
     'ai',
     itemId,
     itemDisplayName(itemId),
-    `AI 翻译，生成 ${proposals.length} 条译文建议`,
+    body.applyTranslations
+      ? `AI 翻译，生成 ${proposals.length} 条译文建议，直接应用 ${applied} 条`
+      : `AI 翻译，生成 ${proposals.length} 条译文建议`,
   );
 
   return NextResponse.json({
     proposals,
+    applied,
     context: item.ai_context,
     glossaryHits: matchedGlossary.length,
   });

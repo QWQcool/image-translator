@@ -63,6 +63,24 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   // 成品列表是否已拉取过（首次切到成品视图才请求）
   const outputsLoaded = useRef(false);
   const [pendingDeleteOutput, setPendingDeleteOutput] = useState<Output | null>(null);
+  // 一键机翻：AI 是否就绪（OCR 可用且翻译模型已配置）；null=预检中
+  const [aiReady, setAiReady] = useState<boolean | null>(null);
+  // 一键机翻：确认/进度 Modal 状态（mt = machine translate，避免与 AI 批量处理弹窗的 batchOpen 撞名）
+  const [mtOpen, setMtOpen] = useState(false);
+  const [mtScope, setMtScope] = useState<'untranslated' | 'all'>('untranslated');
+  const [mtRunning, setMtRunning] = useState(false);
+  const mtCancelled = useRef(false);
+  const [mtProgress, setMtProgress] = useState<{
+    done: number;
+    total: number;
+    current: string;
+    success: number;
+    failed: number;
+  } | null>(null);
+  const [mtFailures, setMtFailures] = useState<Array<{ title: string; reason: string }>>([]);
+  // 非空 = 流水线已结束（成功/失败汇总展示中）
+  const [mtDone, setMtDone] = useState<{ success: number; failed: number } | null>(null);
+  const [mtShowFailures, setMtShowFailures] = useState(false);
 
   const canEdit = access?.canEdit ?? false;
   const searching = debouncedQuery.length > 0;
@@ -113,6 +131,32 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       return next.size === prev.size ? prev : next;
     });
   }, [items]);
+
+  // 一键机翻预检：OCR（含检测服务/本机 sidecar）与对话模型都可用才亮按钮
+  useEffect(() => {
+    if (!canEdit) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [configRes, detectionRes] = await Promise.all([
+          fetch('/api/ai/config'),
+          fetch('/api/ai/detection'),
+        ]);
+        const config = configRes.ok ? await configRes.json() : null;
+        const detection = detectionRes.ok ? await detectionRes.json() : null;
+        const ocrUsable =
+          Boolean(config?.ocrReady) ||
+          Boolean(detection?.ready) ||
+          Boolean(detection?.sidecar?.reachable);
+        if (!cancelled) setAiReady(ocrUsable && Boolean(config?.chatReady));
+      } catch {
+        // 预检失败不阻塞页面，仅保持按钮禁用
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [canEdit]);
 
   const uploadFiles = useCallback(
     async (fileList: File[]) => {
@@ -242,6 +286,120 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       return;
     }
     setOutputs((prev) => prev.filter((o) => o.id !== outputId));
+  }
+
+  /** 打开一键机翻确认弹窗（重置上一轮的状态） */
+  function openMtModal() {
+    setMtScope('untranslated');
+    setMtProgress(null);
+    setMtFailures([]);
+    setMtDone(null);
+    setMtShowFailures(false);
+    mtCancelled.current = false;
+    setMtOpen(true);
+  }
+
+  /**
+   * 一键整页机翻流水线（前端驱动逐页执行，天然有进度、可中断）：
+   * 每页依次 OCR → 采纳标号（复刻 OcrModal 的请求体）→ AI 翻译（服务端直接落库）。
+   * 页间隔 500ms 防 AI 服务限流；单页失败记录原因继续下一页。
+   */
+  async function runBatch() {
+    // 按范围取目标：①仅无标注的图片（annotation_count===0，安全默认）②全部图片
+    const targets = items.filter((item) =>
+      mtScope === 'untranslated' ? (item.annotation_count ?? 0) === 0 : true,
+    );
+    if (targets.length === 0) {
+      setError('该范围内没有可处理的图片');
+      return;
+    }
+    setMtRunning(true);
+    mtCancelled.current = false;
+    setMtFailures([]);
+    setMtDone(null);
+    setMtProgress({ done: 0, total: targets.length, current: '', success: 0, failed: 0 });
+
+    let success = 0;
+    const failures: Array<{ title: string; reason: string }> = [];
+
+    for (let index = 0; index < targets.length; index++) {
+      if (mtCancelled.current) break;
+      const item = targets[index];
+      const title = item.title || '未命名';
+      setMtProgress({
+        done: index,
+        total: targets.length,
+        current: title,
+        success,
+        failed: failures.length,
+      });
+      try {
+        // 1. OCR：检出文字块与原文
+        const ocrRes = await fetch(`/api/items/${item.id}/ocr`, { method: 'POST' });
+        const ocrData = await ocrRes.json();
+        if (!ocrRes.ok) {
+          throw new Error(ocrData.error ?? 'OCR 识别失败');
+        }
+        const usable = ((ocrData.proposals ?? []) as Array<{
+          x: number;
+          y: number;
+          source_text: string;
+        }>).filter((p) => typeof p.source_text === 'string' && p.source_text.trim() !== '');
+        if (usable.length === 0) {
+          throw new Error('OCR 未检出文本');
+        }
+        // 2. 采纳标号：与 OcrModal 的 accept 请求体完全一致（x/y/source_text/group_id，默认框内组 1）
+        const acceptRes = await fetch(`/api/items/${item.id}/ocr/accept`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            proposals: usable.map((p) => ({
+              x: p.x,
+              y: p.y,
+              source_text: p.source_text,
+              group_id: 1,
+            })),
+          }),
+        });
+        const acceptData = await acceptRes.json();
+        if (!acceptRes.ok) {
+          throw new Error(acceptData.error ?? '采纳标号失败');
+        }
+        // 3. AI 翻译：applyTranslations=true 让服务端直接把译文写进标号
+        const translateRes = await fetch(`/api/items/${item.id}/ai-translate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ applyTranslations: true }),
+        });
+        const translateData = await translateRes.json();
+        if (!translateRes.ok) {
+          throw new Error(translateData.error ?? 'AI 翻译失败');
+        }
+        success += 1;
+      } catch (err) {
+        failures.push({
+          title,
+          reason: err instanceof Error ? err.message : '处理失败',
+        });
+      }
+      setMtProgress({
+        done: index + 1,
+        total: targets.length,
+        current: title,
+        success,
+        failed: failures.length,
+      });
+      // 页间隔防限流（取消或最后一页时不等）
+      if (index < targets.length - 1 && !mtCancelled.current) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+
+    setMtFailures(failures);
+    setMtDone({ success, failed: failures.length });
+    setMtRunning(false);
+    // 标注数已变化，刷新列表（同时让「仅无标注」范围的下一次运行拿到新数据）
+    await load(debouncedQuery);
   }
 
   // 粘贴图片直接上传到当前空间
@@ -482,7 +640,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={uploadPhase !== null}
+                  disabled={uploadPhase !== null || mtRunning}
                   onClick={() => fileInputRef.current?.click()}
                 >
                   {uploadPhase === null
@@ -498,6 +656,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                     <button
                       type="button"
                       className="btn-danger"
+                      disabled={mtRunning}
                       onClick={() => setPendingDeleteItems(selectedItems)}
                     >
                       删除所选（{selectedItems.length}）
@@ -515,7 +674,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                     type="button"
                     className="btn-ghost"
                     onClick={() => setSelection(new Set(items.map((i) => i.id)))}
-                    disabled={items.length === 0}
+                    disabled={items.length === 0 || mtRunning}
                   >
                     全选
                   </button>
@@ -523,8 +682,28 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               </>
             )}
             {canEdit && items.length > 0 && (
-              <button type="button" className="btn-ghost" onClick={() => setBatchOpen(true)}>
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={mtRunning}
+                onClick={() => setBatchOpen(true)}
+              >
                 AI 批量处理
+              </button>
+            )}
+            {canEdit && items.length > 0 && (
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={aiReady === false || mtRunning}
+                title={
+                  aiReady === false
+                    ? '请先到「AI 设置」配置视觉模型（OCR）与对话模型（翻译）'
+                    : '逐页调用 OCR + AI 翻译，把整本漫画机翻一遍'
+                }
+                onClick={openMtModal}
+              >
+                一键机翻
               </button>
             )}
             {items.length > 0 && (
@@ -537,6 +716,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               <button
                 type="button"
                 className="btn-danger"
+                disabled={mtRunning}
                 onClick={() => setPendingDeleteSpace(true)}
               >
                 删除空间
@@ -943,6 +1123,139 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           将删除「{pendingDeleteOutput?.item_title || '未命名'}」的这一版成品及其磁盘文件，
           <strong className="text-blush">此操作不可撤销</strong>。空间图片列表不受影响。
         </p>
+      </Modal>
+
+      <Modal
+        open={mtOpen}
+        title="一键机翻"
+        onClose={() => {
+          // 流水线执行中不允许误关（点遮罩/Esc 无效），先点「停止」
+          if (!mtRunning) setMtOpen(false);
+        }}
+        footer={
+          mtRunning ? (
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={() => {
+                mtCancelled.current = true;
+              }}
+            >
+              停止
+            </button>
+          ) : mtDone ? (
+            <button type="button" className="btn-primary" onClick={() => setMtOpen(false)}>
+              关闭
+            </button>
+          ) : (
+            <>
+              <button type="button" className="btn-ghost" onClick={() => setMtOpen(false)}>
+                取消
+              </button>
+              <button type="button" className="btn-primary" onClick={() => void runBatch()}>
+                开始机翻
+              </button>
+            </>
+          )
+        }
+      >
+        {mtRunning || mtDone ? (
+          mtRunning ? (
+            // 进度：无动效宽度百分比 + 当前条目 + 成功/失败计数
+            mtProgress && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs text-ink-200">
+                  <span>
+                    {mtProgress.done} / {mtProgress.total}
+                  </span>
+                  <span className="text-ink-400">
+                    成功 {mtProgress.success} · 失败 {mtProgress.failed}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-ink-800">
+                  <div
+                    className="h-full bg-sky"
+                    style={{
+                      width: `${
+                        mtProgress.total > 0
+                          ? Math.round((mtProgress.done / mtProgress.total) * 100)
+                          : 0
+                      }%`,
+                    }}
+                  />
+                </div>
+                <p className="truncate text-[11px] text-ink-400">
+                  正在处理：{mtProgress.current}
+                </p>
+              </div>
+            )
+          ) : (
+            // 结束汇总：成功/跳过失败计数，失败列表可展开
+            mtDone && (
+              <div className="space-y-3">
+                <p className="notice-ok">
+                  完成：成功 {mtDone.success} 页 · 跳过/失败 {mtDone.failed} 页
+                </p>
+                {mtFailures.length > 0 && (
+                  <div>
+                    <button
+                      type="button"
+                      className="text-xs text-ink-400 underline"
+                      onClick={() => setMtShowFailures((v) => !v)}
+                    >
+                      {mtShowFailures ? '收起失败列表' : `展开失败列表（${mtFailures.length}）`}
+                    </button>
+                    {mtShowFailures && (
+                      <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto">
+                        {mtFailures.map((failure, index) => (
+                          <li key={`${failure.title}-${index}`} className="notice-error text-[11px]">
+                            {failure.title}：{failure.reason}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          )
+        ) : (
+          // 确认设置：范围单选 + 额度提示
+          <div className="space-y-3">
+            <label className="flex items-start gap-2 text-sm text-ink-200">
+              <input
+                type="radio"
+                className="mt-1"
+                checked={mtScope === 'untranslated'}
+                onChange={() => setMtScope('untranslated')}
+              />
+              <span>
+                仅无标注的图片
+                <span className="block text-[11px] text-ink-400">
+                  只处理还没有任何标号的图片（安全默认）
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm text-ink-200">
+              <input
+                type="radio"
+                className="mt-1"
+                checked={mtScope === 'all'}
+                onChange={() => setMtScope('all')}
+              />
+              <span>
+                全部图片
+                <span className="block text-[11px] text-ink-400">
+                  OCR 会跳过与现有标号过近的框；翻译会覆盖已有译文
+                </span>
+              </span>
+            </label>
+            <p className="rounded-lg bg-sky/10 px-3 py-2 text-[11px] leading-relaxed text-ink-500">
+              逐页调用 OCR + AI 翻译，可在中途取消；请确保 AI 额度充足。
+            </p>
+            {error && <p className="notice-error">{error}</p>}
+          </div>
+        )}
       </Modal>
     </div>
   );
