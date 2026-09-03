@@ -121,6 +121,39 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const imageWidth = asset?.width ?? 1200;
   const imageHeight = asset?.height ?? 800;
 
+  /** 用户是否手动动过视图（缩放/平移）：动过之后窗口 resize 不再自动重置视图 */
+  const userAdjusted = useRef(false);
+
+  /** 适应窗口：按视口缩放并居中（Stage 3 修复「打开后图片居左上角」） */
+  const fitToViewport = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const vw = vp.clientWidth;
+    const vh = vp.clientHeight;
+    if (vw <= 0 || vh <= 0) return;
+    const padding = 24;
+    const scale = Math.min((vw - padding) / imageWidth, (vh - padding) / imageHeight);
+    const z = Math.min(8, Math.max(0.05, scale));
+    setZoom(z);
+    setPan({ x: (vw - imageWidth * z) / 2, y: (vh - imageHeight * z) / 2 });
+  }, [imageWidth, imageHeight]);
+
+  // 首次进入自动适应：图片已缓存时 onLoad 不触发，这里兜底再试一次
+  useEffect(() => {
+    if (!asset) return;
+    const img = wrapperRef.current?.querySelector('img');
+    if (img?.complete) fitToViewport();
+  }, [asset, fitToViewport]);
+
+  // 窗口尺寸变化保持适应（用户手动调整过视图则不打扰）
+  useEffect(() => {
+    const onResize = () => {
+      if (!userAdjusted.current) fitToViewport();
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [fitToViewport]);
+
   // 协作房间：进页即接管/续期锁，轮询增量操作
   const collab = useCollabRoom(itemId);
   // 权限 = 空间权限 ∧ 房间状态（别人持锁未共享时整页转只读）
@@ -475,6 +508,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     if (spaceDown || tool === 'pan') {
       const last = lastPt.current;
       if (!last) return;
+      userAdjusted.current = true;
       setPan((p) => ({ x: p.x + event.clientX - last.x, y: p.y + event.clientY - last.y }));
       lastPt.current = { x: event.clientX, y: event.clientY };
       return;
@@ -1112,13 +1146,44 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="mb-2 flex gap-2 text-xs">
-            <button type="button" className="btn-ghost px-2 py-1" onClick={() => setZoom(1)}>
+            <button
+              type="button"
+              className="btn-ghost px-2 py-1"
+              onClick={() => {
+                userAdjusted.current = false;
+                fitToViewport();
+              }}
+            >
+              适应窗口
+            </button>
+            <button
+              type="button"
+              className="btn-ghost px-2 py-1"
+              onClick={() => {
+                userAdjusted.current = true;
+                setZoom(1);
+              }}
+            >
               100%
             </button>
-            <button type="button" className="btn-ghost px-2 py-1" onClick={() => setZoom((z) => Math.min(8, z * 1.25))}>
+            <button
+              type="button"
+              className="btn-ghost px-2 py-1"
+              onClick={() => {
+                userAdjusted.current = true;
+                setZoom((z) => Math.min(8, z * 1.25));
+              }}
+            >
               放大
             </button>
-            <button type="button" className="btn-ghost px-2 py-1" onClick={() => setZoom((z) => Math.max(0.15, z / 1.25))}>
+            <button
+              type="button"
+              className="btn-ghost px-2 py-1"
+              onClick={() => {
+                userAdjusted.current = true;
+                setZoom((z) => Math.max(0.15, z / 1.25));
+              }}
+            >
               缩小
             </button>
             <button
@@ -1157,6 +1222,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 src={originalUrl(asset.filename)}
                 alt=""
                 draggable={false}
+                onLoad={() => fitToViewport()}
                 className="pointer-events-none absolute inset-0 h-full w-full select-none"
               />
               <canvas
