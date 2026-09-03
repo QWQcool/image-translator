@@ -5,7 +5,7 @@ import { hardDeleteItems } from '@/lib/hard-delete';
 import { normalizeGlossaryInput, normalizeStyles } from '@/lib/labelplus';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
-import type { Asset, Space, SpaceItem, SpaceVisibility } from '@/lib/types';
+import type { Asset, Space, SpaceItem, SpaceStatus, SpaceVisibility } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -132,6 +132,7 @@ export async function PATCH(request: Request, { params }: Params) {
     name?: string;
     description?: string;
     visibility?: string;
+    status?: string;
     lp_groups?: Array<{ id: number; name: string }>;
     lp_styles?: Record<string, unknown>;
     lp_glossary?: unknown;
@@ -160,6 +161,13 @@ export async function PATCH(request: Request, { params }: Params) {
   // 开放空间模型：不再接受 private
   const visibility: SpaceVisibility | undefined =
     body.visibility === 'public' ? 'public' : undefined;
+
+  // 完结状态：登录即可改（扁平权限，轻操作）；非法取值直接拒绝
+  const status: SpaceStatus | undefined =
+    body.status === 'active' || body.status === 'finished' ? body.status : undefined;
+  if (body.status !== undefined && status === undefined) {
+    return NextResponse.json({ error: 'status 只能是 active 或 finished' }, { status: 400 });
+  }
 
   // LabelPlus 分组表：1~9 组，名字留空的组视为停用
   let lpGroupsJson: string | null | undefined;
@@ -206,6 +214,7 @@ export async function PATCH(request: Request, { params }: Params) {
     name === undefined &&
     description === undefined &&
     visibility === undefined &&
+    status === undefined &&
     lpGroupsJson === undefined &&
     lpStylesJson === undefined &&
     lpGlossaryJson === undefined
@@ -218,18 +227,20 @@ export async function PATCH(request: Request, { params }: Params) {
         SET name = COALESCE(?, name),
             description = COALESCE(?, description),
             visibility = COALESCE(?, visibility),
+            status = COALESCE(?, status),
             lp_groups = COALESCE(?, lp_groups),
             lp_styles = COALESCE(?, lp_styles),
             lp_glossary = COALESCE(?, lp_glossary),
             updated_at = datetime('now')
       WHERE id = ?`,
-  ).run(name ?? null, description ?? null, visibility ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, lpGlossaryJson ?? null, id);
+  ).run(name ?? null, description ?? null, visibility ?? null, status ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, lpGlossaryJson ?? null, id);
 
-  // 日志：只记管理类改动（名称/描述/可见性），分组表与样式的编辑很频繁，不刷屏
+  // 日志：只记管理类改动（名称/描述/可见性/完结状态），分组表与样式的编辑很频繁，不刷屏
   const changed: string[] = [];
   if (name !== undefined) changed.push('名称');
   if (description !== undefined) changed.push('描述');
   if (visibility !== undefined) changed.push('可见性');
+  if (status !== undefined) changed.push(status === 'finished' ? '标记完结' : '重新开启');
   if (changed.length > 0) {
     const current = db.prepare('SELECT name FROM spaces WHERE id = ?').get(id) as { name: string };
     logOp(user.id, 'update', 'space', id, current.name, `修改空间${changed.join('、')}`);

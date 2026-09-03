@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS spaces (
   description TEXT,
   -- private: 仅成员可见；public: 所有登录用户可见，非成员一律只读
   visibility  TEXT NOT NULL DEFAULT 'private',
+  -- 空间完结状态：active=进行中；finished=已完结（仅视觉区分，不锁编辑）
+  status      TEXT NOT NULL DEFAULT 'active',
   lp_groups   TEXT,
   lp_phrases  TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -262,6 +264,11 @@ function migrate(database: Database.Database): void {
   // 术语表（JSON 数组 [{from,to,note?}]，空间级全员共用），AI 翻译时注入
   if (!latestSpaceColumns.some((column) => column.name === 'lp_glossary')) {
     database.exec(`ALTER TABLE spaces ADD COLUMN lp_glossary TEXT NOT NULL DEFAULT '[]'`);
+  }
+
+  // 空间完结状态：'active' | 'finished'，历史空间默认进行中
+  if (!latestSpaceColumns.some((column) => column.name === 'status')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
   }
 
   // 开放空间改造：历史遗留的私人空间/私人素材一次性转成公共，

@@ -6,7 +6,7 @@ import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { useStaggerReveal } from '@/lib/motion';
 import { formatDate, thumbUrl } from '@/lib/media';
-import type { SpaceRole, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
+import type { SpaceRole, SpaceStatus, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
 
 type Draft = { id?: number; name: string; description: string; visibility: SpaceVisibility };
 
@@ -28,14 +28,19 @@ export default function SpacesClient() {
   // 全局查找：LIKE 匹配空间名 / 描述（走 API q 参数）
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
+  // 完结状态筛选：默认「全部」，完结的空间在列表里排后并带徽标
+  const [statusFilter, setStatusFilter] = useState<SpaceStatus | 'all'>('all');
   // 卡片入场：数据到达/筛选变化时逐张上浮
   const gridScope = useStaggerReveal('.space-card', [spaces.length, debouncedQuery, loading]);
 
-  const load = useCallback(async (q: string = '') => {
+  const load = useCallback(async (q: string = '', filter: SpaceStatus | 'all' = 'all') => {
     setLoading(true);
     try {
-      const suffix = q ? `?q=${encodeURIComponent(q)}` : '';
-      const res = await fetch(`/api/spaces${suffix}`);
+      const params = new URLSearchParams();
+      if (q) params.set('q', q);
+      if (filter !== 'all') params.set('filter', filter);
+      const suffix = params.toString();
+      const res = await fetch(`/api/spaces${suffix ? `?${suffix}` : ''}`);
       const data = await res.json();
       setSpaces(Array.isArray(data.spaces) ? data.spaces : []);
     } finally {
@@ -50,8 +55,8 @@ export default function SpacesClient() {
   }, [query]);
 
   useEffect(() => {
-    void load(debouncedQuery);
-  }, [debouncedQuery, load]);
+    void load(debouncedQuery, statusFilter);
+  }, [debouncedQuery, statusFilter, load]);
 
   async function saveDraft() {
     if (!draft) return;
@@ -85,7 +90,7 @@ export default function SpacesClient() {
         return;
       }
       setDraft(null);
-      await load(debouncedQuery);
+      await load(debouncedQuery, statusFilter);
     } finally {
       setSaving(false);
     }
@@ -100,7 +105,7 @@ export default function SpacesClient() {
       setError('删除失败');
       return;
     }
-    await load(debouncedQuery);
+    await load(debouncedQuery, statusFilter);
   }
 
   const groups = [
@@ -120,6 +125,25 @@ export default function SpacesClient() {
           新建空间
         </button>
         <span className="text-sm text-ink-500">共 {spaces.length} 个可见空间</span>
+        {/* 完结状态筛选：默认显示全部，完结的空间排后带徽标 */}
+        <div className="seg">
+          {(
+            [
+              ['all', '全部'],
+              ['active', '进行中'],
+              ['finished', '已完结'],
+            ] as Array<[SpaceStatus | 'all', string]>
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={`seg-btn ${statusFilter === value ? 'seg-btn-on' : ''}`}
+              onClick={() => setStatusFilter(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <input
           className="input ml-auto w-56 py-1.5 text-xs"
           placeholder="搜索空间名称 / 描述…"
@@ -177,13 +201,21 @@ export default function SpacesClient() {
                       >
                         {space.name}
                       </Link>
-                      <span
-                        className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${
-                          ROLE_BADGE[space.role].className
-                        }`}
-                      >
-                        {ROLE_BADGE[space.role].label}
-                      </span>
+                      <div className="flex shrink-0 items-center gap-1">
+                        {/* 已完结徽标：仅视觉区分，卡片仍可正常进入编辑 */}
+                        {space.status === 'finished' && (
+                          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] text-amber-600">
+                            已完结
+                          </span>
+                        )}
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[11px] ${
+                            ROLE_BADGE[space.role].className
+                          }`}
+                        >
+                          {ROLE_BADGE[space.role].label}
+                        </span>
+                      </div>
                     </div>
 
                     <p className="mt-1 line-clamp-2 min-h-[2.5rem] text-xs text-ink-500">

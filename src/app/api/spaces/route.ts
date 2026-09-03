@@ -36,8 +36,9 @@ const LIST_SQL = `
          END AS role
     FROM spaces s
     LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = ?
-   WHERE (m.user_id IS NOT NULL OR s.owner_id = ? OR s.visibility = 'public') __SEARCH__
-   ORDER BY (m.user_id IS NULL), s.updated_at DESC, s.id DESC
+   WHERE (m.user_id IS NOT NULL OR s.owner_id = ? OR s.visibility = 'public') __SEARCH__ __FILTER__
+   -- 完结空间只做视觉区分不锁编辑，列表里排到同组末尾（灰化的徽标足够辨识）
+   ORDER BY (m.user_id IS NULL), (s.status = 'finished'), s.updated_at DESC, s.id DESC
 `;
 
 export async function GET(request: Request) {
@@ -51,9 +52,15 @@ export async function GET(request: Request) {
     : '';
   const searchArgs = keyword ? [`%${keyword}%`, `%${keyword}%`] : [];
 
+  // 完结状态筛选：all=全部（默认，完结的排后）；active / finished 按状态过滤
+  const filterRaw = new URL(request.url).searchParams.get('filter');
+  const filter = filterRaw === 'active' || filterRaw === 'finished' ? filterRaw : 'all';
+  const filterClause = filter === 'all' ? '' : 'AND s.status = ?';
+  const filterArgs = filter === 'all' ? [] : [filter];
+
   const rows = db
-    .prepare(LIST_SQL.replace('__SEARCH__', searchClause))
-    .all(user.id, user.id, user.id, ...searchArgs) as Array<
+    .prepare(LIST_SQL.replace('__SEARCH__', searchClause).replace('__FILTER__', filterClause))
+    .all(user.id, user.id, user.id, ...searchArgs, ...filterArgs) as Array<
     Omit<SpaceWithCounts, 'can_edit' | 'is_owner'>
   >;
 

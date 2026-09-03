@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { thumbUrl } from '@/lib/media';
-import type { Space, SpaceAccess, SpaceItem, SpaceVisibility } from '@/lib/types';
+import type { Space, SpaceAccess, SpaceItem, SpaceStatus, SpaceVisibility } from '@/lib/types';
 import AiBatchModal from './AiBatchModal';
 import ExportMenu from './ExportMenu';
 import { ROLE_LABEL } from './MembersPanel';
@@ -31,9 +31,16 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [pendingDeleteSpace, setPendingDeleteSpace] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 图库并入空间：直接上传（多选 + 粘贴 + zip 整话包）
-  const [uploading, setUploading] = useState(false);
-  // 本轮上传里含 zip 时，按钮提示「解包上传中」
-  const [zipUploading, setZipUploading] = useState(false);
+  // 上传分两个阶段：uploading=字节传输中（XHR 可拿进度）；processing=服务端处理（zip 解包导入）
+  const [uploadPhase, setUploadPhase] = useState<'uploading' | 'processing' | null>(null);
+  // 本轮上传里含 zip 时，处理阶段按钮提示「解包上传中」
+  const [uploadHasZip, setUploadHasZip] = useState(false);
+  // 上传进度（XHR upload.onprogress 的累计字节）
+  const [uploadProgress, setUploadProgress] = useState<{ loaded: number; total: number } | null>(null);
+  // 本轮上传的文件数与各文件大小（用于按字节边界推算「第几个文件」）
+  const [uploadMeta, setUploadMeta] = useState<{ count: number; sizes: number[] } | null>(null);
+  // 完结状态切换中（防重复点击）
+  const [togglingStatus, setTogglingStatus] = useState(false);
   // 非致命提示（如 zip 内被跳过的文件）
   const [notice, setNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -101,43 +108,95 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       );
       if (files.length === 0) return;
       const hasZip = files.some((f) => f.name.toLowerCase().endsWith('.zip'));
-      setUploading(true);
-      setZipUploading(hasZip);
+      setUploadPhase('uploading');
+      setUploadHasZip(hasZip);
+      setUploadMeta({ count: files.length, sizes: files.map((f) => f.size) });
+      setUploadProgress({ loaded: 0, total: files.reduce((sum, f) => sum + f.size, 0) });
       setError(null);
       setNotice(null);
       try {
         const form = new FormData();
         for (const file of files) form.append('files', file);
-        const res = await fetch(`/api/spaces/${spaceId}/assets`, {
-          method: 'POST',
-          body: form,
+        // fetch 不支持上传进度，改用 XHR：同源请求自动携带 Cookie 鉴权，FormData 构造不变
+        const data = await new Promise<Record<string, unknown>>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', `/api/spaces/${spaceId}/assets`);
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+              setUploadProgress({ loaded: event.loaded, total: event.total });
+            }
+          };
+          xhr.onload = () => {
+            let parsed: Record<string, unknown> = {};
+            try {
+              parsed = JSON.parse(xhr.responseText) as Record<string, unknown>;
+            } catch {
+              parsed = {};
+            }
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(parsed);
+            } else {
+              reject(new Error((parsed.error as string) ?? '上传失败'));
+            }
+          };
+          xhr.onerror = () => reject(new Error('上传失败：网络错误'));
+          xhr.send(form);
         });
-        const data = await res.json();
-        if (!res.ok) {
-          setError(data.error ?? '上传失败');
-          return;
-        }
+        // 字节传输完成，进入服务端处理阶段（zip 解包导入较慢，需要独立提示）
+        setUploadProgress(null);
+        setUploadPhase('processing');
         // zip 里被跳过的文件：展示前几条
-        if (Array.isArray(data.skipped) && data.skipped.length > 0) {
-          const samples = data.skipped
+        const skipped = data.skipped as Array<{ name: string; reason: string }> | undefined;
+        if (Array.isArray(skipped) && skipped.length > 0) {
+          const samples = skipped
             .slice(0, 3)
-            .map((s: { name: string; reason: string }) => `${s.name}（${s.reason}）`)
+            .map((s) => `${s.name}（${s.reason}）`)
             .join('、');
           setNotice(
-            `已跳过 ${data.skipped.length} 个文件：${samples}${data.skipped.length > 3 ? ' 等' : ''}`,
+            `已跳过 ${skipped.length} 个文件：${samples}${skipped.length > 3 ? ' 等' : ''}`,
           );
         }
-        if (Array.isArray(data.errors) && data.errors.length > 0) {
-          setError(data.errors.join('；'));
+        const errors = data.errors as string[] | undefined;
+        if (Array.isArray(errors) && errors.length > 0) {
+          setError(errors.join('；'));
         }
         await load(debouncedQuery);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '上传失败');
       } finally {
-        setUploading(false);
-        setZipUploading(false);
+        setUploadPhase(null);
+        setUploadHasZip(false);
+        setUploadProgress(null);
+        setUploadMeta(null);
       }
     },
     [spaceId, load, debouncedQuery],
   );
+
+  /** 切换空间完结状态（轻操作，不需要确认；完结只做视觉区分，不锁编辑） */
+  async function toggleSpaceStatus() {
+    if (!space) return;
+    const next: SpaceStatus = space.status === 'finished' ? 'active' : 'finished';
+    setTogglingStatus(true);
+    try {
+      const res = await fetch(`/api/spaces/${spaceId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: next }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error ?? '操作失败');
+        return;
+      }
+      setError(null);
+      setSpace((prev) => (prev ? { ...prev, status: next } : prev));
+    } catch {
+      setError('网络异常，切换完结状态失败');
+    } finally {
+      setTogglingStatus(false);
+    }
+  }
 
   // 粘贴图片直接上传到当前空间
   useEffect(() => {
@@ -261,6 +320,22 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const totalAnnotations = items.reduce((sum, item) => sum + (item.annotation_count ?? 0), 0);
   const selectedItems = items.filter((item) => selection.has(item.id));
 
+  // 上传进度：百分比按累计字节算；「第几个文件」按各文件字节边界推算
+  const uploadPct =
+    uploadProgress && uploadProgress.total > 0
+      ? Math.min(100, Math.round((uploadProgress.loaded / uploadProgress.total) * 100))
+      : 0;
+  let uploadIndex = 0;
+  if (uploadProgress && uploadMeta) {
+    let acc = 0;
+    for (const size of uploadMeta.sizes) {
+      acc += size;
+      if (uploadProgress.loaded < acc) break;
+      uploadIndex += 1;
+    }
+    uploadIndex = Math.min(uploadIndex + 1, uploadMeta.count);
+  }
+
   return (
     <div className="space-y-6">
       <Link href="/spaces" className="inline-block text-sm text-ink-400 hover:text-sky-deep">
@@ -306,6 +381,16 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-ink-400">
                 {ROLE_LABEL[access.role]}
               </span>
+              {/* 完结状态徽标：进行中=sky / 已完结=amber，仅视觉区分不锁编辑 */}
+              <span
+                className={`rounded px-1.5 py-0.5 text-[11px] ${
+                  space.status === 'finished'
+                    ? 'bg-amber-500/15 text-amber-600'
+                    : 'bg-sky/15 text-sky-deep'
+                }`}
+              >
+                {space.status === 'finished' ? '已完结' : '进行中'}
+              </span>
               {canManage && (
                 <button
                   type="button"
@@ -322,6 +407,14 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                   编辑
                 </button>
               )}
+              <button
+                type="button"
+                className="btn-ghost px-2 py-1 text-xs"
+                disabled={togglingStatus}
+                onClick={() => void toggleSpaceStatus()}
+              >
+                {space.status === 'finished' ? '重新开启' : '标记完结'}
+              </button>
             </div>
             <p className="mt-1 text-sm text-ink-400">{space.description || '还没写简介'}</p>
             <p className="mt-1.5 text-xs text-ink-400">
@@ -343,10 +436,16 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={uploading}
+                  disabled={uploadPhase !== null}
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  {uploading ? (zipUploading ? '解包上传中…' : '上传中…') : '上传图片'}
+                  {uploadPhase === null
+                    ? '上传图片'
+                    : uploadPhase === 'processing'
+                      ? uploadHasZip
+                        ? '解包上传中…'
+                        : '处理中…'
+                      : '上传中…'}
                 </button>
                 {selectedItems.length > 0 ? (
                   <>
@@ -406,6 +505,31 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           你在该空间是<strong className="text-ink-100">只读</strong>权限，可以查看和导出标注，
           但不能添加、修改或删除内容。
         </p>
+      )}
+
+      {/* 上传进度条：传输阶段显示字节进度，zip 处理阶段显示解包提示（本地极快属正常） */}
+      {uploadPhase && (
+        <div className="card px-4 py-3 text-xs">
+          {uploadPhase === 'uploading' ? (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="text-ink-200">
+                  上传中 {uploadIndex}/{uploadMeta?.count ?? 0} · {uploadPct}%
+                </span>
+                <span className="text-ink-400">
+                  {uploadProgress ? `${Math.round(uploadProgress.loaded / 1024)} KB` : ''}
+                </span>
+              </div>
+              <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-ink-800">
+                <div className="h-full bg-sky" style={{ width: `${uploadPct}%` }} />
+              </div>
+            </>
+          ) : (
+            <span className="text-ink-200">
+              {uploadHasZip ? '解包导入中…' : '服务端处理中…'}
+            </span>
+          )}
+        </div>
       )}
 
       {error && (

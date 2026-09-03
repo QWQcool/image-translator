@@ -37,12 +37,16 @@ export type Asset = {
 
 export type SpaceVisibility = 'private' | 'public';
 
+/** 空间完结状态：active=进行中；finished=已完结（仅视觉区分，不锁编辑） */
+export type SpaceStatus = 'active' | 'finished';
+
 export type Space = {
   id: number;
   owner_id: number;
   name: string;
   description: string | null;
   visibility: SpaceVisibility;
+  status: SpaceStatus;
   created_at: string;
   updated_at: string;
   lp_groups?: string | null;

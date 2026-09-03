@@ -64,7 +64,8 @@ export async function GET(_request: Request, { params }: Params) {
               a.created_at   AS asset_created_at,
               s.id           AS space_id,
               s.name         AS space_name,
-              s.visibility   AS space_visibility
+              s.visibility   AS space_visibility,
+              s.status       AS space_status
          FROM space_items si
          JOIN assets a ON a.id = si.asset_id
          JOIN spaces s ON s.id = si.space_id
@@ -106,6 +107,7 @@ export async function GET(_request: Request, { params }: Params) {
     name: row.space_name as string,
     description: null,
     visibility: row.space_visibility as Space['visibility'],
+    status: (row.space_status as Space['status']) ?? 'active',
     created_at: '',
     updated_at: '',
   };
