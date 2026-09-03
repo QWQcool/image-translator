@@ -23,11 +23,14 @@ type ProviderForm = {
 };
 
 type DetectionView = {
+  source: 'ai' | 'sidecar';
   baseUrl: string;
   apiKeyMasked: string;
   model: string;
   ready: boolean;
 };
+
+type SidecarView = { reachable: boolean; engine: string | null; detector: boolean };
 
 const EMPTY_FORM: ProviderForm = {
   name: '',
@@ -38,7 +41,7 @@ const EMPTY_FORM: ProviderForm = {
   imageModel: '',
 };
 
-const EMPTY_DETECTION_FORM = { baseUrl: '', apiKey: '', model: '' };
+const EMPTY_DETECTION_FORM = { source: 'ai', baseUrl: '', apiKey: '', model: '' };
 
 /** 检测服务预设模板：不同渠道只差 Base URL 与提示文案，调用协议统一走 OpenAI 兼容 */
 const DETECTION_TEMPLATES: Array<{ id: string; label: string; baseUrl: string; hint: string }> = [
@@ -73,6 +76,8 @@ export default function AiSettingsClient() {
   const [detTemplate, setDetTemplate] = useState('custom');
   const [detEditing, setDetEditing] = useState(false);
   const [detSaving, setDetSaving] = useState(false);
+  // 本机检测进程（sidecar）状态
+  const [detSidecar, setDetSidecar] = useState<SidecarView | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -93,9 +98,15 @@ export default function AiSettingsClient() {
       });
       if (det?.config) {
         setDetection({ ...det.config, ready: Boolean(det.ready) });
-        setDetForm({ baseUrl: det.config.baseUrl ?? '', apiKey: '', model: det.config.model ?? '' });
+        setDetForm({
+          source: det.config.source === 'sidecar' ? 'sidecar' : 'ai',
+          baseUrl: det.config.baseUrl ?? '',
+          apiKey: '',
+          model: det.config.model ?? '',
+        });
         setDetTemplate(det.config.baseUrl.includes('aistudio.baidu.com') ? 'paddle' : 'custom');
       }
+      setDetSidecar(det?.sidecar ?? null);
     } catch {
       setNotice({ type: 'error', text: '配置加载失败' });
     } finally {
@@ -420,15 +431,31 @@ export default function AiSettingsClient() {
         </p>
         {!detEditing ? (
           <div className="space-y-1 text-xs text-ink-400">
-            <p>Base URL：{detection?.baseUrl || '—'}</p>
-            <p>
-              Key：{detection?.apiKeyMasked || '未设置'} · 模型：{detection?.model || '—'}
-            </p>
+            {detection?.source === 'sidecar' ? (
+              <p>
+                来源：本机检测进程（sidecar/detector.mjs）· 状态：
+                {detSidecar?.reachable
+                  ? detSidecar.detector
+                    ? detSidecar.engine === 'onnx'
+                      ? '运行中（ONNX 模型档）'
+                      : '运行中（传统算法档）'
+                    : '运行中（旧版 stub，未提供检测，请改跑 node sidecar/detector.mjs）'
+                  : '未启动'}
+              </p>
+            ) : (
+              <>
+                <p>Base URL：{detection?.baseUrl || '—'}</p>
+                <p>
+                  Key：{detection?.apiKeyMasked || '未设置'} · 模型：{detection?.model || '—'}
+                </p>
+              </>
+            )}
             <button
               type="button"
               className="btn-ghost px-3 py-1 text-xs"
               onClick={() => {
                 setDetForm({
+                  source: detection?.source ?? 'ai',
                   baseUrl: detection?.baseUrl ?? '',
                   apiKey: '',
                   model: detection?.model ?? '',
@@ -441,6 +468,46 @@ export default function AiSettingsClient() {
           </div>
         ) : (
           <div className="space-y-3">
+            <div>
+              <span className="label">检测来源</span>
+              <div className="mt-1 flex overflow-hidden rounded-md border border-ink-700 text-xs">
+                {[
+                  { id: 'ai', label: 'AI 检测服务（云端）' },
+                  { id: 'sidecar', label: '本机检测进程（免费离线）' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setDetForm((f) => ({ ...f, source: opt.id as 'ai' | 'sidecar' }))}
+                    className={`px-3 py-1.5 transition-colors ${
+                      detForm.source === opt.id
+                        ? 'bg-sky text-white'
+                        : 'text-ink-400 hover:text-ink-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {detForm.source === 'sidecar' ? (
+              <div className="rounded-lg border border-sky/40 bg-cloud p-3 text-xs text-ink-400">
+                <p>
+                  本机检测进程状态：
+                  {detSidecar?.reachable
+                    ? detSidecar.detector
+                      ? detSidecar.engine === 'onnx'
+                        ? '运行中（ONNX 模型档）'
+                        : '运行中（传统算法档，未装模型）'
+                      : '运行中（但启动的是旧版 stub，未提供检测，请改跑 node sidecar/detector.mjs）'
+                    : '未启动——在服务器上执行 node sidecar/detector.mjs 后即可使用'}
+                </p>
+                <p className="mt-1">
+                  模型下载与配置步骤见「使用说明」Tab 的「本地文本块检测」章节；不装模型也可用传统算法档。
+                </p>
+              </div>
+            ) : (
+              <>
             <label className="block text-xs">
               <span className="label">预设模板</span>
               <select
@@ -493,6 +560,8 @@ export default function AiSettingsClient() {
                 调用 {`{Base URL}/chat/completions`}，传整图要求返回归一化文字框 JSON。
               </span>
             </label>
+              </>
+            )}
             <div className="flex gap-2">
               <button
                 type="button"
@@ -538,6 +607,47 @@ function AiDocs() {
             漂移过大自动回退本地填充。
           </li>
         </ul>
+      </section>
+
+      <section className="card space-y-2">
+        <h2 className="font-medium text-ink-100">本地文本块检测（免费、离线、无需 API）</h2>
+        <p className="text-ink-400">
+          检测来源选「本机检测进程」后，文字框由服务器上的 <code>sidecar/detector.mjs</code>{' '}
+          生成，不消耗任何 API 额度。框内文字仍由默认 AI 服务的视觉模型补提取
+          （也可不配 AI，直接手动录入原文）。
+        </p>
+        <ol className="list-decimal space-y-1.5 pl-5 text-ink-400">
+          <li>
+            启动检测进程（传统算法档，无需下载模型）：<code>node sidecar/detector.mjs</code>
+            ，主站 <code>.env.local</code> 里配 <code>SIDECAR_URL=http://127.0.0.1:8765</code>
+          </li>
+          <li>
+            （可选，精度更高）下载漫画专用检测模型 comic-text-detector.onnx（DBNet 架构，约几十 MB）：
+            <a
+              className="text-sky-deep underline"
+              href="https://huggingface.co/mayocream/comic-text-detector-onnx/resolve/main/comic-text-detector.onnx"
+              target="_blank"
+              rel="noreferrer"
+            >
+              HuggingFace下载链接
+            </a>
+            （上游项目：github.com/dmMaze/comic-text-detector）
+          </li>
+          <li>
+            在项目根安装推理运行时：<code>npm i onnxruntime-node</code>
+          </li>
+          <li>
+            把模型放到 <code>sidecar/models/comic-text-detector.onnx</code>，重启 detector.mjs；
+            探活接口 <code>/health</code> 的 <code>engine</code> 变为 <code>onnx</code> 即生效
+          </li>
+          <li>
+            本页「文本块检测服务」选「本机检测进程」保存；标注页的「OCR 自动标号」即走本地检测
+          </li>
+        </ol>
+        <p className="text-xs text-ink-500">
+          提示：传统算法档对黑白漫画「气泡内深色文字」效果好；复杂背景 / 彩色页建议下载
+          ONNX 模型档，或继续用飞桨 PaddleOCR VL 等云端检测服务。
+        </p>
       </section>
 
       <section className="card space-y-2">

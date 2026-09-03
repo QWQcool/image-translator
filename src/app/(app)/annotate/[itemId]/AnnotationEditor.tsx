@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import EmptyState from '@/components/EmptyState';
 import { originalUrl, previewUrl, thumbUrl } from '@/lib/media';
 import { isPin, newKey, parseRuns, type DraftAnnotation } from '@/lib/annotation';
@@ -72,6 +73,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const phraseCursor = useRef(0);
   const [ocrOpen, setOcrOpen] = useState(false);
   const [translateOpen, setTranslateOpen] = useState(false);
+  /** 待确认删除的标注 key（面板按钮与 Delete 键统一走二次确认） */
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const [neighbors, setNeighbors] = useState<{
     prevId: number | null;
     nextId: number | null;
@@ -214,6 +217,32 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
 
   const pins = useMemo(() => annotations.filter(isPin), [annotations]);
 
+  /** 删除入口统一收口：先弹确认，再由 ConfirmDialog 执行真正的删除 */
+  const requestRemove = useCallback((key: string | null) => {
+    if (!key || !canEditRef.current) return;
+    setConfirmKey(key);
+  }, []);
+
+  /** 标号列表拖动排序：只重排 pin 的相对顺序，框选标注位置不动 */
+  const reorderPins = useCallback(
+    (fromKey: string, toKey: string) => {
+      if (!canEditRef.current || fromKey === toKey) return;
+      const current = annotationsRef.current;
+      const pinRows = current.filter(isPin);
+      const keys = pinRows.map((p) => p.key);
+      const from = keys.indexOf(fromKey);
+      const to = keys.indexOf(toKey);
+      if (from < 0 || to < 0) return;
+      keys.splice(to, 0, ...keys.splice(from, 1));
+      const byKey = new Map(pinRows.map((p) => [p.key, p]));
+      let slot = 0;
+      applyChange(
+        current.map((row) => (isPin(row) ? byKey.get(keys[slot++])! : row)),
+      );
+    },
+    [applyChange],
+  );
+
   /** 把短语追加到当前选中的标号译文末尾（按钮、快捷键共用） */
   const insertPhraseAtSelected = useCallback(
     (phrase: string) => {
@@ -349,8 +378,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       if (!canEdit) return;
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedKey) {
         event.preventDefault();
-        applyChange(annotations.filter((annotation) => annotation.key !== selectedKey));
-        setSelectedKey(null);
+        setConfirmKey(selectedKey);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -603,11 +631,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
                     ),
                   );
                 }}
-                onRemove={(key) => {
-                  if (!canEdit) return;
-                  applyChange(annotations.filter((annotation) => annotation.key !== key));
-                  if (selectedKey === key) setSelectedKey(null);
-                }}
+                onRemove={requestRemove}
+                onReorder={reorderPins}
               />
             ) : (
               <AnnotationPanel
@@ -619,11 +644,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
                   applyChange([...nextBoxes, ...annotations.filter(isPin)]);
                 }}
                 readOnly={!canEdit}
-                onRemove={(key) => {
-                  if (!canEdit) return;
-                  applyChange(annotations.filter((annotation) => annotation.key !== key));
-                  if (selectedKey === key) setSelectedKey(null);
-                }}
+                onRemove={requestRemove}
               />
             )}
           </div>
@@ -643,6 +664,19 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           onApply={applyTranslations}
         />
       )}
+      <ConfirmDialog
+        open={confirmKey !== null}
+        title="删除标注"
+        message="确认删除选中的标注？删除后会随下次保存写入服务器，无法恢复。"
+        onConfirm={() => {
+          const key = confirmKey;
+          setConfirmKey(null);
+          if (!key) return;
+          applyChange(annotationsRef.current.filter((annotation) => annotation.key !== key));
+          if (selectedKey === key) setSelectedKey(null);
+        }}
+        onCancel={() => setConfirmKey(null)}
+      />
     </div>
   );
 }

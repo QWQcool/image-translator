@@ -271,6 +271,8 @@ function migrate(database: Database.Database): void {
   addAiConfigColumn('detection_base_url', `detection_base_url TEXT NOT NULL DEFAULT ''`);
   addAiConfigColumn('detection_api_key', `detection_api_key TEXT NOT NULL DEFAULT ''`);
   addAiConfigColumn('detection_model', `detection_model TEXT NOT NULL DEFAULT ''`);
+  // 检测来源：'ai' = OpenAI 兼容视觉端点；'sidecar' = 本机检测进程（sidecar/detector.mjs）
+  addAiConfigColumn('detection_source', `detection_source TEXT NOT NULL DEFAULT 'ai'`);
 
   // 多 Provider：一个用户可配置多条 AI 服务（OCR/翻译/去字可选用哪条）。
   // user_id 为 NULL 的记录是「官方渠道」占位（server 端 token 字段保留，暂不填、不计费）。

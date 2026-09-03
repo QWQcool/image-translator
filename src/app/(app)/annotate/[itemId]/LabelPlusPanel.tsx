@@ -18,6 +18,7 @@ export default function LabelPlusPanel({
   onSelect,
   onChange,
   onRemove,
+  onReorder,
   onDefaultGroup,
   onSaveGroups,
   onInsertPhrase,
@@ -35,6 +36,7 @@ export default function LabelPlusPanel({
   onSelect: (key: string) => void;
   onChange: (next: DraftAnnotation[]) => void;
   onRemove: (key: string) => void;
+  onReorder: (fromKey: string, toKey: string) => void;
   onDefaultGroup: (id: number) => void;
   onSaveGroups: (next: LabelPlusGroup[]) => void;
   onInsertPhrase: (phrase: string) => void;
@@ -45,6 +47,9 @@ export default function LabelPlusPanel({
   const [editingGroups, setEditingGroups] = useState(false);
   // 9 个槽位的本地草稿，点保存才落库
   const [groupDraft, setGroupDraft] = useState<LabelPlusGroup[]>([]);
+  // 拖动排序：dragKey = 正在被拖动的标号，overKey = 悬停目标（高亮用）
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [overKey, setOverKey] = useState<string | null>(null);
 
   function patch(key: string, updates: Partial<DraftAnnotation>) {
     onChange(annotations.map((item) => (item.key === key ? { ...item, ...updates } : item)));
@@ -215,10 +220,42 @@ export default function LabelPlusPanel({
           <div
             key={pin.key}
             onMouseDown={() => onSelect(pin.key)}
-            className={`rounded-lg border p-3 ${active ? 'border-sky bg-sky/5' : 'border-ink-700 bg-cloud'}`}
+            onDragOver={(event) => {
+              if (dragKey && dragKey !== pin.key) {
+                event.preventDefault();
+                setOverKey(pin.key);
+              }
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              if (dragKey && dragKey !== pin.key) onReorder(dragKey, pin.key);
+              setDragKey(null);
+              setOverKey(null);
+            }}
+            className={`rounded-lg border p-3 ${active ? 'border-sky bg-sky/5' : 'border-ink-700 bg-cloud'} ${
+              dragKey && overKey === pin.key ? 'ring-1 ring-sky' : ''
+            }`}
           >
             <div className="mb-2 flex items-center justify-between">
               <span className="flex items-center gap-2 text-xs font-medium text-ink-200">
+                {!readOnly && pins.length > 1 && (
+                  <span
+                    draggable
+                    onDragStart={(event) => {
+                      setDragKey(pin.key);
+                      event.dataTransfer.effectAllowed = 'move';
+                      event.dataTransfer.setData('text/plain', pin.key);
+                    }}
+                    onDragEnd={() => {
+                      setDragKey(null);
+                      setOverKey(null);
+                    }}
+                    className="cursor-grab select-none px-0.5 text-ink-600 hover:text-ink-200"
+                    title="拖动调整标号顺序（影响编号、Tab 跳转与 AI 翻译顺序）"
+                  >
+                    ⠿
+                  </span>
+                )}
                 <span
                   className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[11px] text-white"
                   style={{ background: groupColor(pin.group_id) }}

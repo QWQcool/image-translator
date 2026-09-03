@@ -16,7 +16,7 @@ import { db } from '@/lib/db';
 import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { IMAGE_DIRS } from '@/lib/storage';
-import { sidecarHealth, sidecarOcr, type OcrBlock } from '@/lib/sidecar';
+import { sidecarDetect, sidecarHealth, sidecarOcr, type OcrBlock } from '@/lib/sidecar';
 import type { Annotation } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -165,9 +165,12 @@ export async function POST(request: Request, { params }: Params) {
   let engine: 'ai' | 'sidecar' = 'sidecar';
   let description: string | null = null;
   let twoStep = false;
+  /** 检测器引擎：'ai'（视觉端点）| 'onnx'（本机模型档）| 'traditional'（本机传统算法档） */
+  let detectEngine: 'ai' | 'onnx' | 'traditional' = 'ai';
 
   // Stage 6：配置了文本块检测服务 → 两步链路（检测出框 → 空框裁剪补提取）；
   // 检测失败（服务异常/解析失败）时回退到下面的单步视觉链路，保证可用性。
+  // 检测来源二选一：'ai'（OpenAI 兼容视觉端点）或 'sidecar'（本机检测进程 detector.mjs）
   if (detectionConfigured(detConfig)) {
     const resizedForDetect = await sharp(image)
       .rotate()
@@ -175,13 +178,24 @@ export async function POST(request: Request, { params }: Params) {
       .png()
       .toBuffer();
     const detMeta = await sharp(resizedForDetect).metadata();
-    const detected = await detectTextBlocks(detConfig, toDataUrl(resizedForDetect, 'image/png'), {
-      width: detMeta.width ?? 1,
-      height: detMeta.height ?? 1,
-    });
+    let detected: Awaited<ReturnType<typeof detectTextBlocks>> = null;
+    let detEngine: 'ai' | 'onnx' | 'traditional' = 'ai';
+    if (detConfig.source === 'sidecar') {
+      const side = await sidecarDetect(resizedForDetect, 'image/png');
+      detEngine = side?.engine === 'onnx' ? 'onnx' : 'traditional';
+      detected = side
+        ? side.blocks.map((b) => ({ x: b.x, y: b.y, w: b.w, h: b.h, text: '' }))
+        : null;
+    } else {
+      detected = await detectTextBlocks(detConfig, toDataUrl(resizedForDetect, 'image/png'), {
+        width: detMeta.width ?? 1,
+        height: detMeta.height ?? 1,
+      });
+    }
     if (detected) {
       twoStep = true;
       engine = 'ai';
+      detectEngine = detEngine;
       // 空框用视觉对话模型对裁剪区域补提取（并发 2，避免一页几十框把 token 打爆）
       const emptyIndexes = detected
         .map((b, i) => (b.text.trim() ? -1 : i))
@@ -277,7 +291,9 @@ export async function POST(request: Request, { params }: Params) {
       itemId,
       itemDisplayName(itemId),
       twoStep
-        ? `两步 OCR（检测服务出框 + 视觉补提取），识别出 ${proposals.length} 个文字块`
+        ? detectEngine === 'ai'
+          ? `两步 OCR（检测服务出框 + 视觉补提取），识别出 ${proposals.length} 个文字块`
+          : `两步 OCR（本机检测${detectEngine === 'onnx' ? '·模型档' : '·传统算法'}出框 + 视觉补提取），识别出 ${proposals.length} 个文字块`
         : `AI 视觉识别，识别出 ${proposals.length} 个文字块`,
     );
     // 6c 图像解析：把内容描述存到条目上，AI 翻译时作为上下文

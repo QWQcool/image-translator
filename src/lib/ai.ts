@@ -149,12 +149,15 @@ export function toDataUrl(buffer: Buffer, mime: string): string {
  * 框自带文字直接用，空框再用视觉模型对裁剪区域补提取。
  */
 export type DetectionConfig = {
+  /** 'ai' = OpenAI 兼容视觉端点；'sidecar' = 本机检测进程（sidecar/detector.mjs） */
+  source: 'ai' | 'sidecar';
   baseUrl: string;
   apiKey: string;
   model: string;
 };
 
 type DetectionRow = {
+  detection_source: string;
   detection_base_url: string;
   detection_api_key: string;
   detection_model: string;
@@ -163,11 +166,12 @@ type DetectionRow = {
 export function resolveDetectionConfig(userId: number): DetectionConfig {
   const row = db
     .prepare(
-      'SELECT detection_base_url, detection_api_key, detection_model FROM ai_configs WHERE user_id = ?',
+      'SELECT detection_source, detection_base_url, detection_api_key, detection_model FROM ai_configs WHERE user_id = ?',
     )
     .get(userId) as DetectionRow | undefined;
-  if (!row) return { baseUrl: '', apiKey: '', model: '' };
+  if (!row) return { source: 'ai', baseUrl: '', apiKey: '', model: '' };
   return {
+    source: row.detection_source === 'sidecar' ? 'sidecar' : 'ai',
     baseUrl: row.detection_base_url.replace(/\/+$/, ''),
     apiKey: row.detection_api_key,
     model: row.detection_model,
@@ -175,6 +179,7 @@ export function resolveDetectionConfig(userId: number): DetectionConfig {
 }
 
 export function detectionConfigured(config: DetectionConfig): boolean {
+  if (config.source === 'sidecar') return true; // 本机检测进程内置，无需配置
   return Boolean(config.baseUrl && config.apiKey && config.model);
 }
 
@@ -184,7 +189,7 @@ export function detectionConfigured(config: DetectionConfig): boolean {
  */
 export function writeDetectionConfig(
   userId: number,
-  config: { baseUrl: string; apiKey?: string; model: string },
+  config: { source?: 'ai' | 'sidecar'; baseUrl: string; apiKey?: string; model: string },
 ): void {
   const apiKey =
     config.apiKey === 'clear'
@@ -192,15 +197,17 @@ export function writeDetectionConfig(
       : config.apiKey !== undefined
         ? config.apiKey
         : resolveDetectionConfig(userId).apiKey;
+  const source = config.source === 'sidecar' ? 'sidecar' : 'ai';
   db.prepare(
-    `INSERT INTO ai_configs (user_id, detection_base_url, detection_api_key, detection_model, updated_at)
-         VALUES (?, ?, ?, ?, datetime('now'))
+    `INSERT INTO ai_configs (user_id, detection_source, detection_base_url, detection_api_key, detection_model, updated_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(user_id) DO UPDATE SET
+         detection_source = excluded.detection_source,
          detection_base_url = excluded.detection_base_url,
          detection_api_key = excluded.detection_api_key,
          detection_model = excluded.detection_model,
          updated_at = excluded.updated_at`,
-  ).run(userId, config.baseUrl, apiKey, config.model);
+  ).run(userId, source, config.baseUrl, apiKey, config.model);
 }
 
 export type DetectBlock = {

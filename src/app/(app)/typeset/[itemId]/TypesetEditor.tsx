@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import EmptyState from '@/components/EmptyState';
 import { isPin } from '@/lib/annotation';
 import type { LpStyle } from '@/lib/labelplus';
@@ -97,6 +98,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const [opacity, setOpacity] = useState(100);
   const [textLayers, setTextLayers] = useState<TypesetTextLayer[]>([]);
   const [selectedText, setSelectedText] = useState<string | null>(null);
+  /** 删除文字层前的二次确认 */
+  const [confirmDeleteLayer, setConfirmDeleteLayer] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [spaceDown, setSpaceDown] = useState(false);
@@ -1430,15 +1433,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
               <button
                 type="button"
                 className="btn-danger w-full py-1 text-xs"
-                onClick={() => {
-                  clearCoalesce();
-                  const next = textLayersRef.current.filter((l) => l.id !== selected.id);
-                  setTextLayers(next);
-                  setSelectedText(null);
-                  setDirty(true);
-                  void pushHistory(next, null);
-                  broadcastText(next);
-                }}
+                onClick={() => setConfirmDeleteLayer(true)}
               >
                 删除文字层
               </button>
@@ -1446,6 +1441,23 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           )}
         </aside>
       </div>
+      <ConfirmDialog
+        open={confirmDeleteLayer}
+        title="删除文字层"
+        message={`确认删除选中的文字层「${selected?.text?.slice(0, 20) ?? ''}」？可用 Ctrl+Z 撤销，但保存后将无法恢复。`}
+        onConfirm={() => {
+          setConfirmDeleteLayer(false);
+          if (!selected) return;
+          clearCoalesce();
+          const next = textLayersRef.current.filter((l) => l.id !== selected.id);
+          setTextLayers(next);
+          setSelectedText(null);
+          setDirty(true);
+          void pushHistory(next, null);
+          broadcastText(next);
+        }}
+        onCancel={() => setConfirmDeleteLayer(false)}
+      />
     </div>
   );
 }

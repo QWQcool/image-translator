@@ -71,7 +71,7 @@ npm run dev                    # http://localhost:3000
 | 操作 | 快捷键 |
 | --- | --- |
 | 保存 | `Ctrl` / `Cmd` + `S` |
-| 删除选中标注 | `Delete` / `Backspace`（焦点不在输入框时） |
+| 删除选中标注 | `Delete` / `Backspace`（焦点不在输入框时；二次确认后生效） |
 | 缩放画布 | 滚轮 |
 | 平移画布 | 空格 + 拖动，或按住中键拖动，或 `Alt` + 拖动 |
 | 适应窗口 / 100% | 编辑器顶部工具栏 |
@@ -125,9 +125,14 @@ npm run dev                    # http://localhost:3000
 
 ### 本机识别进程（可选）
 
-不配置 AI token 时的离线兜底：`node sidecar/stub.mjs` 会在 8765 端口提供一个
-OpenAI 风格的本地识别服务（`.env.local` 里 `SIDECAR_URL=http://127.0.0.1:8765`）。
-当前为协议占位实现，接上真实 OCR / LaMa 模型后无需改前端即可生效。
+不配置 AI token 时的离线兜底。两种启动方式：
+
+- `node sidecar/detector.mjs` —— **文本块检测**（推荐）：传统算法档开箱即用，
+  下载 comic-text-detector.onnx 模型后自动启用更高精度的 ONNX 档；
+  AI 设置 → 文本块检测 → 来源选「本机检测进程」即可使用（免费、离线）
+- `node sidecar/stub.mjs` —— 仅探活占位，供接真实 OCR / LaMa 时替换
+
+完整协议、模型下载链接与可调参数见 `sidecar/README.md`。
 
 ---
 
