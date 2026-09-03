@@ -2,7 +2,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
 import { NextResponse } from 'next/server';
-import { aiConfigured, resolveAiConfig, toDataUrl } from '@/lib/ai';
+import {
+  aiConfigured,
+  detectTextBlocks,
+  detectionConfigured,
+  extractTextInBox,
+  resolveAiConfig,
+  resolveDetectionConfig,
+  toDataUrl,
+} from '@/lib/ai';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { itemDisplayName, logOp } from '@/lib/oplog';
@@ -152,11 +160,59 @@ export async function POST(request: Request, { params }: Params) {
 
   // 优先走"我自己"配置的 AI 视觉模型；没配置或失败再退回本机 sidecar
   const aiConfig = resolveAiConfig(user.id, 'ocr');
+  const detConfig = resolveDetectionConfig(user.id);
   let blocks: OcrBlock[] | null = null;
   let engine: 'ai' | 'sidecar' = 'sidecar';
   let description: string | null = null;
+  let twoStep = false;
 
-  if (aiConfigured(aiConfig, 'ocr')) {
+  // Stage 6：配置了文本块检测服务 → 两步链路（检测出框 → 空框裁剪补提取）；
+  // 检测失败（服务异常/解析失败）时回退到下面的单步视觉链路，保证可用性。
+  if (detectionConfigured(detConfig)) {
+    const resizedForDetect = await sharp(image)
+      .rotate()
+      .resize({ width: 1600, height: 1600, fit: 'inside' })
+      .png()
+      .toBuffer();
+    const detMeta = await sharp(resizedForDetect).metadata();
+    const detected = await detectTextBlocks(detConfig, toDataUrl(resizedForDetect, 'image/png'), {
+      width: detMeta.width ?? 1,
+      height: detMeta.height ?? 1,
+    });
+    if (detected) {
+      twoStep = true;
+      engine = 'ai';
+      // 空框用视觉对话模型对裁剪区域补提取（并发 2，避免一页几十框把 token 打爆）
+      const emptyIndexes = detected
+        .map((b, i) => (b.text.trim() ? -1 : i))
+        .filter((i) => i >= 0);
+      const fillLimit = 2;
+      let cursor = 0;
+      const filled = new Map<number, string>();
+      await Promise.all(
+        Array.from({ length: Math.min(fillLimit, emptyIndexes.length) }, async () => {
+          while (cursor < emptyIndexes.length) {
+            const pos = cursor;
+            cursor += 1;
+            const text = await extractTextInBox(
+              { baseUrl: aiConfig.baseUrl, apiKey: aiConfig.apiKey, ocrModel: aiConfig.ocrModel },
+              image,
+              item.mime_type,
+              detected[emptyIndexes[pos]],
+            );
+            if (text) filled.set(pos, text);
+          }
+        }),
+      );
+      blocks = detected.map((b, i) => {
+        const emptyPos = emptyIndexes.indexOf(i);
+        if (emptyPos < 0) return b;
+        return { ...b, text: filled.get(emptyPos) ?? '' };
+      });
+    }
+  }
+
+  if (!blocks && aiConfigured(aiConfig, 'ocr')) {
     const vision = await visionOcr(image, 'image/png', {
       baseUrl: aiConfig.baseUrl,
       apiKey: aiConfig.apiKey,
@@ -214,7 +270,16 @@ export async function POST(request: Request, { params }: Params) {
 
   // AI 调用埋点：只有真正用了用户自己的视觉模型才记（sidecar 是本机确定性引擎）
   if (engine === 'ai') {
-    logOp(user.id, 'ai_ocr', 'ai', itemId, itemDisplayName(itemId), `AI 视觉识别，识别出 ${proposals.length} 个文字块`);
+    logOp(
+      user.id,
+      'ai_ocr',
+      'ai',
+      itemId,
+      itemDisplayName(itemId),
+      twoStep
+        ? `两步 OCR（检测服务出框 + 视觉补提取），识别出 ${proposals.length} 个文字块`
+        : `AI 视觉识别，识别出 ${proposals.length} 个文字块`,
+    );
     // 6c 图像解析：把内容描述存到条目上，AI 翻译时作为上下文
     if (description) {
       db.prepare('UPDATE space_items SET ai_context = ? WHERE id = ?').run(description, itemId);
@@ -222,7 +287,7 @@ export async function POST(request: Request, { params }: Params) {
   }
 
   const aiContext = engine === 'ai' ? description : null;
-  return NextResponse.json({ proposals, sidecar: engine === 'sidecar', engine, aiContext });
+  return NextResponse.json({ proposals, sidecar: engine === 'sidecar', engine, twoStep, aiContext });
 }
 
 function sidecarUrlHint(): string {

@@ -259,6 +259,18 @@ function migrate(database: Database.Database): void {
       updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+  // Stage 6 文本块检测服务（每用户独立，可选）：配置后 OCR 走「检测→提取」两步链路
+  const aiConfigColumns = database
+    .prepare('PRAGMA table_info(ai_configs)')
+    .all() as Array<{ name: string }>;
+  const addAiConfigColumn = (name: string, ddl: string) => {
+    if (!aiConfigColumns.some((column) => column.name === name)) {
+      database.exec(`ALTER TABLE ai_configs ADD COLUMN ${ddl}`);
+    }
+  };
+  addAiConfigColumn('detection_base_url', `detection_base_url TEXT NOT NULL DEFAULT ''`);
+  addAiConfigColumn('detection_api_key', `detection_api_key TEXT NOT NULL DEFAULT ''`);
+  addAiConfigColumn('detection_model', `detection_model TEXT NOT NULL DEFAULT ''`);
 
   // 多 Provider：一个用户可配置多条 AI 服务（OCR/翻译/去字可选用哪条）。
   // user_id 为 NULL 的记录是「官方渠道」占位（server 端 token 字段保留，暂不填、不计费）。

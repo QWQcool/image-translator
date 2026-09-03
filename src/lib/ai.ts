@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { db } from './db';
 
 /**
@@ -140,6 +141,206 @@ export function aiConfigured(config: AiConfig, which: 'ocr' | 'inpaint' | 'chat'
 /** 把 Buffer 包成 OpenAI 视觉接口要的 data URL */
 export function toDataUrl(buffer: Buffer, mime: string): string {
   return `data:${mime};base64,${buffer.toString('base64')}`;
+}
+
+/**
+ * 文本块检测服务配置（每用户独立，可选）。
+ * 配置后 OCR 走「检测→提取」两步链路：先由检测模型出文字框，
+ * 框自带文字直接用，空框再用视觉模型对裁剪区域补提取。
+ */
+export type DetectionConfig = {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+};
+
+type DetectionRow = {
+  detection_base_url: string;
+  detection_api_key: string;
+  detection_model: string;
+};
+
+export function resolveDetectionConfig(userId: number): DetectionConfig {
+  const row = db
+    .prepare(
+      'SELECT detection_base_url, detection_api_key, detection_model FROM ai_configs WHERE user_id = ?',
+    )
+    .get(userId) as DetectionRow | undefined;
+  if (!row) return { baseUrl: '', apiKey: '', model: '' };
+  return {
+    baseUrl: row.detection_base_url.replace(/\/+$/, ''),
+    apiKey: row.detection_api_key,
+    model: row.detection_model,
+  };
+}
+
+export function detectionConfigured(config: DetectionConfig): boolean {
+  return Boolean(config.baseUrl && config.apiKey && config.model);
+}
+
+/**
+ * 保存检测服务配置。apiKey undefined = 保持不变；'clear' = 清除。
+ * 存在 ai_configs 行就 UPDATE，不存在且要写时 INSERT。
+ */
+export function writeDetectionConfig(
+  userId: number,
+  config: { baseUrl: string; apiKey?: string; model: string },
+): void {
+  const apiKey =
+    config.apiKey === 'clear'
+      ? ''
+      : config.apiKey !== undefined
+        ? config.apiKey
+        : resolveDetectionConfig(userId).apiKey;
+  db.prepare(
+    `INSERT INTO ai_configs (user_id, detection_base_url, detection_api_key, detection_model, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(user_id) DO UPDATE SET
+         detection_base_url = excluded.detection_base_url,
+         detection_api_key = excluded.detection_api_key,
+         detection_model = excluded.detection_model,
+         updated_at = excluded.updated_at`,
+  ).run(userId, config.baseUrl, apiKey, config.model);
+}
+
+export type DetectBlock = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** 检测模型自带的文字；可能为空（空框由视觉模型补提取） */
+  text: string;
+};
+
+/**
+ * 文本块检测：OpenAI 兼容视觉端点（飞桨星河 PaddleOCR VL / 自定义均可），
+ * 传整图要求输出归一化框数组，框内文字可选。
+ */
+export async function detectTextBlocks(
+  config: DetectionConfig,
+  imageDataUrl: string,
+  imageMeta: { width: number; height: number },
+): Promise<DetectBlock[] | null> {
+  try {
+    const response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  `这是漫画/图片，尺寸 ${imageMeta.width}x${imageMeta.height}。检测图中所有对话气泡和独立文字块，` +
+                  '只输出 JSON 对象，不要任何其它文字：' +
+                  '{"blocks":[{"x":0.12,"y":0.34,"w":0.2,"h":0.08,"text":"原文"}]}，' +
+                  '其中 x/y/w/h 是相对图片宽高的 0~1 归一化值（x/y 为块左上角）；' +
+                  'text 是块内原文，能识别就输出，不能识别输出空字符串；没有文字块时 blocks 输出 []。',
+              },
+              { type: 'image_url', image_url: { url: imageDataUrl } },
+            ],
+          },
+        ],
+        temperature: 0,
+        max_tokens: 2000,
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = data.choices?.[0]?.message?.content ?? '';
+    const objectMatch = content.match(/\{[\s\S]*\}/) ?? content.match(/\[[\s\S]*\]/);
+    if (!objectMatch) return null;
+    const parsed = JSON.parse(objectMatch[0]) as
+      | { blocks?: Array<{ x?: number; y?: number; w?: number; h?: number; text?: string }> }
+      | Array<{ x?: number; y?: number; w?: number; h?: number; text?: string }>;
+    const raw = Array.isArray(parsed) ? parsed : (parsed.blocks ?? []);
+    if (!Array.isArray(raw)) return null;
+    return raw
+      .filter((b) => Number.isFinite(b.x) && Number.isFinite(b.y))
+      .map((b) => ({
+        x: Math.min(1, Math.max(0, Number(b.x))),
+        y: Math.min(1, Math.max(0, Number(b.y))),
+        w: Math.min(1, Math.max(0.01, Number(b.w ?? 0.08))),
+        h: Math.min(1, Math.max(0.01, Number(b.h ?? 0.04))),
+        text: String(b.text ?? ''),
+      }));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 空框补提取：把该框区域从原图裁出来单独发给视觉对话模型，
+ * 输出框内原文。裁剪局部比整图问坐标可靠得多。
+ */
+export async function extractTextInBox(
+  config: { baseUrl: string; apiKey: string; ocrModel: string },
+  image: Buffer,
+  mime: string,
+  box: { x: number; y: number; w: number; h: number },
+): Promise<string | null> {
+  try {
+    const meta = await sharp(image).metadata();
+    const left = Math.max(0, Math.round((box.x ?? 0) * (meta.width ?? 1)));
+    const top = Math.max(0, Math.round((box.y ?? 0) * (meta.height ?? 1)));
+    const width = Math.max(8, Math.round((box.w ?? 0.1) * (meta.width ?? 1)));
+    const height = Math.max(8, Math.round((box.h ?? 0.04) * (meta.height ?? 1)));
+    const crop = await sharp(image)
+      .extract({
+        left,
+        top,
+        width: Math.min(width, Math.max(8, (meta.width ?? width) - left)),
+        height: Math.min(height, Math.max(8, (meta.height ?? height) - top)),
+      })
+      .png()
+      .toBuffer();
+    const dataUrl = toDataUrl(crop, 'image/png');
+    const response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.ocrModel,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: '这是漫画的一个局部区域。识别区域内所有原文（保持原语言），只输出 JSON 对象，不要任何其它文字：{"text":"原文"}。没有文字时输出 {"text":""}。',
+              },
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          },
+        ],
+        temperature: 0,
+        max_tokens: 500,
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = data.choices?.[0]?.message?.content ?? '';
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const parsed = JSON.parse(match[0]) as { text?: unknown };
+    return typeof parsed.text === 'string' ? parsed.text.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
