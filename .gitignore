@@ -17,3 +17,6 @@ data/
 
 # 鏈湴 IDE 鏁版嵁
 .codebuddy/
+
+# UI 审查截图等本地产物
+/ui-review-*.png
