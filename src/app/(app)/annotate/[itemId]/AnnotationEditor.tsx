@@ -524,7 +524,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       }
       if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
         event.preventDefault();
-        selectPinByOffset(1);
+        // 与 Tab 同一套文本框循环：下一项的原文/译文逐框切换（Shift+Ctrl+Enter 反向）
+        cycleTextareaFocus(event.shiftKey);
         return;
       }
       // Alt+A 打开短语菜单：官方设计里录入译文时也要能呼出，所以在 typing 判断之前拦截
