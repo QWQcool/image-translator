@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { displayNameOf, getCurrentUser } from '@/lib/auth';
 import { safeNextPath } from '@/lib/safe-next';
 import TopBar from '@/components/TopBar';
+import PageTransition from '@/components/PageTransition';
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await getCurrentUser();
@@ -19,7 +20,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         displayName={displayNameOf(user)}
         avatarUrl={user.avatar_filename ? `/api/profile/avatar/${user.avatar_filename}` : null}
       />
-      <main className="mx-auto max-w-[1500px] px-6 py-7">{children}</main>
+      <main className="mx-auto max-w-[1500px] px-6 py-7">
+        <PageTransition>{children}</PageTransition>
+      </main>
     </div>
   );
 }

@@ -27,13 +27,36 @@ export default function AuthForm({ nextPath }: { nextPath: string }) {
         },
         (context) => {
           const reduceMotion = Boolean(context.conditions?.reduceMotion);
-          gsap.from('.auth-enter', {
+          if (reduceMotion) {
+            // 减弱动效：直接呈现终态
+            gsap.set('.auth-enter, .auth-halo', { autoAlpha: 1 });
+            return;
+          }
+          // 编排时刻：光环呼吸 → 吉祥物滑入 → 标题与卡片依次上浮
+          const tl = gsap.timeline({ defaults: { ease: 'power2.out' } });
+          tl.from('.auth-halo', {
             autoAlpha: 0,
-            y: reduceMotion ? 0 : 28,
-            duration: reduceMotion ? 0 : 0.7,
-            stagger: reduceMotion ? 0 : 0.2,
-            ease: 'power2.out',
-          });
+            scale: 0.55,
+            duration: 0.9,
+            ease: 'power3.out',
+          })
+            .to('.auth-halo', {
+              scale: 1.06,
+              duration: 1.6,
+              repeat: -1,
+              yoyo: true,
+              ease: 'sine.inOut',
+            })
+            .from(
+              '.auth-mascot',
+              { autoAlpha: 0, x: -56, rotation: -3, duration: 0.8, ease: 'back.out(1.5)' },
+              0.15,
+            )
+            .from(
+              '.auth-enter',
+              { autoAlpha: 0, y: 26, duration: 0.65, stagger: 0.18 },
+              0.45,
+            );
         },
         rootRef,
       );
@@ -73,20 +96,24 @@ export default function AuthForm({ nextPath }: { nextPath: string }) {
       ref={rootRef}
       className="relative z-[1] mx-auto flex min-h-screen w-full max-w-6xl flex-col lg:flex-row lg:items-center"
     >
-      <section className="auth-enter flex flex-1 flex-col items-center justify-center px-6 pb-2 pt-10 text-center lg:items-start lg:px-12 lg:py-16 lg:text-left">
+      <section className="auth-mascot relative flex flex-1 flex-col items-center justify-center px-6 pb-2 pt-10 text-center lg:items-start lg:px-12 lg:py-16 lg:text-left">
+        <div className="auth-halo pointer-events-none absolute left-1/2 top-1/2 h-72 w-72 -translate-x-1/2 -translate-y-1/2 rounded-full lg:left-[55%] lg:h-96 lg:w-96">
+          <div className="absolute inset-0 rounded-full border-2 border-halo/40 shadow-[0_0_0_18px_rgba(232,197,71,0.08),0_0_0_38px_rgba(59,139,224,0.07)]" />
+          <div className="absolute inset-6 rounded-full border border-sky/25" />
+        </div>
         <img
           src="/mascot/mascot-stand.png"
           alt="图译空间吉祥物：戴着蓝色光环的 AI 翻译助手"
-          className="h-44 w-auto object-contain drop-shadow-sm sm:h-56 lg:h-[26rem]"
+          className="relative h-44 w-auto object-contain drop-shadow-sm sm:h-56 lg:h-[26rem]"
         />
-        <h1 className="font-display mt-4 text-3xl tracking-wide text-ink-100 sm:text-4xl">图译空间</h1>
-        <p className="mt-2 max-w-sm text-sm leading-relaxed text-ink-400">
+        <h1 className="font-display auth-enter mt-4 text-3xl tracking-wide text-ink-100 sm:text-4xl">图译空间</h1>
+        <p className="auth-enter mt-2 max-w-sm text-sm leading-relaxed text-ink-400">
           圈出原文，写下译文。把图上的话，译成看得懂的一句。
         </p>
       </section>
 
-      <section className="auth-enter flex flex-1 items-start justify-center px-4 pb-16 pt-4 lg:items-center lg:px-12 lg:py-16">
-        <div className="card w-full max-w-sm p-6">
+      <section className="flex flex-1 items-start justify-center px-4 pb-16 pt-4 lg:items-center lg:px-12 lg:py-16">
+        <div className="card momentum-stripes w-full max-w-sm p-6">
           <div className="seg mb-5 grid grid-cols-2 gap-1">
             {(
               [

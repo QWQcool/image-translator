@@ -109,6 +109,47 @@ html::after {
   .seg-btn-on {
     @apply bg-cloud text-sky-deep shadow-sm ring-1 ring-sky/15;
   }
+
+  /* 签名元素：蔚蓝档案式光带动势条 —— 只用在登录卡与空间卡片顶部，其余保持安静 */
+  .momentum-stripes {
+    position: relative;
+    overflow: hidden;
+  }
+  .momentum-stripes::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 5px;
+    background: repeating-linear-gradient(
+      -55deg,
+      rgba(59, 139, 224, 0.55) 0 7px,
+      rgba(59, 139, 224, 0) 7px 14px,
+      rgba(232, 197, 71, 0.6) 14px 19px,
+      rgba(232, 197, 71, 0) 19px 26px
+    );
+    pointer-events: none;
+  }
+
+  /* 眉标：小节标签，天蓝 + 加宽字距 */
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-deep;
+  }
+
+  /* 展示卡片悬停：抬升 + 光环投影（transform 走 GPU） */
+  .hover-lift {
+    transition:
+      transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 0.2s ease;
+    will-change: transform;
+  }
+  .hover-lift:hover {
+    transform: translateY(-4px);
+    border-color: rgba(59, 139, 224, 0.4);
+    box-shadow:
+      0 18px 36px -18px rgba(31, 100, 184, 0.45),
+      0 0 0 1px rgba(232, 197, 71, 0.35);
+  }
 }
 
 ::-webkit-scrollbar {

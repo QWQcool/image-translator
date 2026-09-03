@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
+import { useStaggerReveal } from '@/lib/motion';
 import { formatDate, thumbUrl } from '@/lib/media';
 import type { SpaceRole, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
 
@@ -27,6 +28,8 @@ export default function SpacesClient() {
   // 全局查找：LIKE 匹配空间名 / 描述（走 API q 参数）
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
+  // 卡片入场：数据到达/筛选变化时逐张上浮
+  const gridScope = useStaggerReveal('.space-card', [spaces.length, debouncedQuery, loading]);
 
   const load = useCallback(async (q: string = '') => {
     setLoading(true);
@@ -111,7 +114,7 @@ export default function SpacesClient() {
   ].filter((group) => group.items.length > 0);
 
   return (
-    <div className="space-y-6">
+    <div ref={gridScope} className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <button type="button" className="btn-primary" onClick={() => setDraft({ ...EMPTY_DRAFT })}>
           新建空间
@@ -147,7 +150,7 @@ export default function SpacesClient() {
               {group.items.map((space) => (
                 <div
                   key={space.id}
-                  className="card group overflow-hidden transition-colors hover:border-sky/35"
+                  className="card momentum-stripes hover-lift space-card group overflow-hidden"
                 >
                   <Link href={`/spaces/${space.id}`} className="block">
                     <div className="aspect-[16/10] w-full overflow-hidden bg-paper">

@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
+import { useSlideDown } from '@/lib/motion';
 import HaloMark from './HaloMark';
 
 const NAV = [
@@ -21,6 +22,7 @@ export default function TopBar({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const scope = useSlideDown([]);
 
   async function logout() {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -29,7 +31,7 @@ export default function TopBar({
   }
 
   return (
-    <header className="sticky top-0 z-40 border-b border-sky/10 bg-cloud/80 shadow-glass backdrop-blur-md">
+    <header ref={scope} className="sticky top-0 z-40 border-b border-sky/10 bg-cloud/80 shadow-glass backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-[1500px] items-center gap-6 px-6">
         <Link href="/spaces" className="flex items-center gap-2 text-ink-100">
           <HaloMark className="h-7 w-7 shrink-0" />

@@ -42,6 +42,17 @@ npm run dev                    # http://localhost:3000
 
 ---
 
+## 界面设计
+
+蔚蓝档案学院风：纸蓝画布（`paper`）+ 云白面板（`cloud`）+ 晴空主色（`sky`）+ 光环黄点缀（`halo`）+ 墨色文字（`ink`），
+令牌定义见 `tailwind.config.ts`，通用组件（`card / btn / input / seg`）见 `src/app/globals.css`。
+
+- 签名元素是**光带动势条**——登录卡与空间卡顶部的斜向细条纹（`.momentum-stripes`）
+- 动效由 GSAP 驱动（`src/lib/motion.ts`）：登录页光环呼吸 + 吉祥物滑入的编排入场、顶栏下滑、页面淡入上浮、卡片错开入场
+- 全部动效遵循 `prefers-reduced-motion`；**编辑器（标注 / 嵌字 / 阅读器）保持零动效**，保证操作稳定
+
+---
+
 ## 权限模型（开放空间）
 
 站点采用**开放空间**模型：没有私人文件夹，所有登录用户对所有空间都有**编辑权**；
