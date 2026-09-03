@@ -447,6 +447,53 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     [pins, selectedKey],
   );
 
+  /**
+   * Tab 循环目标集合：面板卡片内带 data-role 的 textarea（原文/译文）。
+   * DOM 顺序 = 标号列表顺序（每卡片 原文 → 译文），框选模式下只有译文。
+   */
+  function collectCycleTextareas(): HTMLTextAreaElement[] {
+    return Array.from(
+      document.querySelectorAll<HTMLTextAreaElement>('[data-annotation-key] textarea[data-role]'),
+    );
+  }
+
+  /** Tab / Shift+Tab：焦点移到下一个/上一个文本框并选中对应卡片（循环） */
+  const cycleTextareaFocus = useCallback(
+    (backward: boolean) => {
+      const areas = collectCycleTextareas();
+      // 没有任何可聚焦的文本框（如还没有标号）时回退为旧的翻页行为
+      if (areas.length === 0) {
+        if (!backward) void goItem(neighbors.nextId);
+        return;
+      }
+      const active = document.activeElement as HTMLTextAreaElement | null;
+      const currentIndex = active ? areas.indexOf(active) : -1;
+      const nextIndex = backward
+        ? (currentIndex <= 0 ? areas.length - 1 : currentIndex - 1)
+        : (currentIndex + 1) % areas.length;
+      const target = areas[nextIndex];
+      if (!target) return;
+      target.focus();
+      // 光标移到文本末尾，方便直接续写
+      const end = target.value.length;
+      target.setSelectionRange(end, end);
+      // 聚焦会触发卡片 textarea 的 onFocus 更新选中；这里再同步选中态并滚动定位（零动效 auto）
+      const cardKey = target
+        .closest('[data-annotation-key]')
+        ?.getAttribute('data-annotation-key');
+      if (cardKey) {
+        setSelectedKeys([]);
+        setSelectedKey(cardKey);
+        requestAnimationFrame(() => {
+          document
+            .querySelector(`[data-annotation-key="${cardKey}"]`)
+            ?.scrollIntoView({ block: 'center', behavior: 'auto' });
+        });
+      }
+    },
+    [goItem, neighbors.nextId],
+  );
+
   // 空间内搜索跳转：/annotate/[itemId]?focus=<annotationId> 自动选中对应标注
   const focusParam = searchParams.get('focus');
   const focusAppliedRef = useRef<number | null>(null);
@@ -494,6 +541,14 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
         return;
       }
 
+      // Tab / Shift+Tab：任何焦点状态下（含 textarea 内）在文本框间循环切换，
+      // 取代旧的「Tab 翻页」；翻页仍走 ←→ 方向键
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        cycleTextareaFocus(event.shiftKey);
+        return;
+      }
+
       if (typing) return;
 
       // Ctrl+F 打开查找条（typing 时不拦截，输入框里保留浏览器原生行为）
@@ -528,12 +583,6 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
         const phrase = phrases[phraseCursor.current % phrases.length];
         phraseCursor.current = (phraseCursor.current + 1) % phrases.length;
         insertPhraseAtSelected(phrase);
-        return;
-      }
-      // Tab 向后翻页（官方快捷键）
-      if (event.key === 'Tab') {
-        event.preventDefault();
-        void goItem(neighbors.nextId);
         return;
       }
 
@@ -600,6 +649,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     redo,
     toggleDoubtful,
     batchSetGroup,
+    cycleTextareaFocus,
   ]);
 
   useEffect(() => {
@@ -774,7 +824,12 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               hidePins={hidePins}
               showGroupNames={showGroupNames || mode === 'review'}
               defaultGroupId={defaultGroupId}
-              followSelection={mode === 'input'}
+              // 校对模式与录入模式一样：选中标号变化时画布跟随居中
+              followSelection={mode === 'input' || mode === 'review'}
+              onRemoveKeys={(keys) => {
+                if (canEdit) setConfirmKeys(keys);
+              }}
+              onToggleDoubtfulKeys={toggleDoubtful}
             />
             {/* 查找 / 替换浮动条 */}
             {findOpen && (
@@ -885,7 +940,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
                 </>
               )}
               <span className="text-[11px] text-ink-400">
-                {canEdit ? 'Ctrl+S · ←→ 翻图 · ↑↓ 切号' : '只读模式'}
+                {canEdit ? 'Ctrl+S · ←→ 翻图 · ↑↓ 切号 · Tab 切文本框' : '只读模式'}
               </span>
             </div>
           </div>

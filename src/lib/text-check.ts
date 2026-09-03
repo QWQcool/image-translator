@@ -1,6 +1,7 @@
 /**
  * 标点规范检查（纯前端，仅检查译文 text，不查日文原文）。
  * 不阻塞导出/翻译，仅提示；fixable 的规则可一键自动修复。
+ * fixable 规则：省略号 / 多余空行 / 首尾空白 / 半角标点全角化。
  */
 
 export type TextIssue = {
@@ -91,6 +92,24 @@ function checkEdgeSpaces(text: string, issues: TextIssue[]): void {
 }
 
 /** 规则 4：中英标点混用（同时出现全角+半角逗号/句号），仅提示 */
+/**
+ * 找第一个「真混用」的半角句号位置（非省略号且非小数点）：
+ * 前后均为数字视为小数点（3.14 / U.S. 语境两侧非数字但属英文缩写，由 CJK 判定兜底不了，
+ * 这里仅排除小数点），「你好。3.14 结束」不算混用。返回 -1 表示没有。
+ */
+function findMixedPeriodIndex(text: string): number {
+  let from = 0;
+  for (;;) {
+    const index = text.slice(from).search(/(?<!\.)\.(?!\.)/);
+    if (index < 0) return -1;
+    const abs = from + index;
+    const prev = text[abs - 1];
+    const next = text[abs + 1];
+    if (!/\d/.test(prev ?? '') || !/\d/.test(next ?? '')) return abs;
+    from = abs + 1;
+  }
+}
+
 function checkMixedPunctuation(text: string, issues: TextIssue[]): void {
   if (text.includes('，') && text.includes(',')) {
     issues.push({
@@ -100,13 +119,16 @@ function checkMixedPunctuation(text: string, issues: TextIssue[]): void {
       snippet: snippetAround(text, text.indexOf(','), 1),
     });
   }
-  if (text.includes('。') && /(?<!\.)\.(?!\.)/.test(text)) {
-    issues.push({
-      rule: '标点混用',
-      message: '同时使用了全角句号「。」与半角句号「.」',
-      fixable: false,
-      snippet: snippetAround(text, text.search(/(?<!\.)\.(?!\.)/), 1),
-    });
+  if (text.includes('。')) {
+    const periodIndex = findMixedPeriodIndex(text);
+    if (periodIndex >= 0) {
+      issues.push({
+        rule: '标点混用',
+        message: '同时使用了全角句号「。」与半角句号「.」（小数点除外）',
+        fixable: false,
+        snippet: snippetAround(text, periodIndex, 1),
+      });
+    }
   }
 }
 
@@ -144,6 +166,62 @@ function checkRepeatedPunctuation(text: string, issues: TextIssue[]): void {
   }
 }
 
+/** 半角 → 全角直转表：无论上下文直接转（，！？；：） */
+const HALF_TO_FULL: Record<string, string> = {
+  ',': '，',
+  '!': '！',
+  '?': '？',
+  ';': '；',
+  ':': '：',
+};
+
+/** CJK 判定：汉字 / 假名 / CJK 标点 / 全角字符，用于半角句号的邻接判断 */
+const CJK_CHAR = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u3000-\u303f\uff01-\uff65]/;
+
+/**
+ * 找到第一个可转换的半角句号位置（前后至少一侧是 CJK 字符），没有返回 -1。
+ * 连续句点（省略号 ... / ..）跳过，交给省略号规则处理；
+ * 英文上下文（3.14、U.S. 等）两侧都不是 CJK，天然不动。
+ */
+function findConvertiblePeriod(text: string): number {
+  const chars = [...text];
+  for (let i = 0; i < chars.length; i += 1) {
+    if (chars[i] !== '.') continue;
+    if (chars[i - 1] === '.' || chars[i + 1] === '.') continue;
+    if (CJK_CHAR.test(chars[i - 1] ?? '') || CJK_CHAR.test(chars[i + 1] ?? '')) return i;
+  }
+  return -1;
+}
+
+/** 半角标点全角化：,!?;: 直接转；. 仅在 CJK 邻接时转，英文语境保留 */
+function toFullWidthPunctuation(text: string): string {
+  const chars = [...text];
+  return chars
+    .map((ch, i) => {
+      const full = HALF_TO_FULL[ch];
+      if (full) return full;
+      if (ch !== '.') return ch;
+      if (chars[i - 1] === '.' || chars[i + 1] === '.') return ch;
+      if (CJK_CHAR.test(chars[i - 1] ?? '') || CJK_CHAR.test(chars[i + 1] ?? '')) return '。';
+      return ch;
+    })
+    .join('');
+}
+
+/** 规则 7：半角标点全角化（fixable）。修复后半角消失，原有的「标点混用」提示自然消除 */
+function checkHalfWidthPunctuation(text: string, issues: TextIssue[]): void {
+  const direct = /[,:;!?]/.exec(text);
+  const periodIndex = findConvertiblePeriod(text);
+  if (!direct && periodIndex < 0) return;
+  issues.push({
+    rule: '半角标点',
+    message: '存在半角标点，建议全角化（,!?;: 直接转；英文语境的 . 自动保留）',
+    fixable: true,
+    snippet: snippetAround(text, direct ? direct.index : periodIndex, 1),
+    apply: toFullWidthPunctuation,
+  });
+}
+
 /** 检查一段译文，按规则顺序返回全部问题 */
 export function checkText(text: string): TextIssue[] {
   const issues: TextIssue[] = [];
@@ -154,6 +232,7 @@ export function checkText(text: string): TextIssue[] {
   checkMixedPunctuation(text, issues);
   checkQuotes(text, issues);
   checkRepeatedPunctuation(text, issues);
+  checkHalfWidthPunctuation(text, issues);
   return issues;
 }
 

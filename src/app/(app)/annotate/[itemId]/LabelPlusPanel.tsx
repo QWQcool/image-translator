@@ -1,12 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { isPin, type DraftAnnotation } from '@/lib/annotation';
 import { groupColor } from '@/lib/labelplus';
 import { checkText, fixText, type TextIssue } from '@/lib/text-check';
 import type { LabelPlusGroup } from '@/lib/types';
+
+/** 常见符号集：前端内置常量（不放进空间 phrases，避免污染用户自定义短语） */
+const SYMBOLS = [
+  '❤️', '♡', '💛', '💚', '💙', '★', '☆', '✦', '✧', '♪', '♫', '✿',
+  '❀', '☀', '☂', '⚡', '☾', '✂', '✓', '✘', '※', '♂', '♀', '〜',
+];
 
 export default function LabelPlusPanel({
   annotations,
@@ -63,6 +69,40 @@ export default function LabelPlusPanel({
     Array<{ key: string; index: number; issues: TextIssue[] }> | null
   >(null);
   const [allOk, setAllOk] = useState(false);
+  // 常见符号快捷面板开关
+  const [symbolMenuOpen, setSymbolMenuOpen] = useState(false);
+
+  // 选中标号变化时把对应卡片滚进视野（录入/审校自动定位；编辑器零动效，滚动用 auto）
+  useEffect(() => {
+    if (!selectedKey) return;
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-annotation-key="${selectedKey}"]`)
+        ?.scrollIntoView({ block: 'center', behavior: 'auto' });
+    });
+  }, [selectedKey]);
+
+  // Alt+A 呼出短语菜单时收起符号面板，两个菜单互斥
+  useEffect(() => {
+    if (phraseMenuOpen) setSymbolMenuOpen(false);
+  }, [phraseMenuOpen]);
+
+  // 符号面板打开时：点击外部 / Esc / 滚轮关闭（菜单项用 onClick，晚于 window click 收尾，不会误吞）
+  useEffect(() => {
+    if (!symbolMenuOpen) return;
+    const close = () => setSymbolMenuOpen(false);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('wheel', close, { passive: true });
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('wheel', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [symbolMenuOpen]);
 
   /** 检查当前图所有 pin 译文（纯前端，不阻塞导出/翻译） */
   function runCheck() {
@@ -222,7 +262,7 @@ export default function LabelPlusPanel({
         </div>
       )}
 
-      {!readOnly && phrases.length > 0 && (
+      {!readOnly && (
         <div className="flex flex-wrap gap-1">
           {phrases.map((phrase) => (
             <button
@@ -234,9 +274,57 @@ export default function LabelPlusPanel({
               {phrase}
             </button>
           ))}
-          <span className="self-center text-[10px] text-ink-500" title="官方快捷键：A 插入预置文本，Alt+A 呼出菜单">
-            A / Alt+A
-          </span>
+          {/* 常见符号快捷面板入口（与短语按钮同款式；无选中标号时禁用） */}
+          <button
+            type="button"
+            className={`rounded-md border bg-paper px-1.5 py-0.5 text-[11px] ${
+              symbolMenuOpen ? 'border-sky text-ink-100' : 'border-ink-700 text-ink-300 hover:border-sky'
+            } ${selectedKey ? '' : 'cursor-not-allowed opacity-50'}`}
+            disabled={!selectedKey}
+            title={selectedKey ? '插入常见符号（追加到译文末尾）' : '先选中一个标号'}
+            onClick={() => {
+              onClosePhraseMenu();
+              setSymbolMenuOpen((v) => !v);
+            }}
+          >
+            符号
+          </button>
+          {phrases.length > 0 && (
+            <span className="self-center text-[10px] text-ink-500" title="官方快捷键：A 插入预置文本，Alt+A 呼出菜单">
+              A / Alt+A
+            </span>
+          )}
+        </div>
+      )}
+
+      {symbolMenuOpen && (
+        <div className="absolute right-2 top-2 z-20 w-56 rounded-lg border border-sky/40 bg-cloud p-2 shadow-lg">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[11px] font-medium text-ink-200">插入符号</span>
+            <button
+              type="button"
+              className="rounded px-1 text-[11px] text-ink-400 hover:text-ink-100"
+              onClick={() => setSymbolMenuOpen(false)}
+            >
+              ✕
+            </button>
+          </div>
+          <div className="grid grid-cols-6 gap-1">
+            {SYMBOLS.map((symbol) => (
+              <button
+                key={symbol}
+                type="button"
+                className="flex h-8 items-center justify-center rounded text-base text-ink-200 hover:bg-sky/15"
+                title={`插入 ${symbol}`}
+                onClick={() => {
+                  onInsertPhrase(symbol);
+                  setSymbolMenuOpen(false);
+                }}
+              >
+                {symbol}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -309,7 +397,7 @@ export default function LabelPlusPanel({
                       setOverKey(null);
                     }}
                     className="cursor-grab select-none px-0.5 text-ink-600 hover:text-ink-200"
-                    title="拖动调整标号顺序（影响编号、Tab 跳转与 AI 翻译顺序）"
+                    title="拖动调整标号顺序（影响编号、Tab 文本框循环与 AI 翻译顺序）"
                   >
                     ⠿
                   </span>
@@ -360,6 +448,7 @@ export default function LabelPlusPanel({
             <label className="mb-1 block text-[11px] text-ink-500">原文</label>
             <textarea
               className="input min-h-[52px] resize-y text-xs disabled:opacity-60"
+              data-role="source"
               placeholder="OCR / 原文"
               value={pin.source_text}
               disabled={readOnly}
@@ -369,6 +458,7 @@ export default function LabelPlusPanel({
             <label className="mb-1 mt-2 block text-[11px] text-ink-500">译文</label>
             <textarea
               className="input min-h-[68px] resize-y text-xs disabled:opacity-60"
+              data-role="translation"
               placeholder={readOnly ? '（只读）' : 'Ctrl+Enter 下一项'}
               value={pin.text}
               disabled={readOnly}
@@ -465,7 +555,7 @@ export default function LabelPlusPanel({
               </div>
             ))}
             <p className="text-[11px] text-ink-500">
-              蓝色规则可自动修复（省略号 / 多余空行 / 首尾空白），amber 规则仅提示。
+              蓝色规则可自动修复（省略号 / 多余空行 / 首尾空白 / 半角标点全角化），amber 规则仅提示。
             </p>
           </div>
         )}

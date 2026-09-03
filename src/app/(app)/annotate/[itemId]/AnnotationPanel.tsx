@@ -117,6 +117,7 @@ export default function AnnotationPanel({
 
             <textarea
               className="input min-h-[68px] resize-y text-xs disabled:opacity-60"
+              data-role="translation"
               placeholder={readOnly ? '（只读）' : '输入要显示在图片上的文字…'}
               value={annotation.text}
               disabled={readOnly}

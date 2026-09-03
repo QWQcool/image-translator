@@ -137,6 +137,8 @@ export default function AnnotationCanvas({
   showGroupNames = false,
   defaultGroupId = 1,
   followSelection = false,
+  onRemoveKeys,
+  onToggleDoubtfulKeys,
 }: {
   imageSrc: string;
   previewSrc?: string;
@@ -157,6 +159,10 @@ export default function AnnotationCanvas({
   showGroupNames?: boolean;
   defaultGroupId?: number;
   followSelection?: boolean;
+  /** 右键菜单「删除」回调（keys 为生效选中集，编辑器统一走确认弹窗） */
+  onRemoveKeys?: (keys: string[]) => void;
+  /** 右键菜单「存疑切换」回调（多选时批量） */
+  onToggleDoubtfulKeys?: (keys: string[]) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -170,6 +176,10 @@ export default function AnnotationCanvas({
   const [draft, setDraft] = useState<DraftAnnotation | null>(null);
   // Ctrl+橡皮筋选框（stage 坐标，松开时把相交标注并入选中集）
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(
+    null,
+  );
+  // 右键上下文菜单：视口内坐标 + 生效选中集（右键命中已选中的标注时作用于整个多选集）
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; keys: string[] } | null>(
     null,
   );
 
@@ -323,6 +333,53 @@ export default function AnnotationCanvas({
       y: rect.height / 2 - pin.y * base.h * zoom,
     });
   }, [followSelection, selectedKey]);
+
+  // 右键菜单打开时：点击外部 / Esc / 滚轮（缩放）关闭。
+  // 菜单项用 onPointerDown 触发动作（早于 window 的 click 收尾），不会被误吞。
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('wheel', close, { passive: true });
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('wheel', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [contextMenu]);
+
+  /** 画布右键：命中标注 → 弹上下文菜单；空白处 → 不弹任何菜单（连浏览器默认也不弹） */
+  function onContextMenu(event: React.MouseEvent) {
+    // 右键菜单是编辑功能：只读模式不弹（也不弹浏览器默认菜单）
+    if (readOnly) {
+      event.preventDefault();
+      return;
+    }
+    if (!base.w) return;
+    const hit = hitTest(stageCoords(event));
+    if (!hit) {
+      event.preventDefault();
+      setContextMenu(null);
+      return;
+    }
+    event.preventDefault();
+    // 命中的标注已在多选集合里 → 菜单作用于整个选中集；否则先单选它
+    const inSelection = selection.length > 1 && selection.includes(hit.key);
+    const keys = inSelection ? selection : [hit.key];
+    if (!selection.includes(hit.key)) onSelect(hit.key);
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    // 简单防溢出：贴近视口右/下边缘时往回收（菜单约 150×90）
+    setContextMenu({
+      x: Math.min(event.clientX - rect.left, rect.width - 160),
+      y: Math.min(event.clientY - rect.top, rect.height - 96),
+      keys,
+    });
+  }
 
   function stageCoords(event: { clientX: number; clientY: number }) {
     const wrapper = wrapperRef.current;
@@ -761,6 +818,41 @@ export default function AnnotationCanvas({
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
       >
+        {/* 右键上下文菜单：删除（走确认弹窗）/ 存疑切换，多选时作用于整个选中集 */}
+        {contextMenu && (
+          <div
+            className="absolute z-30 min-w-[9.5rem] rounded-lg border border-ink-700 bg-cloud py-1 shadow-card"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-xs text-blush hover:bg-blush/10"
+              onPointerDown={() => {
+                onRemoveKeys?.(contextMenu.keys);
+                setContextMenu(null);
+              }}
+            >
+              {contextMenu.keys.length > 1
+                ? `删除 (${contextMenu.keys.length})`
+                : '删除'}
+            </button>
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-xs text-ink-200 hover:bg-sky/15"
+              onPointerDown={() => {
+                onToggleDoubtfulKeys?.(contextMenu.keys);
+                setContextMenu(null);
+              }}
+            >
+              {contextMenu.keys.length > 1
+                ? '批量切换存疑'
+                : annotationsRef.current.find((a) => a.key === contextMenu.keys[0])?.doubtful
+                  ? '取消存疑'
+                  : '存疑'}
+            </button>
+          </div>
+        )}
         <div
           ref={wrapperRef}
           className="absolute left-0 top-0"
@@ -773,6 +865,7 @@ export default function AnnotationCanvas({
             touchAction: 'none',
           }}
           onPointerDown={onPointerDown}
+          onContextMenu={onContextMenu}
         >
           <canvas ref={canvasRef} className="block" />
 
