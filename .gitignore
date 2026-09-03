@@ -20,3 +20,4 @@ data/
 
 # UI 审查截图等本地产物
 /ui-review-*.png
+.tmp-tc/
