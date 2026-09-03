@@ -130,6 +130,18 @@ export type Annotation = {
   updated_by_username?: string | null;
 };
 
+/** 嵌字成品：条目的一版成品图。成品是独立 assets 行（成品产物，非空间条目），不进 space_items */
+export type Output = {
+  id: number;
+  item_id: number;
+  asset_id: number;
+  created_by: number | null;
+  created_at: string;
+  /** 联表查询时附带 */
+  asset?: Asset;
+  item_title?: string | null;
+};
+
 export type SpaceWithCounts = Space & {
   item_count: number;
   annotation_count: number;

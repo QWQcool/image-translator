@@ -72,6 +72,18 @@ CREATE TABLE IF NOT EXISTS space_items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_space ON space_items(space_id, sort_order);
 
+-- 嵌字成品：条目的一版成品图。成品 asset 是独立的 assets 行（不插 space_items，
+-- 不进空间图片列表），仅被本表引用；条目删除时本表级联清空，
+-- 成品 asset 的行与磁盘文件由 hard-delete 联动逻辑负责回收。
+CREATE TABLE IF NOT EXISTS outputs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id    INTEGER NOT NULL REFERENCES space_items(id) ON DELETE CASCADE,
+  asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_outputs_item ON outputs(item_id);
+
 CREATE TABLE IF NOT EXISTS annotations (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id         INTEGER NOT NULL REFERENCES space_items(id) ON DELETE CASCADE,

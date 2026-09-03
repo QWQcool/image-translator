@@ -120,6 +120,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   /** 分隔线位置（占 wrapper 宽度的百分比 0~100） */
   const [comparePos, setComparePos] = useState(50);
   const compareDragging = useRef(false);
+  // 保存成品：进行中 / 成功提示（「已保存，本图共 n 个成品版本」）
+  const [savingOutput, setSavingOutput] = useState(false);
+  const [outputNotice, setOutputNotice] = useState<string | null>(null);
 
   const imageWidth = asset?.width ?? 1200;
   const imageHeight = asset?.height ?? 800;
@@ -871,15 +874,16 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     compareDragging.current = false;
   }
 
-  async function exportPng(writeBack: boolean) {
+  /** 把底图 + 涂改层 + 文字层渲染成 PNG blob（导出 / 写入空间 / 保存成品共用） */
+  async function renderPngBlob(): Promise<Blob | null> {
     const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
     const paint = paintRef.current;
-    if (!img || !paint) return;
+    if (!img || !paint) return null;
     const canvas = document.createElement('canvas');
     canvas.width = imageWidth;
     canvas.height = imageHeight;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) return null;
     ctx.drawImage(img, 0, 0, imageWidth, imageHeight);
     ctx.drawImage(paint, 0, 0);
     for (const layer of textLayers) {
@@ -955,7 +959,11 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       }
       ctx.restore();
     }
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+    return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+  }
+
+  async function exportPng(writeBack: boolean) {
+    const blob = await renderPngBlob();
     if (!blob) return;
     if (writeBack) {
       const form = new FormData();
@@ -974,6 +982,43 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     a.download = `${asset?.original_name?.replace(/\.[^.]+$/, '') || 'typeset'}-嵌字.png`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  /** 保存成品：PNG blob → base64 → POST，归档到条目的成品列表（不进空间图片列表） */
+  async function saveOutput() {
+    if (savingOutput) return;
+    setSavingOutput(true);
+    setOutputNotice(null);
+    setError(null);
+    try {
+      const blob = await renderPngBlob();
+      if (!blob) {
+        setError('生成成品图失败');
+        return;
+      }
+      // blob → base64：分块拼接，避免大图一次性 String.fromCharCode 溢出调用栈
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let binary = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+      }
+      const res = await fetch(`/api/items/${itemId}/outputs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: btoa(binary) }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? '保存成品失败');
+        return;
+      }
+      setOutputNotice(`已保存，本图共 ${data.count} 个成品版本`);
+    } catch {
+      setError('保存成品失败');
+    } finally {
+      setSavingOutput(false);
+    }
   }
 
   useEffect(() => {
@@ -1059,6 +1104,14 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           <button type="button" className="btn-ghost text-xs" onClick={() => void exportPng(false)}>
             导出 PNG
           </button>
+          <button
+            type="button"
+            className="btn-ghost text-xs"
+            disabled={savingOutput}
+            onClick={() => void saveOutput()}
+          >
+            {savingOutput ? '保存中…' : '保存成品'}
+          </button>
           <button type="button" className="btn-ghost text-xs" onClick={() => void exportPng(true)}>
             写入空间
           </button>
@@ -1068,6 +1121,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         </span>
       </div>
       {error && <p className="notice-error">{error}</p>}
+      {outputNotice && <p className="notice-ok">{outputNotice}</p>}
 
       {styleOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/60 p-4" onClick={() => setStyleOpen(false)}>

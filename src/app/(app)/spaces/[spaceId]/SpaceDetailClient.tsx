@@ -5,8 +5,15 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
-import { thumbUrl } from '@/lib/media';
-import type { Space, SpaceAccess, SpaceItem, SpaceStatus, SpaceVisibility } from '@/lib/types';
+import { formatBytes, formatDate, originalUrl, thumbUrl } from '@/lib/media';
+import type {
+  Output,
+  Space,
+  SpaceAccess,
+  SpaceItem,
+  SpaceStatus,
+  SpaceVisibility,
+} from '@/lib/types';
 import AiBatchModal from './AiBatchModal';
 import ExportMenu from './ExportMenu';
 import { ROLE_LABEL } from './MembersPanel';
@@ -49,6 +56,13 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [debouncedQuery, setDebouncedQuery] = useState('');
   // 多选删除
   const [selection, setSelection] = useState<Set<number>>(() => new Set());
+  // 成品视图：图片（默认）| 成品 两种网格视图切换
+  const [view, setView] = useState<'items' | 'outputs'>('items');
+  const [outputs, setOutputs] = useState<Output[]>([]);
+  const [outputsLoading, setOutputsLoading] = useState(false);
+  // 成品列表是否已拉取过（首次切到成品视图才请求）
+  const outputsLoaded = useRef(false);
+  const [pendingDeleteOutput, setPendingDeleteOutput] = useState<Output | null>(null);
 
   const canEdit = access?.canEdit ?? false;
   const searching = debouncedQuery.length > 0;
@@ -196,6 +210,38 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     } finally {
       setTogglingStatus(false);
     }
+  }
+
+  /** 拉取空间全部成品（首次切到成品视图时触发） */
+  const loadOutputs = useCallback(async () => {
+    setOutputsLoading(true);
+    try {
+      const res = await fetch(`/api/spaces/${spaceId}/outputs`);
+      const data = await res.json();
+      setOutputs(Array.isArray(data.outputs) ? data.outputs : []);
+      outputsLoaded.current = true;
+    } finally {
+      setOutputsLoading(false);
+    }
+  }, [spaceId]);
+
+  /** 切换 图片|成品 视图；首次进入成品视图时拉取列表 */
+  function switchView(next: 'items' | 'outputs') {
+    setView(next);
+    if (next === 'outputs' && !outputsLoaded.current) {
+      void loadOutputs();
+    }
+  }
+
+  /** 删除单张成品：outputs 行 + 无引用的 asset 与磁盘文件（服务端处理） */
+  async function removeOutput(outputId: number) {
+    setPendingDeleteOutput(null);
+    const res = await fetch(`/api/outputs/${outputId}`, { method: 'DELETE' });
+    if (!res.ok) {
+      setError('删除成品失败');
+      return;
+    }
+    setOutputs((prev) => prev.filter((o) => o.id !== outputId));
   }
 
   // 粘贴图片直接上传到当前空间
@@ -538,7 +584,88 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
 
       {notice && <p className="notice-ok">{notice}</p>}
 
-      {items.length === 0 ? (
+      {/* 图片 | 成品 视图切换；成品视图提供整包 zip 下载 */}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="seg">
+          <button
+            type="button"
+            className={`seg-btn ${view === 'items' ? 'seg-btn-on' : ''}`}
+            onClick={() => switchView('items')}
+          >
+            图片
+          </button>
+          <button
+            type="button"
+            className={`seg-btn ${view === 'outputs' ? 'seg-btn-on' : ''}`}
+            onClick={() => switchView('outputs')}
+          >
+            成品
+          </button>
+        </div>
+        {view === 'outputs' && outputs.length > 0 && (
+          <>
+            <span className="text-xs text-ink-400">共 {outputs.length} 个成品</span>
+            <a href={`/api/spaces/${spaceId}/outputs-zip`} className="btn-ghost ml-auto py-1 text-xs">
+              下载全部成品 (zip)
+            </a>
+          </>
+        )}
+      </div>
+
+      {view === 'outputs' ? (
+        outputsLoading ? (
+          <p className="py-20 text-center text-sm text-ink-500">加载中…</p>
+        ) : outputs.length === 0 ? (
+          <EmptyState
+            showMascot
+            kaomoji='(๑•̀ㅂ•́)و✧'
+            title="这个空间还没有成品"
+            hint="在嵌字编辑页点「保存成品」，把完成的图归档到这里"
+          />
+        ) : (
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
+            {outputs.map((output) => (
+              <div key={output.id} className="card overflow-hidden">
+                <div className="aspect-[4/3] w-full overflow-hidden bg-paper">
+                  <img
+                    src={thumbUrl(
+                      output.asset?.thumb_filename ?? null,
+                      output.asset?.filename ?? '',
+                    )}
+                    alt={output.item_title ?? ''}
+                    loading="lazy"
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+                <div className="p-3">
+                  <p className="truncate text-xs text-ink-200" title={output.item_title ?? ''}>
+                    {output.item_title || '未命名'}
+                  </p>
+                  <p className="mt-1 truncate text-[11px] text-ink-400">
+                    {formatDate(output.created_at)} · {formatBytes(output.asset?.size_bytes ?? 0)}
+                  </p>
+                  <div className="mt-2 flex gap-2">
+                    <a
+                      href={originalUrl(output.asset?.filename ?? '')}
+                      download={output.asset?.original_name ?? undefined}
+                      className="btn-primary flex-1 py-1 text-xs"
+                    >
+                      下载
+                    </a>
+                    <button
+                      type="button"
+                      className="btn-danger flex-1 py-1 text-xs"
+                      onClick={() => setPendingDeleteOutput(output)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      ) : items.length === 0 ? (
         <EmptyState
           showMascot
           kaomoji={searching ? '(・・?)' : '(๑•̀ㅂ•́)و✧'}
@@ -786,6 +913,35 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         <p className="text-sm text-ink-200">
           将删除空间「{space.name}」及其中全部 {items.length} 张图片与 {totalAnnotations} 条标注，
           所有协作者都会失去访问权，<strong className="text-blush">此操作不可撤销</strong>。
+        </p>
+      </Modal>
+
+      <Modal
+        open={pendingDeleteOutput !== null}
+        title="删除成品"
+        onClose={() => setPendingDeleteOutput(null)}
+        footer={
+          <>
+            <button type="button" className="btn-ghost" onClick={() => setPendingDeleteOutput(null)}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={() => {
+                const output = pendingDeleteOutput;
+                setPendingDeleteOutput(null);
+                if (output) void removeOutput(output.id);
+              }}
+            >
+              确认删除
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-ink-200">
+          将删除「{pendingDeleteOutput?.item_title || '未命名'}」的这一版成品及其磁盘文件，
+          <strong className="text-blush">此操作不可撤销</strong>。空间图片列表不受影响。
         </p>
       </Modal>
     </div>

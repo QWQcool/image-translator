@@ -24,7 +24,10 @@ export async function GET(request: Request) {
   const kwArgs = [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`];
   const ORDER = `ORDER BY a.created_at DESC, a.id DESC`;
   // 回收站已移除，历史软删除数据依旧不可见
-  const LIVE = 'a.deleted_at IS NULL';
+  // 成品产物（仅被 outputs 引用、不挂任何空间条目的 asset）不进共享图库列表
+  const NOT_OUTPUT_ONLY = `NOT (EXISTS (SELECT 1 FROM outputs o WHERE o.asset_id = a.id)
+                             AND NOT EXISTS (SELECT 1 FROM space_items si WHERE si.asset_id = a.id))`;
+  const LIVE = `a.deleted_at IS NULL AND ${NOT_OUTPUT_ONLY}`;
 
   let rows: Asset[];
   if (scope === 'my') {
