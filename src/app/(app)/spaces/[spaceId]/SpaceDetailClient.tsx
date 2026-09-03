@@ -30,8 +30,12 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [pendingDeleteItems, setPendingDeleteItems] = useState<SpaceItem[] | null>(null);
   const [pendingDeleteSpace, setPendingDeleteSpace] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 图库并入空间：直接上传（多选 + 粘贴）
+  // 图库并入空间：直接上传（多选 + 粘贴 + zip 整话包）
   const [uploading, setUploading] = useState(false);
+  // 本轮上传里含 zip 时，按钮提示「解包上传中」
+  const [zipUploading, setZipUploading] = useState(false);
+  // 非致命提示（如 zip 内被跳过的文件）
+  const [notice, setNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // 空间内搜索（走 API q 参数）
   const [query, setQuery] = useState('');
@@ -91,10 +95,16 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
 
   const uploadFiles = useCallback(
     async (fileList: File[]) => {
-      const files = fileList.filter((f) => f.size > 0 && f.type.startsWith('image/'));
+      // 图片直传 + zip 压缩包（整话上传）
+      const files = fileList.filter(
+        (f) => f.size > 0 && (f.type.startsWith('image/') || f.name.toLowerCase().endsWith('.zip')),
+      );
       if (files.length === 0) return;
+      const hasZip = files.some((f) => f.name.toLowerCase().endsWith('.zip'));
       setUploading(true);
+      setZipUploading(hasZip);
       setError(null);
+      setNotice(null);
       try {
         const form = new FormData();
         for (const file of files) form.append('files', file);
@@ -107,12 +117,23 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           setError(data.error ?? '上传失败');
           return;
         }
+        // zip 里被跳过的文件：展示前几条
+        if (Array.isArray(data.skipped) && data.skipped.length > 0) {
+          const samples = data.skipped
+            .slice(0, 3)
+            .map((s: { name: string; reason: string }) => `${s.name}（${s.reason}）`)
+            .join('、');
+          setNotice(
+            `已跳过 ${data.skipped.length} 个文件：${samples}${data.skipped.length > 3 ? ' 等' : ''}`,
+          );
+        }
         if (Array.isArray(data.errors) && data.errors.length > 0) {
           setError(data.errors.join('；'));
         }
         await load(debouncedQuery);
       } finally {
         setUploading(false);
+        setZipUploading(false);
       }
     },
     [spaceId, load, debouncedQuery],
@@ -325,7 +346,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                   disabled={uploading}
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  {uploading ? '上传中…' : '上传图片'}
+                  {uploading ? (zipUploading ? '解包上传中…' : '上传中…') : '上传图片'}
                 </button>
                 {selectedItems.length > 0 ? (
                   <>
@@ -390,6 +411,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       {error && (
         <p className="notice-error">{error}</p>
       )}
+
+      {notice && <p className="notice-ok">{notice}</p>}
 
       {items.length === 0 ? (
         <EmptyState
@@ -548,7 +571,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,.zip"
         multiple
         className="hidden"
         onChange={(e) => {

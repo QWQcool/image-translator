@@ -2,11 +2,20 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-const OPTIONS = [
+type ExportOption = { format: string; label: string; hint: string; href?: string };
+
+const OPTIONS: ExportOption[] = [
   { format: 'zip', label: '导出 ZIP', hint: 'JSON + CSV 打包' },
   { format: 'json', label: '导出 JSON', hint: '完整结构，含归一化与像素坐标' },
   { format: 'csv', label: '导出 CSV', hint: '表格形式，可用 Excel 打开' },
   { format: 'lp', label: '导出 翻译_0.txt', hint: 'LabelPlus / PS-Script 兼容' },
+  // 官方 txt 格式走独立 route
+  {
+    format: 'lp-txt',
+    label: 'LabelPlus 文本（PS 脚本）',
+    hint: '官方 txt 格式，按文件名匹配 PSD 图层',
+    href: '/labelplus-txt',
+  },
 ];
 
 export default function ExportMenu({
@@ -84,7 +93,7 @@ export default function ExportMenu({
           {OPTIONS.map((option) => (
             <a
               key={option.format}
-              href={`/api/spaces/${spaceId}/export?format=${option.format}`}
+              href={`/api/spaces/${spaceId}${option.href ?? `/export?format=${option.format}`}`}
               onClick={() => setOpen(false)}
               className="block px-3 py-2.5 text-sm text-ink-200 transition-colors hover:bg-paper"
             >

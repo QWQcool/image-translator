@@ -15,6 +15,8 @@ const EXT_BY_MIME: Record<string, string> = {
   'image/webp': 'webp',
   'image/gif': 'gif',
   'image/avif': 'avif',
+  // bmp 主要来自压缩包整话上传，sharp 可直接解码
+  'image/bmp': 'bmp',
 };
 
 export const SUPPORTED_MIME_TYPES = Object.keys(EXT_BY_MIME);
