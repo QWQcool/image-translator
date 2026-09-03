@@ -323,6 +323,28 @@ export default function AnnotationCanvas({
     return hitTestPin(point) ?? (modeRef.current === 'browse' ? hitTestBox(point) : null);
   }
 
+  /**
+   * 图片外（深色背景区）按下 → 直接进入平移，任何模式一致；
+   * 落点在图片内则不处理，交给 wrapper 的原有逻辑（画框/选标号/移动等）。
+   * 拖动进入图片区域后凭 pointer capture 持续平移，直到松开。
+   */
+  function onViewportPointerDown(event: React.PointerEvent) {
+    if (!base.w || event.button !== 0) return;
+    const wrapper = wrapperRef.current;
+    const viewport = viewportRef.current;
+    if (!wrapper || !viewport) return;
+    const rect = wrapper.getBoundingClientRect();
+    const nx = (event.clientX - rect.left) / (rect.width || 1);
+    const ny = (event.clientY - rect.top) / (rect.height || 1);
+    if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1) return; // 图片内：原逻辑接管
+    dragRef.current = {
+      mode: 'pan',
+      start: { x: event.clientX, y: event.clientY },
+      startPan: pan,
+    };
+    viewport.setPointerCapture(event.pointerId);
+  }
+
   function onPointerDown(event: React.PointerEvent) {
     if (!base.w) return;
     const wrapper = wrapperRef.current;
@@ -603,7 +625,7 @@ export default function AnnotationCanvas({
         <span className="ml-2 text-xs text-ink-500">
           {Math.round(zoom * 100)}% · {imageWidth}×{imageHeight}
         </span>
-        <span className="text-xs text-ink-400">滚轮缩放 · 空格或中键拖动平移 · Alt 拖动也可平移</span>
+        <span className="text-xs text-ink-400">滚轮缩放 · 空格/中键/Alt 拖动平移 · 图片外拖动也可平移</span>
         <button type="button" className="btn-ghost ml-auto px-2.5 py-1 text-xs" onClick={exportPng}>
           导出这张图
         </button>
@@ -616,6 +638,11 @@ export default function AnnotationCanvas({
           backgroundImage: 'radial-gradient(circle, rgba(247,251,255,0.14) 1px, transparent 1px)',
           backgroundSize: '18px 18px',
         }}
+        onPointerDown={onViewportPointerDown}
+        // wrapper 内的拖拽事件会冒泡到这里统一处理，避免双份触发
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
       >
         <div
           ref={wrapperRef}
@@ -629,9 +656,6 @@ export default function AnnotationCanvas({
             touchAction: 'none',
           }}
           onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
         >
           <canvas ref={canvasRef} className="block" />
 
