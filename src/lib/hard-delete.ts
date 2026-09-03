@@ -45,6 +45,8 @@ export async function hardDeleteItems(
   db.transaction(() => {
     for (const row of rows) {
       db.prepare('DELETE FROM space_items WHERE id = ?').run(row.id);
+      // notifications.item_id 无外键，删除条目时顺带清掉相关通知（避免死链通知）
+      db.prepare('DELETE FROM notifications WHERE item_id = ?').run(row.id);
       db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`).run(row.space_id);
 
       // 删完本条目后素材若无任何空间引用，则素材行与磁盘文件一并清除

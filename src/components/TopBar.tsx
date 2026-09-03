@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useSlideDown } from '@/lib/motion';
 import HaloMark from './HaloMark';
+import NotificationBell from './NotificationBell';
 
 const NAV = [
   { href: '/spaces', label: '空间' },
@@ -58,6 +59,7 @@ export default function TopBar({
         </nav>
 
         <div className="ml-auto flex items-center gap-3">
+          <NotificationBell />
           <Link
             href="/profile"
             className={`flex items-center gap-2 rounded-lg px-2 py-1 transition-colors ${

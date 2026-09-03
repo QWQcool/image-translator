@@ -12,6 +12,7 @@ import { useCollabRoom } from '@/lib/use-collab-room';
 import type { Asset, LabelPlusGroup, SpaceAccess, SpaceItem } from '@/lib/types';
 import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
 import AnnotationPanel from './AnnotationPanel';
+import CommentsPanel from './CommentsPanel';
 import FindBar from './FindBar';
 import LabelPlusPanel from './LabelPlusPanel';
 import OcrModal from './OcrModal';
@@ -934,6 +935,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
               />
             )}
           </div>
+          {/* 条目评论：view 即可发言，与标注权限解耦 */}
+          <CommentsPanel itemId={itemId} />
         </aside>
       </div>
       {ocrOpen && (

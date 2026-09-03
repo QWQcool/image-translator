@@ -129,6 +129,29 @@ CREATE TABLE IF NOT EXISTS room_ops (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_room_ops_item ON room_ops(item_id, seq);
+
+-- 条目评论：标注编辑器页的讨论（view 权限即可发言，删除仅限作者本人）
+CREATE TABLE IF NOT EXISTS comments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id    INTEGER NOT NULL REFERENCES space_items(id) ON DELETE CASCADE,
+  user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  body       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_comments_item ON comments(item_id);
+
+-- 站内通知：评论等事件触达相关人（read 0/1，仅站内无推送）
+CREATE TABLE IF NOT EXISTS notifications (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  actor_id   INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  item_id    INTEGER,
+  space_id   INTEGER,
+  body       TEXT NOT NULL,
+  read       INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read);
 `;
 
 function createConnection(): Database.Database {
