@@ -4,7 +4,7 @@ import { db } from '@/lib/db';
 import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { saveGuard } from '@/lib/room';
-import { readTypesetMeta, readTypesetPaint, writeTypeset, type TypesetTextLayer } from '@/lib/typeset';
+import { readTypesetMeta, readTypesetPaint, writeTypeset, normalizeTextLayers } from '@/lib/typeset';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -65,12 +65,13 @@ export async function PUT(request: Request, { params }: Params) {
   }
 
   const rawMeta = String(form.get('meta') ?? '');
-  let textLayers: TypesetTextLayer[] = [];
+  let textLayers: ReturnType<typeof normalizeTextLayers> = [];
   let width = 0;
   let height = 0;
   try {
-    const parsed = JSON.parse(rawMeta) as { textLayers?: TypesetTextLayer[]; width?: number; height?: number };
-    textLayers = Array.isArray(parsed.textLayers) ? parsed.textLayers.slice(0, 200) : [];
+    const parsed = JSON.parse(rawMeta) as { textLayers?: unknown; width?: number; height?: number };
+    // 文字层统一清洗：既有字段透传，特效字段 clamp / 非法颜色回 null（老数据零迁移）
+    textLayers = normalizeTextLayers(parsed.textLayers);
     width = Number(parsed.width) || 0;
     height = Number(parsed.height) || 0;
   } catch {

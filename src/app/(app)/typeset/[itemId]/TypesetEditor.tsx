@@ -11,7 +11,7 @@ import { DEFAULT_LP_STYLES, normalizeStyles, parseGroups, parseStyles } from '@/
 import { originalUrl } from '@/lib/media';
 import { useCollabRoom, type CollabOp } from '@/lib/use-collab-room';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
-import type { TypesetTextLayer } from '@/lib/typeset';
+import { normalizeTextLayers, type TypesetTextLayer } from '@/lib/typeset-layer';
 
 type Tool = 'pan' | 'brush' | 'eraser' | 'eyedropper' | 'rect' | 'lasso' | 'clone' | 'text';
 
@@ -203,7 +203,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       setAsset(detail.asset ?? null);
       setSpaceName(detail.space?.name ?? '');
       setAccess(detail.access ?? null);
-      setTextLayers(draft.meta?.textLayers ?? []);
+      setTextLayers(normalizeTextLayers(draft.meta?.textLayers ?? []));
       setHasPaint(Boolean(draft.hasPaint));
       // 分组表与分组样式：样式缺省时空表，生成时落回硬编码默认值
       setLpGroups(parseGroups(detail.labelplus?.groups));
@@ -625,9 +625,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       return;
     }
     if (op.kind === 'text') {
-      const layers = (op.payload as { layers?: TypesetTextLayer[] } | null)?.layers;
+      const layers = (op.payload as { layers?: unknown } | null)?.layers;
       if (Array.isArray(layers)) {
-        setTextLayers(layers);
+        setTextLayers(normalizeTextLayers(layers));
         setDirty(true);
       }
     }
@@ -830,6 +830,22 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     }));
   }
 
+  /**
+   * 更新选中文字层的通用入口（字号/颜色/特效等属性面板共用）：
+   * coalesce=true 用于滑杆等连续输入（停手后落一步历史 + 广播一次），
+   * 否则立即落历史 + 广播（与「竖排/上移一层」同一模式）。
+   */
+  function patchLayer(id: string, patch: Partial<TypesetTextLayer>, coalesce = false) {
+    const next = textLayersRef.current.map((l) => (l.id === id ? { ...l, ...patch } : l));
+    setTextLayers(next);
+    setDirty(true);
+    if (coalesce) scheduleHistory(next, id);
+    else {
+      void pushHistory(next, id);
+      broadcastText(next);
+    }
+  }
+
   /** 对比分隔线拖拽：pointer 事件，stopPropagation 避免触发画笔工具 */
   function onCompareHandleDown(event: React.PointerEvent) {
     event.stopPropagation();
@@ -875,6 +891,46 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       ctx.lineWidth = layer.strokeWidth;
       ctx.strokeStyle = layer.stroke;
       ctx.fillStyle = layer.color;
+      const strokeNew = layer.strokeColor ?? null;
+      const shadow = layer.shadowColor ?? null;
+      if (strokeNew) {
+        // 新描边：宽度按字号比例，圆角连接避免尖角刺出
+        ctx.lineJoin = 'round';
+        ctx.miterLimit = 2;
+        ctx.lineWidth = Math.max(0, (layer.strokeWidthRatio ?? 0.12) * layer.fontSize);
+        ctx.strokeStyle = strokeNew;
+      }
+      if (shadow) {
+        // 阴影参数按字号像素换算；方向与 CSS 一致（offsetY 正值向下）
+        ctx.shadowColor = shadow;
+        ctx.shadowBlur = Math.max(0, (layer.shadowBlurRatio ?? 0.15) * layer.fontSize);
+        ctx.shadowOffsetX = (layer.shadowOffset?.x ?? 0) * layer.fontSize;
+        ctx.shadowOffsetY = (layer.shadowOffset?.y ?? 0.06) * layer.fontSize;
+      }
+      /**
+       * 单个字形/行的绘制顺序（叠加取舍）：
+       * - 有阴影：先带阴影填充（阴影只随填充投影一次），立即清掉阴影再描边，避免描边重复投影糊边；
+       * - 无阴影 + 新描边：先填充再描边（描边压在填充上，观感接近 PS 外描边）；
+       * - 无阴影 + 旧 px 描边：保持既有「先描后填」顺序，老图层导出效果不变。
+       */
+      const drawOne = (glyph: string, gx: number, gy: number) => {
+        if (shadow) {
+          ctx.fillText(glyph, gx, gy);
+          ctx.shadowColor = 'transparent';
+          ctx.shadowBlur = 0;
+          ctx.shadowOffsetX = 0;
+          ctx.shadowOffsetY = 0;
+          if (strokeNew || layer.strokeWidth > 0) ctx.strokeText(glyph, gx, gy);
+          return;
+        }
+        if (strokeNew) {
+          ctx.fillText(glyph, gx, gy);
+          ctx.strokeText(glyph, gx, gy);
+          return;
+        }
+        if (layer.strokeWidth > 0) ctx.strokeText(glyph, gx, gy);
+        ctx.fillText(glyph, gx, gy);
+      };
       const originX = layer.x * imageWidth;
       const originY = layer.y * imageHeight;
       const lines = layer.text.split('\n');
@@ -887,16 +943,14 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           const chars = Array.from(line);
           chars.forEach((ch, i) => {
             const y = originY + (i - (chars.length - 1) / 2) * layer.fontSize * layer.lineHeight;
-            if (layer.strokeWidth > 0) ctx.strokeText(ch, colX, y);
-            ctx.fillText(ch, colX, y);
+            drawOne(ch, colX, y);
           });
         });
       } else {
         ctx.textAlign = layer.align === 'left' ? 'left' : layer.align === 'right' ? 'right' : 'center';
         lines.forEach((line, i) => {
           const y = originY + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
-          if (layer.strokeWidth > 0) ctx.strokeText(line, originX, y);
-          ctx.fillText(line, originX, y);
+          drawOne(line, originX, y);
         });
       }
       ctx.restore();
@@ -1234,7 +1288,17 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 height={imageHeight}
                 className="pointer-events-none absolute inset-0 h-full w-full"
               />
-              {textLayers.map((layer) => (
+              {textLayers.map((layer) => {
+                // 特效的 DOM 预览：strokeColor 非空走新描边（字号比例），否则回落旧 px 描边
+                const strokeCss = layer.strokeColor
+                  ? `${(layer.strokeWidthRatio ?? 0.12) * layer.fontSize}px ${layer.strokeColor}`
+                  : `${layer.strokeWidth / 2}px ${layer.stroke}`;
+                const shadowCss = layer.shadowColor
+                  ? `${(layer.shadowOffset?.x ?? 0) * layer.fontSize}px ${
+                      (layer.shadowOffset?.y ?? 0.06) * layer.fontSize
+                    }px ${(layer.shadowBlurRatio ?? 0.15) * layer.fontSize}px ${layer.shadowColor}`
+                  : undefined;
+                return (
                 <div
                   key={layer.id}
                   className={`absolute max-w-[40%] -translate-x-1/2 -translate-y-1/2 whitespace-pre-wrap ${
@@ -1246,7 +1310,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                     color: layer.color,
                     fontSize: layer.fontSize,
                     fontWeight: layer.fontWeight,
-                    WebkitTextStroke: `${layer.strokeWidth / 2}px ${layer.stroke}`,
+                    WebkitTextStroke: strokeCss,
+                    textShadow: shadowCss,
                     lineHeight: layer.lineHeight,
                     writingMode: layer.vertical ? 'vertical-rl' : 'horizontal-tb',
                     display: layer.visible === false ? 'none' : undefined,
@@ -1273,7 +1338,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 >
                   {layer.text}
                 </div>
-              ))}
+                );
+              })}
               {rect && (
                 <div
                   className="pointer-events-none absolute border border-halo bg-halo/20"
@@ -1395,6 +1461,138 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   className="w-full accent-sky"
                 />
               </label>
+
+              {/* 文字特效：描边与阴影（宽度/模糊/偏移均为字号比例，随保存/广播/撤销链路走） */}
+              <div className="space-y-2 rounded-md border border-ink-700 p-2">
+                <span className="block text-[11px] text-ink-500">特效</span>
+
+                {/* 描边：颜色 + 清除「无」 + 宽度（字号比例） */}
+                <div className="flex items-center gap-1.5 text-[11px] text-ink-500">
+                  <span className="w-8 shrink-0">描边</span>
+                  <input
+                    type="color"
+                    className="h-6 w-8 cursor-pointer rounded border border-ink-700 bg-transparent"
+                    value={selected.strokeColor ?? '#FFFFFF'}
+                    disabled={selected.strokeColor == null}
+                    title={selected.strokeColor == null ? '先点「无」旁的启用' : '描边颜色'}
+                    onChange={(e) => patchLayer(selected.id, { strokeColor: e.target.value }, true)}
+                  />
+                  <button
+                    type="button"
+                    className={`btn-ghost shrink-0 px-1.5 py-0.5 text-[10px] ${selected.strokeColor ? '' : 'btn-primary'}`}
+                    title={selected.strokeColor ? '清除描边' : '描边已关闭'}
+                    onClick={() =>
+                      patchLayer(selected.id, {
+                        strokeColor: selected.strokeColor ? null : '#FFFFFF',
+                      })
+                    }
+                  >
+                    {selected.strokeColor ? '无' : '启用'}
+                  </button>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.5}
+                    step={0.01}
+                    value={selected.strokeWidthRatio ?? 0.12}
+                    disabled={selected.strokeColor == null}
+                    onChange={(e) =>
+                      patchLayer(selected.id, { strokeWidthRatio: Number(e.target.value) }, true)
+                    }
+                    className="min-w-0 flex-1 accent-sky"
+                  />
+                  <span className="w-9 shrink-0 text-right">
+                    {Math.round((selected.strokeWidthRatio ?? 0.12) * 100)}%
+                  </span>
+                </div>
+
+                {/* 阴影：颜色 + 清除「无」 + 模糊 / 偏移 X / 偏移 Y */}
+                <div className="flex items-center gap-1.5 text-[11px] text-ink-500">
+                  <span className="w-8 shrink-0">阴影</span>
+                  <input
+                    type="color"
+                    className="h-6 w-8 cursor-pointer rounded border border-ink-700 bg-transparent"
+                    value={selected.shadowColor ?? '#000000'}
+                    disabled={selected.shadowColor == null}
+                    title={selected.shadowColor == null ? '阴影已关闭' : '阴影颜色'}
+                    onChange={(e) => patchLayer(selected.id, { shadowColor: e.target.value }, true)}
+                  />
+                  <button
+                    type="button"
+                    className={`btn-ghost shrink-0 px-1.5 py-0.5 text-[10px] ${selected.shadowColor ? '' : 'btn-primary'}`}
+                    title={selected.shadowColor ? '清除阴影' : '阴影已关闭'}
+                    onClick={() =>
+                      patchLayer(selected.id, {
+                        shadowColor: selected.shadowColor ? null : '#000000',
+                      })
+                    }
+                  >
+                    {selected.shadowColor ? '无' : '启用'}
+                  </button>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.5}
+                    step={0.01}
+                    value={selected.shadowBlurRatio ?? 0.15}
+                    disabled={selected.shadowColor == null}
+                    onChange={(e) =>
+                      patchLayer(selected.id, { shadowBlurRatio: Number(e.target.value) }, true)
+                    }
+                    className="min-w-0 flex-1 accent-sky"
+                    title="模糊"
+                  />
+                  <span className="w-9 shrink-0 text-right">
+                    {Math.round((selected.shadowBlurRatio ?? 0.15) * 100)}%
+                  </span>
+                </div>
+                {selected.shadowColor != null && (
+                  <div className="space-y-1">
+                    <label className="flex items-center gap-1.5 text-[11px] text-ink-500">
+                      <span className="w-8 shrink-0">偏移X</span>
+                      <input
+                        type="range"
+                        min={-0.5}
+                        max={0.5}
+                        step={0.01}
+                        value={selected.shadowOffset?.x ?? 0}
+                        onChange={(e) =>
+                          patchLayer(
+                            selected.id,
+                            { shadowOffset: { ...(selected.shadowOffset ?? { x: 0, y: 0.06 }), x: Number(e.target.value) } },
+                            true,
+                          )
+                        }
+                        className="min-w-0 flex-1 accent-sky"
+                      />
+                      <span className="w-9 shrink-0 text-right">
+                        {Math.round((selected.shadowOffset?.x ?? 0) * 100)}%
+                      </span>
+                    </label>
+                    <label className="flex items-center gap-1.5 text-[11px] text-ink-500">
+                      <span className="w-8 shrink-0">偏移Y</span>
+                      <input
+                        type="range"
+                        min={-0.5}
+                        max={0.5}
+                        step={0.01}
+                        value={selected.shadowOffset?.y ?? 0.06}
+                        onChange={(e) =>
+                          patchLayer(
+                            selected.id,
+                            { shadowOffset: { ...(selected.shadowOffset ?? { x: 0, y: 0.06 }), y: Number(e.target.value) } },
+                            true,
+                          )
+                        }
+                        className="min-w-0 flex-1 accent-sky"
+                      />
+                      <span className="w-9 shrink-0 text-right">
+                        {Math.round((selected.shadowOffset?.y ?? 0.06) * 100)}%
+                      </span>
+                    </label>
+                  </div>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
