@@ -35,7 +35,7 @@ jobs:
       - name: 安装 Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
 
       - name: 标记试用模式（构建期变量，middleware 内联依赖此步）
