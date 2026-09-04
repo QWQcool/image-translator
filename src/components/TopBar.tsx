@@ -9,6 +9,7 @@ import NotificationBell from './NotificationBell';
 const NAV = [
   { href: '/spaces', label: '空间' },
   { href: '/ai', label: 'AI 设置' },
+  { href: '/settings', label: '设置' },
   { href: '/logs', label: '日志' },
 ];
 

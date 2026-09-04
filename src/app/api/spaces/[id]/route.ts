@@ -167,7 +167,11 @@ export async function PATCH(request: Request, { params }: Params) {
   if (name !== undefined && name.length > 100) {
     return NextResponse.json({ error: '空间名称过长' }, { status: 400 });
   }
-  const description = body.description === undefined ? undefined : body.description.trim() || null;
+  // description 允许传 null 表示清空描述（前端清空/留空时发送 null）
+  const description =
+    body.description === undefined || body.description === null
+      ? undefined
+      : String(body.description).trim() || null;
   // 开放空间模型：不再接受 private
   const visibility: SpaceVisibility | undefined =
     body.visibility === 'public' ? 'public' : undefined;

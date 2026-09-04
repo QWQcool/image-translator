@@ -8,13 +8,10 @@ import Modal from '@/components/Modal';
 import ProgressBadge from '@/components/ProgressBadge';
 import TagPicker from '@/components/TagPicker';
 import { formatBytes, formatDate, originalUrl, thumbUrl } from '@/lib/media';
-import {
-  PROGRESS_LABEL,
-  SPACE_PROGRESS_VALUES,
-  formatProgressAge,
-  type SpaceProgress,
-} from '@/lib/progress';
+import { type SpaceProgress } from '@/lib/progress';
 import { parseSpaceTags } from '@/lib/tags';
+import { enabledProgressItems, progressLabelOf } from '@/lib/site-config';
+import { useSiteConfig } from '@/lib/use-site-config';
 import type { Output, Space, SpaceAccess, SpaceItem, SpaceVisibility } from '@/lib/types';
 import AiBatchModal from './AiBatchModal';
 import ExportMenu from './ExportMenu';
@@ -92,6 +89,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
 
   const canEdit = access?.canEdit ?? false;
   const searching = debouncedQuery.length > 0;
+  // 站点配置：进度项 label 与 enabled（切换菜单只列启用项，徽标 label 用配置名）
+  const { progressItems } = useSiteConfig();
 
   const load = useCallback(
     async (q: string = '') => {
@@ -604,14 +603,20 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-ink-400">
                 {ROLE_LABEL[access.role]}
               </span>
-              {/* 七级进度：点击徽标弹出状态选择，切换即 PATCH（登录即可改） */}
+              {/* 七级进度：点击徽标（ring + 虚线纹理圈提示可点）弹出状态选择，切换即 PATCH */}
               <div className="relative">
                 <button
                   type="button"
                   title="点击切换进度"
                   onClick={() => setProgressMenuOpen((v) => !v)}
                 >
-                  <ProgressBadge progress={space.progress} progressAt={space.progress_at} />
+                  <ProgressBadge
+                    progress={space.progress}
+                    progressAt={space.progress_at}
+                    clickable
+                    showAge
+                    label={progressLabelOf(progressItems, space.progress)}
+                  />
                 </button>
                 {progressMenuOpen && (
                   <>
@@ -622,22 +627,30 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                     />
                     <div className="absolute left-0 top-full z-40 mt-1 w-44 rounded-xl bg-cloud p-1 shadow-lg ring-1 ring-ink-700">
                       <p className="px-2 py-1 text-[10px] text-ink-400">切换进度</p>
-                      {SPACE_PROGRESS_VALUES.map((value) => (
+                      {/* 当前层处于站点配置禁用态时：顶部单独展示当前项（不可选回已禁用项） */}
+                      {(progressItems.find((item) => item.key === space.progress)?.enabled ??
+                        true) === false && (
+                        <p className="mx-1 mb-1 rounded-lg bg-paper px-2 py-1.5 text-[11px] leading-relaxed text-ink-400">
+                          当前：{progressLabelOf(progressItems, space.progress)}
+                          （该项已被停用，请在下方选择新进度）
+                        </p>
+                      )}
+                      {enabledProgressItems(progressItems).map((item) => (
                         <button
-                          key={value}
+                          key={item.key}
                           type="button"
                           className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs transition-colors ${
-                            value === space.progress
+                            item.key === space.progress
                               ? 'bg-sky/10 text-sky-deep'
                               : 'text-ink-200 hover:bg-paper'
                           }`}
                           onClick={() => {
                             setProgressMenuOpen(false);
-                            void changeProgress(value);
+                            void changeProgress(item.key);
                           }}
                         >
-                          {PROGRESS_LABEL[value]}
-                          {value === space.progress && <span>✓</span>}
+                          {item.label}
+                          {item.key === space.progress && <span>✓</span>}
                         </button>
                       ))}
                     </div>
@@ -677,8 +690,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
             )}
             <p className="mt-1 text-sm text-ink-400">{space.description || '还没写简介'}</p>
             <p className="mt-1.5 text-xs text-ink-400">
-              {items.length} 张图片 · {totalAnnotations} 条标注 · 当前状态已维持{' '}
-              {formatProgressAge(space.progress_at)} · 🌐 公共文件夹（人人可编辑）
+              {items.length} 张图片 · {totalAnnotations} 条标注 · 🌐 公共文件夹（人人可编辑）
             </p>
           </div>
         )}

@@ -176,6 +176,14 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read);
+
+-- 站点配置（阶段 16）：key-value 存储，value 为 JSON 序列化字符串。
+-- 目前承载 progress_items（进度项管理）与 preset_tags（默认标签管理）。
+-- 未配置过的 key 由读取方回落内置默认，无需迁移。
+CREATE TABLE IF NOT EXISTS site_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
 
 function createConnection(): Database.Database {
