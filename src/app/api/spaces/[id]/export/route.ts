@@ -330,7 +330,6 @@ export async function GET(request: Request, { params }: Params) {
     const zip = new JSZip();
     zip.file('annotations.json', json);
     zip.file('annotations.csv', buildCsv(rows, exportFilenames));
-    zip.file('翻译_0.txt', labelPlusTxt);
 
     // 图片放 images/，与 annotations.json 里的 file 字段对应，解包即可直接用
     const packed: string[] = [];
@@ -358,8 +357,11 @@ export async function GET(request: Request, { params }: Params) {
           missing.push(exportName);
         }
       }
-      // 将 翻译_0.txt 也写入 images/ 文件夹，确保解压后 txt 与图片在同一个文件夹下
+      // 翻译_0.txt 写入 images/ 文件夹，与图片在同一文件夹下，根目录不再保留重复文件
       imageFolder.file('翻译_0.txt', labelPlusTxt);
+    } else {
+      // 未打包图片时，翻译_0.txt 放在 zip 根目录
+      zip.file('翻译_0.txt', labelPlusTxt);
     }
 
     zip.file(
@@ -373,8 +375,9 @@ export async function GET(request: Request, { params }: Params) {
         '目录结构：',
         '  annotations.json —— 完整结构，坐标同时提供 0~1 归一化值与像素值。',
         '  annotations.csv  —— 表格形式，可直接用 Excel 打开。',
-        '  翻译_0.txt       —— LabelPlus 格式译文，PS-Script 可直接读取。',
-        '  images/          —— 原图文件与配套的 翻译_0.txt（同目录方便直接导入 PS-Script）。',
+        includeImages
+          ? '  images/          —— 原图文件与同目录下的 翻译_0.txt（PS-Script 可直接读取）。'
+          : '  翻译_0.txt       —— LabelPlus 格式译文，PS-Script 可直接读取。',
         '',
         '坐标说明：x/y 为框左上角，w/h 为框宽高，均相对图片左上角。',
         '',

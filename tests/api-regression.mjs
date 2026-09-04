@@ -966,9 +966,9 @@ const G8 = '八、导出';
   const entries = r.status === 200 ? Object.keys(unzipSync(new Uint8Array(r.buffer))) : [];
   record(
     G8,
-    'export zip → annotations.json/csv + 翻译_0.txt + images/',
+    'export zip → annotations.json/csv + images/翻译_0.txt + images/',
     r.status === 200 && r.buffer.subarray(0, 2).toString('latin1') === 'PK'
-      && entries.includes('annotations.json') && entries.includes('annotations.csv') && entries.includes('翻译_0.txt') && entries.some((e) => e.startsWith('images/')),
+      && entries.includes('annotations.json') && entries.includes('annotations.csv') && entries.includes('images/翻译_0.txt') && entries.some((e) => e.startsWith('images/')),
     `status=${r.status} entries=${JSON.stringify(entries)}`,
   );
 
