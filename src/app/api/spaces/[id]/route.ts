@@ -5,6 +5,7 @@ import { hardDeleteItems } from '@/lib/hard-delete';
 import { normalizeGlossaryInput, normalizeStyles } from '@/lib/labelplus';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
+import { cleanTagsInput } from '@/lib/tags';
 import type { Asset, Space, SpaceItem, SpaceStatus, SpaceVisibility } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -126,13 +127,14 @@ export async function PATCH(request: Request, { params }: Params) {
   const id = parseId((await params).id);
   if (!id) return NextResponse.json({ error: '参数错误' }, { status: 400 });
 
-  // 先解析 body 才能决定权限级别：分组表是公共工作数据（和标注同级），
-  // 开放空间下人人可改；改名/描述/可见性仍然只有创建者能动。
+  // 先解析 body 才能决定权限级别：分组表/标签是公共工作数据（和标注同级），
+  // 开放空间下人人可改；权限扁平化后改名/描述/可见性等管理操作也是登录即可。
   let body: {
     name?: string;
     description?: string;
     visibility?: string;
     status?: string;
+    tags?: unknown;
     lp_groups?: Array<{ id: number; name: string }>;
     lp_styles?: Record<string, unknown>;
     lp_glossary?: unknown;
@@ -145,6 +147,12 @@ export async function PATCH(request: Request, { params }: Params) {
 
   const wantsManage =
     body.name !== undefined || body.description !== undefined || body.visibility !== undefined;
+
+  // 标签与分组表同级（公共工作数据），edit 级权限即可修改（开放权限：登录即可改）
+  let tagsJson: string | undefined;
+  if (body.tags !== undefined) {
+    tagsJson = JSON.stringify(cleanTagsInput(body.tags));
+  }
 
   const access = getSpaceAccess(id, user.id);
   const denied = accessError(access, wantsManage ? 'manage' : 'edit');
@@ -215,6 +223,7 @@ export async function PATCH(request: Request, { params }: Params) {
     description === undefined &&
     visibility === undefined &&
     status === undefined &&
+    tagsJson === undefined &&
     lpGroupsJson === undefined &&
     lpStylesJson === undefined &&
     lpGlossaryJson === undefined
@@ -228,12 +237,13 @@ export async function PATCH(request: Request, { params }: Params) {
             description = COALESCE(?, description),
             visibility = COALESCE(?, visibility),
             status = COALESCE(?, status),
+            tags = COALESCE(?, tags),
             lp_groups = COALESCE(?, lp_groups),
             lp_styles = COALESCE(?, lp_styles),
             lp_glossary = COALESCE(?, lp_glossary),
             updated_at = datetime('now')
       WHERE id = ?`,
-  ).run(name ?? null, description ?? null, visibility ?? null, status ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, lpGlossaryJson ?? null, id);
+  ).run(name ?? null, description ?? null, visibility ?? null, status ?? null, tagsJson ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, lpGlossaryJson ?? null, id);
 
   // 日志：只记管理类改动（名称/描述/可见性/完结状态），分组表与样式的编辑很频繁，不刷屏
   const changed: string[] = [];

@@ -47,6 +47,10 @@ export type Space = {
   description: string | null;
   visibility: SpaceVisibility;
   status: SpaceStatus;
+  /** 空间序号（YYYYMMDD-NN，服务端自动生成）；历史空间为 null */
+  space_no: string | null;
+  /** 标签（JSON 字符串数组），前端用 parseSpaceTags 解析 */
+  tags: string | null;
   created_at: string;
   updated_at: string;
   lp_groups?: string | null;

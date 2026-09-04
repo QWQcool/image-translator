@@ -5,7 +5,9 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
+import TagPicker from '@/components/TagPicker';
 import { formatBytes, formatDate, originalUrl, thumbUrl } from '@/lib/media';
+import { parseSpaceTags } from '@/lib/tags';
 import type {
   Output,
   Space,
@@ -28,10 +30,16 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [renamingSpace, setRenamingSpace] = useState(false);
-  const [spaceDraft, setSpaceDraft] = useState({
+  const [spaceDraft, setSpaceDraft] = useState<{
+    name: string;
+    description: string;
+    tags: string[];
+    visibility: SpaceVisibility;
+  }>({
     name: '',
     description: '',
-    visibility: 'private' as SpaceVisibility,
+    tags: [],
+    visibility: 'private',
   });
   const [pendingDeleteItem, setPendingDeleteItem] = useState<SpaceItem | null>(null);
   const [pendingDeleteItems, setPendingDeleteItems] = useState<SpaceItem[] | null>(null);
@@ -430,6 +438,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         name,
         description: spaceDraft.description.trim() || null,
         visibility: spaceDraft.visibility,
+        tags: spaceDraft.tags,
       }),
     });
     if (!res.ok) {
@@ -559,6 +568,13 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               />
             </div>
             <div>
+              <label className="label">标签</label>
+              <TagPicker
+                selected={spaceDraft.tags}
+                onChange={(tags) => setSpaceDraft((d) => ({ ...d, tags }))}
+              />
+            </div>
+            <div>
               <label className="label">描述</label>
               <textarea
                 className="input min-h-[70px] resize-y"
@@ -567,7 +583,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               />
             </div>
             <p className="rounded-lg bg-sky/10 px-3 py-2 text-[11px] leading-relaxed text-ink-500">
-              🌐 公共文件夹对所有登录用户开放，人人可编辑；只有创建者能改名或删除。
+              📁 文件夹对所有登录用户开放：人人可看、可编辑、可删除
             </p>
             <div className="flex gap-2">
               <button type="button" className="btn-primary" onClick={() => void saveSpace()}>
@@ -582,6 +598,12 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="font-display truncate text-2xl tracking-wide text-ink-100">{space.name}</h1>
+              {/* 空间序号：等宽小徽标（服务端自动生成，历史空间无序号不显示） */}
+              {space.space_no && (
+                <span className="shrink-0 rounded bg-ink-800 px-1.5 py-0.5 font-mono text-[11px] text-ink-300">
+                  {space.space_no}
+                </span>
+              )}
               <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-ink-400">
                 {ROLE_LABEL[access.role]}
               </span>
@@ -603,6 +625,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                     setSpaceDraft({
                       name: space.name,
                       description: space.description ?? '',
+                      tags: parseSpaceTags(space.tags),
                       visibility: space.visibility,
                     });
                     setRenamingSpace(true);
@@ -620,6 +643,19 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 {space.status === 'finished' ? '重新开启' : '标记完结'}
               </button>
             </div>
+            {/* 标签 chips：sky 系小徽标，编辑弹窗里可增删 */}
+            {parseSpaceTags(space.tags).length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {parseSpaceTags(space.tags).map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-full bg-sky/10 px-2 py-0.5 text-[11px] text-sky-deep"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
             <p className="mt-1 text-sm text-ink-400">{space.description || '还没写简介'}</p>
             <p className="mt-1.5 text-xs text-ink-400">
               {items.length} 张图片 · {totalAnnotations} 条标注 · 🌐 公共文件夹（人人可编辑）

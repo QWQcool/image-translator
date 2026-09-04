@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS spaces (
   visibility  TEXT NOT NULL DEFAULT 'private',
   -- 空间完结状态：active=进行中；finished=已完结（仅视觉区分，不锁编辑）
   status      TEXT NOT NULL DEFAULT 'active',
+  -- 空间序号（YYYYMMDD-NN，服务端自动生成；可空，历史空间无序号）
+  space_no    TEXT,
+  -- 标签（JSON 字符串数组，如 ["纯爱","鬼畜"]）
+  tags        TEXT NOT NULL DEFAULT '[]',
   lp_groups   TEXT,
   lp_phrases  TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -281,6 +285,20 @@ function migrate(database: Database.Database): void {
   // 空间完结状态：'active' | 'finished'，历史空间默认进行中
   if (!latestSpaceColumns.some((column) => column.name === 'status')) {
     database.exec(`ALTER TABLE spaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
+  }
+
+  // 空间序号（YYYYMMDD-NN）：新空间由服务端在事务内自动生成，历史空间留空不回填
+  if (!latestSpaceColumns.some((column) => column.name === 'space_no')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN space_no TEXT`);
+  }
+  // 序号唯一性由部分唯一索引兜底（NULL 不参与唯一约束），生成逻辑之外再挡一层并发
+  database.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_space_no ON spaces(space_no) WHERE space_no IS NOT NULL`,
+  );
+
+  // 标签（JSON 字符串数组），历史空间默认空数组
+  if (!latestSpaceColumns.some((column) => column.name === 'tags')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`);
   }
 
   // 开放空间改造：历史遗留的私人空间/私人素材一次性转成公共，

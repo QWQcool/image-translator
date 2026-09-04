@@ -4,13 +4,21 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
+import TagPicker from '@/components/TagPicker';
 import { useStaggerReveal } from '@/lib/motion';
 import { formatDate, thumbUrl } from '@/lib/media';
+import { parseSpaceTags } from '@/lib/tags';
 import type { SpaceRole, SpaceStatus, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
 
-type Draft = { id?: number; name: string; description: string; visibility: SpaceVisibility };
+type Draft = {
+  id?: number;
+  name: string;
+  description: string;
+  tags: string[];
+  visibility: SpaceVisibility;
+};
 
-const EMPTY_DRAFT: Draft = { name: '', description: '', visibility: 'private' };
+const EMPTY_DRAFT: Draft = { name: '', description: '', tags: [], visibility: 'private' };
 
 const ROLE_BADGE: Record<SpaceRole, { label: string; className: string }> = {
   owner: { label: '所有者', className: 'bg-sky/15 text-sky-deep' },
@@ -72,6 +80,7 @@ export default function SpacesClient() {
         name,
         description: draft.description.trim() || null,
         visibility: draft.visibility,
+        tags: draft.tags,
       };
       const res = draft.id
         ? await fetch(`/api/spaces/${draft.id}`, {
@@ -146,7 +155,7 @@ export default function SpacesClient() {
         </div>
         <input
           className="input ml-auto w-56 py-1.5 text-xs"
-          placeholder="搜索空间名称 / 描述…"
+          placeholder="搜索空间名称 / 描述 / 序号…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -195,12 +204,20 @@ export default function SpacesClient() {
 
                   <div className="p-4">
                     <div className="flex items-start justify-between gap-2">
-                      <Link
-                        href={`/spaces/${space.id}`}
-                        className="truncate text-sm font-medium text-ink-100 hover:text-sky-deep"
-                      >
-                        {space.name}
-                      </Link>
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <Link
+                          href={`/spaces/${space.id}`}
+                          className="truncate text-sm font-medium text-ink-100 hover:text-sky-deep"
+                        >
+                          {space.name}
+                        </Link>
+                        {/* 空间序号：等宽小徽标，历史空间无序号不显示 */}
+                        {space.space_no && (
+                          <span className="shrink-0 rounded bg-ink-800 px-1.5 py-0.5 font-mono text-[10px] text-ink-300">
+                            {space.space_no}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex shrink-0 items-center gap-1">
                         {/* 已完结徽标：仅视觉区分，卡片仍可正常进入编辑 */}
                         {space.status === 'finished' && (
@@ -221,6 +238,27 @@ export default function SpacesClient() {
                     <p className="mt-1 line-clamp-2 min-h-[2.5rem] text-xs text-ink-500">
                       {space.description || '还没写简介'}
                     </p>
+
+                    {/* 标签：最多展示 3 个，超出用 +n 收起 */}
+                    {parseSpaceTags(space.tags).length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {parseSpaceTags(space.tags)
+                          .slice(0, 3)
+                          .map((tag) => (
+                            <span
+                              key={tag}
+                              className="rounded bg-sky/10 px-1.5 py-0.5 text-[10px] text-sky-deep"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        {parseSpaceTags(space.tags).length > 3 && (
+                          <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[10px] text-ink-400">
+                            +{parseSpaceTags(space.tags).length - 3}
+                          </span>
+                        )}
+                      </div>
+                    )}
 
                     <div className="mt-3 flex items-center justify-between text-[11px] text-ink-400">
                       <span>
@@ -244,6 +282,7 @@ export default function SpacesClient() {
                               id: space.id,
                               name: space.name,
                               description: space.description ?? '',
+                              tags: parseSpaceTags(space.tags),
                               visibility: space.visibility,
                             })
                           }
@@ -255,7 +294,8 @@ export default function SpacesClient() {
                           只读权限
                         </span>
                       )}
-                      {space.is_owner && (
+                      {/* 权限扁平化：登录即可删除，不再限创建者 */}
+                      {space.can_edit && (
                         <button
                           type="button"
                           className="btn-danger flex-1 py-1 text-xs"
@@ -308,6 +348,13 @@ export default function SpacesClient() {
             />
           </div>
           <div>
+            <label className="label">标签</label>
+            <TagPicker
+              selected={draft?.tags ?? []}
+              onChange={(tags) => setDraft((d) => (d ? { ...d, tags } : d))}
+            />
+          </div>
+          <div>
             <label className="label" htmlFor="space-desc">
               描述（可选）
             </label>
@@ -320,7 +367,7 @@ export default function SpacesClient() {
             />
           </div>
           <p className="rounded-lg bg-sky/10 px-3 py-2 text-[11px] leading-relaxed text-ink-500">
-            🌐 文件夹对所有登录用户开放：人人可看、可加图、可标注。只有创建者能改名或删除。
+            📁 文件夹对所有登录用户开放：人人可看、可编辑、可删除
           </p>
           {error && <p className="text-sm text-blush">{error}</p>}
         </div>
