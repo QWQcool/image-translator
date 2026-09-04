@@ -140,6 +140,8 @@ export async function POST(request: Request) {
 
   const name = (body.name ?? '').trim();
   const description = (body.description ?? '').trim() || null;
+  // tags 存取为 JSON 字符串（与列表接口 distinctTags 的数组形状不一致是历史设计，
+  // 前端 parseSpaceTags 已适配）
   const tags = cleanTagsInput(body.tags);
   // 开放空间：没有私人文件夹，请求里的 visibility 一律忽略
   const visibility: SpaceVisibility = 'public';
@@ -148,9 +150,15 @@ export async function POST(request: Request) {
   if (name.length > 100) return NextResponse.json({ error: '空间名称过长' }, { status: 400 });
 
   /**
-   * 空间序号生成：YYYYMMDD-NN（日期取服务器本地创建当天，NN=当日已有序号数+1，两位补零）。
-   * 必须在事务内执行：better-sqlite3 事务是同步排他的，COUNT + INSERT 原子化；
-   * 生成后再用唯一索引校验兜底，撞号（历史脏数据等）就递增重试。
+   * 空间序号生成：YYYYMMDD-NN（日期取服务器本地创建当天，NN 两位补零）。
+   * 序号「不复用、不回退」：当日最大 NN 持久化到 site_settings（key=space_no_last，
+   * value=JSON {date,nn}），同日取计数器+1、跨日重置为 1——删除当日最大序号空间后
+   * 重建也不会拿到同号（这是「现存最大 NN+1」方案的缺陷）。
+   * 必须在事务内执行：better-sqlite3 事务是同步排他的，读计数器 + INSERT + 写回计数器
+   * 原子化。事务内用直接 SQL 读写而非 settings.ts 封装：getSetting 会 try/catch 吞掉
+   * 异常静默回落默认值，一旦出错会把计数器悄悄写小（序号回退）；直接 SQL 抛错会让
+   * 事务整体回滚、建空间 500，宁可失败也不允许计数器被破坏。
+   * 保留唯一索引校验兜底：撞号（历史脏数据手工填号）就递增重试，并同步推进计数器。
    */
   const nextSpaceNo = (): string => {
     const now = new Date();
@@ -162,8 +170,22 @@ export async function POST(request: Request) {
       .prepare(`SELECT space_no FROM spaces WHERE space_no LIKE ?`)
       .all(`${prefix}-%`) as Array<{ space_no: string }>;
     const taken = new Set(used.map((row) => row.space_no));
-    // 取现存最大 NN + 1（而非 COUNT+1）：删除最大序号空间后不回收复用，序号单调递增
+    // 当日持久化计数器；损坏/缺失时回落到不低于现存最大 NN 的保守值
     let nn = 0;
+    const counterRow = db
+      .prepare(`SELECT value FROM site_settings WHERE key = 'space_no_last'`)
+      .get() as { value: string } | undefined;
+    if (counterRow) {
+      try {
+        const saved = JSON.parse(counterRow.value) as { date?: unknown; nn?: unknown };
+        if (saved.date === prefix && Number.isInteger(saved.nn) && (saved.nn as number) > nn) {
+          nn = saved.nn as number;
+        }
+      } catch {
+        // 计数器 JSON 损坏：按无计数器处理，靠现存最大序号兜底
+      }
+    }
+    // 兜底：计数器缺失（升级前老数据）时至少不低于现存最大 NN
     for (const row of used) {
       const suffix = Number(row.space_no.slice(prefix.length + 1));
       if (Number.isInteger(suffix) && suffix > nn) nn = suffix;
@@ -175,6 +197,11 @@ export async function POST(request: Request) {
       nn += 1;
       candidate = `${prefix}-${String(nn).padStart(2, '0')}`;
     }
+    // 写回计数器（含撞号重试推进过的 nn），UPSERT 幂等
+    db.prepare(
+      `INSERT INTO site_settings (key, value) VALUES ('space_no_last', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(JSON.stringify({ date: prefix, nn }));
     return candidate;
   };
 

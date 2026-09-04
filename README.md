@@ -271,6 +271,11 @@ TRUST_PROXY=1                   # 可选；部署在 Nginx 等反代后时置 1�
 SIDECAR_URL=http://127.0.0.1:8765  # 可选；本机识别进程（离线 OCR / 去字兜底）
 ```
 
+> ⚠️ **运维提示：同一项目目录不要并行运行两个 `next dev` / `next start` 实例。**
+> 多实例共享同一个 `.next` 目录会互相破坏构建产物，表现为后启动的实例全部接口 404。
+> 多实例部署必须各自独立目录（各自完整的源码副本 + 独立 `DATA_DIR`，`node_modules` 可用
+> Junction 链接共享）。
+
 ### 2. 数据持久化
 
 `DATA_DIR` 指向的目录包含 `app.db`（SQLite）与 `images/`、`thumbs/` 两个图片目录。

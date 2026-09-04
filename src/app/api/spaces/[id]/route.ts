@@ -151,6 +151,8 @@ export async function PATCH(request: Request, { params }: Params) {
     body.name !== undefined || body.description !== undefined || body.visibility !== undefined;
 
   // 标签与分组表同级（公共工作数据），edit 级权限即可修改（开放权限：登录即可改）
+  // tags 存取为 JSON 字符串（列表接口 distinctTags 返回的是数组，两者形状不一致是历史
+  // 设计，前端 parseSpaceTags 已适配，勿单方面改动形状）
   let tagsJson: string | undefined;
   if (body.tags !== undefined) {
     tagsJson = JSON.stringify(cleanTagsInput(body.tags));
@@ -167,11 +169,17 @@ export async function PATCH(request: Request, { params }: Params) {
   if (name !== undefined && name.length > 100) {
     return NextResponse.json({ error: '空间名称过长' }, { status: 400 });
   }
-  // description 允许传 null 表示清空描述（前端清空/留空时发送 null）
-  const description =
-    body.description === undefined || body.description === null
-      ? undefined
-      : String(body.description).trim() || null;
+  // description 三态语义：undefined=不更新（保持现状）；null 或 ""=清空（落库为 NULL）；
+  // 非空字符串=更新为去首尾空白后的值。显式 null 必须算作有效更新，否则清空请求会被
+  // 「没有需要更新的字段」误判 400（且空串 trim 后变 null 会被 UPDATE 的 COALESCE 吞掉）。
+  let description: string | null | undefined;
+  if (body.description === undefined) {
+    description = undefined;
+  } else if (body.description === null) {
+    description = null;
+  } else {
+    description = String(body.description).trim() || null;
+  }
   // 开放空间模型：不再接受 private
   const visibility: SpaceVisibility | undefined =
     body.visibility === 'public' ? 'public' : undefined;
@@ -256,7 +264,9 @@ export async function PATCH(request: Request, { params }: Params) {
   db.prepare(
     `UPDATE spaces
         SET name = COALESCE(?, name),
-            description = COALESCE(?, description),
+            -- description 三态用哨兵标志区分：undefined（不更新，0→保留原值）与
+            -- null/""（显式清空，1→落 NULL）必须可区分，不能用「IS NULL」判断
+            description = CASE WHEN ? = 1 THEN ? ELSE description END,
             visibility = COALESCE(?, visibility),
             status = COALESCE(?, status),
             progress = COALESCE(?, progress),
@@ -267,7 +277,20 @@ export async function PATCH(request: Request, { params }: Params) {
             lp_glossary = COALESCE(?, lp_glossary),
             updated_at = datetime('now')
       WHERE id = ?`,
-  ).run(name ?? null, description ?? null, visibility ?? null, status ?? null, progress ?? null, progress ?? null, tagsJson ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, lpGlossaryJson ?? null, id);
+  ).run(
+    name ?? null,
+    description !== undefined ? 1 : 0,
+    description !== undefined ? (description ?? null) : null,
+    visibility ?? null,
+    status ?? null,
+    progress ?? null,
+    progress ?? null,
+    tagsJson ?? null,
+    lpGroupsJson ?? null,
+    lpStylesJson ?? null,
+    lpGlossaryJson ?? null,
+    id,
+  );
 
   // 日志：记管理类改动（名称/描述/可见性/进度），分组表与样式的编辑很频繁，不刷屏
   const changed: string[] = [];
