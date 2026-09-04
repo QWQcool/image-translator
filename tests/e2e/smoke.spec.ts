@@ -84,11 +84,11 @@ test.describe.serial('E2E 冒烟', () => {
 
     // ---- 搜索序号命中 ----
     await page.goto('/spaces');
-    await page.getByPlaceholder('搜索空间名称 / 描述 / 序号…').fill(spaceNo);
+    await page.getByPlaceholder(/搜索空间名称/).fill(spaceNo);
     const card = page.locator('.space-card', { hasText: SPACE_NAME });
     await expect(card).toBeVisible();
     await expect(card.locator('span.font-mono')).toHaveText(spaceNo);
-    await page.getByPlaceholder('搜索空间名称 / 描述 / 序号…').fill('');
+    await page.getByPlaceholder(/搜索空间名称/).fill('');
 
     // ---- 标签筛选：列表筛选 TAG_A 命中 ----
     await page.getByRole('button', { name: /^筛选/ }).click();

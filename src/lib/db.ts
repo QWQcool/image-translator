@@ -209,18 +209,26 @@ function createConnection(): Database.Database {
  * 必须先查 pragma 再决定是否加列，否则重复启动会报错。
  */
 function migrate(database: Database.Database): void {
-  const spaceColumns = database
-    .prepare('PRAGMA table_info(spaces)')
-    .all() as Array<{ name: string }>;
-  if (!spaceColumns.some((column) => column.name === 'visibility')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`);
-  }
+  const safeAddColumn = (table: string, column: string, ddl: string): boolean => {
+    try {
+      const columns = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!columns.some((c) => c.name === column)) {
+        database.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+        return true;
+      }
+    } catch (err: any) {
+      if (err?.message?.includes('duplicate column')) {
+        return false;
+      }
+      throw err;
+    }
+    return false;
+  };
+
+  safeAddColumn('spaces', 'visibility', `visibility TEXT NOT NULL DEFAULT 'private'`);
 
   // 素材可见性：shared 的图对所有登录用户可见，是协作与全站共享的基础
-  const assetColumns = database.prepare('PRAGMA table_info(assets)').all() as Array<{ name: string }>;
-  if (!assetColumns.some((column) => column.name === 'visibility')) {
-    database.exec(`ALTER TABLE assets ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`);
-  }
+  safeAddColumn('assets', 'visibility', `visibility TEXT NOT NULL DEFAULT 'private'`);
   // 为迁移前已存在的空间补建 owner 成员记录（INSERT OR IGNORE 幂等）
   database.exec(
     `INSERT OR IGNORE INTO space_members (space_id, user_id, role)
@@ -228,9 +236,7 @@ function migrate(database: Database.Database): void {
   );
 
   // 素材软删除：deleted_at 非空 = 在回收站里；磁盘文件保留，恢复即可用
-  if (!assetColumns.some((column) => column.name === 'deleted_at')) {
-    database.exec(`ALTER TABLE assets ADD COLUMN deleted_at TEXT`);
-  }
+  safeAddColumn('assets', 'deleted_at', `deleted_at TEXT`);
 
   // 全站操作日志：空间/素材/条目的增删改、AI 调用等，日志页只展示最近 500 条
   database.exec(`
@@ -251,9 +257,7 @@ function migrate(database: Database.Database): void {
     .prepare('PRAGMA table_info(annotations)')
     .all() as Array<{ name: string }>;
   const addAnnotationColumn = (name: string, ddl: string): boolean => {
-    if (annotationColumns.some((column) => column.name === name)) return false;
-    database.exec(`ALTER TABLE annotations ADD COLUMN ${ddl}`);
-    return true;
+    return safeAddColumn('annotations', name, ddl);
   };
   addAnnotationColumn('kind', `kind TEXT NOT NULL DEFAULT 'box'`);
   addAnnotationColumn('group_id', `group_id INTEGER NOT NULL DEFAULT 1`);
@@ -261,7 +265,7 @@ function migrate(database: Database.Database): void {
   addAnnotationColumn('comment', `comment TEXT NOT NULL DEFAULT ''`);
   addAnnotationColumn('updated_by', `updated_by INTEGER`);
   // Stage 5 富文本：runs 分段 JSON + 标注级文字不透明度
-  const runsColumnAdded =   addAnnotationColumn('runs', `runs TEXT`);
+  const runsColumnAdded = addAnnotationColumn('runs', `runs TEXT`);
   addAnnotationColumn('text_opacity', `text_opacity REAL NOT NULL DEFAULT 1`);
   // 疑点标记：0/1，编辑器 Alt+X 切换
   addAnnotationColumn('doubtful', `doubtful INTEGER NOT NULL DEFAULT 0`);
@@ -278,33 +282,21 @@ function migrate(database: Database.Database): void {
     }
   }
 
-  const latestSpaceColumns = database
-    .prepare('PRAGMA table_info(spaces)')
-    .all() as Array<{ name: string }>;
-  if (!latestSpaceColumns.some((column) => column.name === 'lp_groups')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN lp_groups TEXT`);
-  }
-  if (!latestSpaceColumns.some((column) => column.name === 'lp_phrases')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN lp_phrases TEXT`);
-  }
+  safeAddColumn('spaces', 'lp_groups', `lp_groups TEXT`);
+  safeAddColumn('spaces', 'lp_phrases', `lp_phrases TEXT`);
 
   // 嵌字分组样式预设（JSON：{[groupId]: LpStyle}），迁移时给已有空间写入默认值
-  if (!latestSpaceColumns.some((column) => column.name === 'lp_styles')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN lp_styles TEXT`);
+  if (safeAddColumn('spaces', 'lp_styles', `lp_styles TEXT`)) {
     database
       .prepare('UPDATE spaces SET lp_styles = ? WHERE lp_styles IS NULL')
       .run(JSON.stringify(DEFAULT_LP_STYLES));
   }
 
   // 术语表（JSON 数组 [{from,to,note?}]，空间级全员共用），AI 翻译时注入
-  if (!latestSpaceColumns.some((column) => column.name === 'lp_glossary')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN lp_glossary TEXT NOT NULL DEFAULT '[]'`);
-  }
+  safeAddColumn('spaces', 'lp_glossary', `lp_glossary TEXT NOT NULL DEFAULT '[]'`);
 
   // 空间完结状态：'active' | 'finished'（阶段 15 起废弃：改用七级 progress，本列不再读写）
-  if (!latestSpaceColumns.some((column) => column.name === 'status')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
-  }
+  safeAddColumn('spaces', 'status', `status TEXT NOT NULL DEFAULT 'active'`);
 
   // 七级进度体系：两态 status 一刀切映射（active→untranslated，finished→typeset_done），
   // progress_at 初始化为 updated_at（「已维持」从最后保存时间起算）。
@@ -314,58 +306,55 @@ function migrate(database: Database.Database): void {
   // 注意：SQLite 的 ALTER TABLE ADD COLUMN 不允许非常量 DEFAULT（如 datetime('now')），
   // progress_at 必须以可空列添加、靠紧随其后的 UPDATE 回填；每个迁移步骤包事务，
   // 防止中途失败留下「列加了、回填没跑」的半迁移状态。
-  const hasProgressColumn = latestSpaceColumns.some((column) => column.name === 'progress');
-  const hasProgressAtColumn = latestSpaceColumns.some((column) => column.name === 'progress_at');
-  if (!hasProgressColumn) {
-    database.transaction(() => {
-      database.exec(`ALTER TABLE spaces ADD COLUMN progress TEXT NOT NULL DEFAULT 'untranslated'`);
-      database.exec(`
-        UPDATE spaces
-           SET progress = CASE status WHEN 'finished' THEN 'typeset_done' ELSE 'untranslated' END
-       WHERE progress = 'untranslated'
-      `);
-    })();
-  }
-  if (!hasProgressAtColumn) {
-    database.transaction(() => {
-      database.exec(`ALTER TABLE spaces ADD COLUMN progress_at TEXT`);
-      // 回填：半迁移库的 progress 曾被重置为默认值，这里按 status 重新映射一次；
-      // progress_at 缺失（NULL）的行补 updated_at（「已维持」从最后保存时间起算）
-      database.exec(`
-        UPDATE spaces
-           SET progress = CASE status WHEN 'finished' THEN 'typeset_done' ELSE 'untranslated' END,
-               progress_at = COALESCE(progress_at, updated_at)
-      `);
-    })();
+  try {
+    const latestSpaceColumns = database
+      .prepare('PRAGMA table_info(spaces)')
+      .all() as Array<{ name: string }>;
+    const hasProgressColumn = latestSpaceColumns.some((column) => column.name === 'progress');
+    const hasProgressAtColumn = latestSpaceColumns.some((column) => column.name === 'progress_at');
+    if (!hasProgressColumn) {
+      database.transaction(() => {
+        database.exec(`ALTER TABLE spaces ADD COLUMN progress TEXT NOT NULL DEFAULT 'untranslated'`);
+        database.exec(`
+          UPDATE spaces
+             SET progress = CASE status WHEN 'finished' THEN 'typeset_done' ELSE 'untranslated' END
+         WHERE progress = 'untranslated'
+        `);
+      })();
+    }
+    if (!hasProgressAtColumn) {
+      database.transaction(() => {
+        database.exec(`ALTER TABLE spaces ADD COLUMN progress_at TEXT`);
+        // 回填：半迁移库的 progress 曾被重置为默认值，这里按 status 重新映射一次；
+        // progress_at 缺失（NULL）的行补 updated_at（「已维持」从最后保存时间起算）
+        database.exec(`
+          UPDATE spaces
+             SET progress = CASE status WHEN 'finished' THEN 'typeset_done' ELSE 'untranslated' END,
+                 progress_at = COALESCE(progress_at, updated_at)
+        `);
+      })();
+    }
+  } catch (err: any) {
+    if (!err?.message?.includes('duplicate column')) {
+      throw err;
+    }
   }
 
   // 空间序号（YYYYMMDD-NN）：新空间由服务端在事务内自动生成，历史空间留空不回填
-  if (!latestSpaceColumns.some((column) => column.name === 'space_no')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN space_no TEXT`);
-  }
+  safeAddColumn('spaces', 'space_no', `space_no TEXT`);
   // 序号唯一性由部分唯一索引兜底（NULL 不参与唯一约束），生成逻辑之外再挡一层并发
   database.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_space_no ON spaces(space_no) WHERE space_no IS NOT NULL`,
   );
 
   // 标签（JSON 字符串数组），历史空间默认空数组
-  if (!latestSpaceColumns.some((column) => column.name === 'tags')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`);
-  }
+  safeAddColumn('spaces', 'tags', `tags TEXT NOT NULL DEFAULT '[]'`);
 
   // 制作人员字段：作者、翻译、校对、嵌字（历史空间默认空串）
-  if (!latestSpaceColumns.some((column) => column.name === 'author')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN author TEXT NOT NULL DEFAULT ''`);
-  }
-  if (!latestSpaceColumns.some((column) => column.name === 'translator')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN translator TEXT NOT NULL DEFAULT ''`);
-  }
-  if (!latestSpaceColumns.some((column) => column.name === 'proofreader')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN proofreader TEXT NOT NULL DEFAULT ''`);
-  }
-  if (!latestSpaceColumns.some((column) => column.name === 'typesetter')) {
-    database.exec(`ALTER TABLE spaces ADD COLUMN typesetter TEXT NOT NULL DEFAULT ''`);
-  }
+  safeAddColumn('spaces', 'author', `author TEXT NOT NULL DEFAULT ''`);
+  safeAddColumn('spaces', 'translator', `translator TEXT NOT NULL DEFAULT ''`);
+  safeAddColumn('spaces', 'proofreader', `proofreader TEXT NOT NULL DEFAULT ''`);
+  safeAddColumn('spaces', 'typesetter', `typesetter TEXT NOT NULL DEFAULT ''`);
 
   // 开放空间改造：历史遗留的私人空间/私人素材一次性转成公共，
   // 之后 API 层也不再接受 private（幂等，重复执行无副作用）。
@@ -373,13 +362,8 @@ function migrate(database: Database.Database): void {
   database.exec(`UPDATE assets SET visibility = 'shared' WHERE visibility <> 'shared'`);
 
   // 个人空间：昵称与头像（username 永远是注册账号名，日志与记录都用它）
-  const userColumns = database.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
-  if (!userColumns.some((column) => column.name === 'display_name')) {
-    database.exec(`ALTER TABLE users ADD COLUMN display_name TEXT`);
-  }
-  if (!userColumns.some((column) => column.name === 'avatar_filename')) {
-    database.exec(`ALTER TABLE users ADD COLUMN avatar_filename TEXT`);
-  }
+  safeAddColumn('users', 'display_name', `display_name TEXT`);
+  safeAddColumn('users', 'avatar_filename', `avatar_filename TEXT`);
 
   // 每个用户自己的 AI 服务配置（OpenAI 兼容）。谁填了 token 谁能用 AI 能力。
   database.exec(`
@@ -393,19 +377,11 @@ function migrate(database: Database.Database): void {
     );
   `);
   // Stage 6 文本块检测服务（每用户独立，可选）：配置后 OCR 走「检测→提取」两步链路
-  const aiConfigColumns = database
-    .prepare('PRAGMA table_info(ai_configs)')
-    .all() as Array<{ name: string }>;
-  const addAiConfigColumn = (name: string, ddl: string) => {
-    if (!aiConfigColumns.some((column) => column.name === name)) {
-      database.exec(`ALTER TABLE ai_configs ADD COLUMN ${ddl}`);
-    }
-  };
-  addAiConfigColumn('detection_base_url', `detection_base_url TEXT NOT NULL DEFAULT ''`);
-  addAiConfigColumn('detection_api_key', `detection_api_key TEXT NOT NULL DEFAULT ''`);
-  addAiConfigColumn('detection_model', `detection_model TEXT NOT NULL DEFAULT ''`);
+  safeAddColumn('ai_configs', 'detection_base_url', `detection_base_url TEXT NOT NULL DEFAULT ''`);
+  safeAddColumn('ai_configs', 'detection_api_key', `detection_api_key TEXT NOT NULL DEFAULT ''`);
+  safeAddColumn('ai_configs', 'detection_model', `detection_model TEXT NOT NULL DEFAULT ''`);
   // 检测来源：'ai' = OpenAI 兼容视觉端点；'sidecar' = 本机检测进程（sidecar/detector.mjs）
-  addAiConfigColumn('detection_source', `detection_source TEXT NOT NULL DEFAULT 'ai'`);
+  safeAddColumn('ai_configs', 'detection_source', `detection_source TEXT NOT NULL DEFAULT 'ai'`);
 
   // 多 Provider：一个用户可配置多条 AI 服务（OCR/翻译/去字可选用哪条）。
   // user_id 为 NULL 的记录是「官方渠道」占位（server 端 token 字段保留，暂不填、不计费）。
@@ -452,9 +428,7 @@ function migrate(database: Database.Database): void {
   //   npm run admin -- list            查看全部用户与管理员状态
   //   npm run admin -- set <用户名>    赋予管理员
   //   npm run admin -- unset <用户名>  收回管理员
-  if (!userColumns.some((column) => column.name === 'is_admin')) {
-    database.exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`);
-  }
+  safeAddColumn('users', 'is_admin', `is_admin INTEGER NOT NULL DEFAULT 0`);
 
   // 邀请码表：管理员在页面上生成/作废，注册时消费（env INVITE_CODE 仍是本地便捷通道）。
   // used_by/used_at 在码被注册消耗时写入，明文 code 全库唯一。
