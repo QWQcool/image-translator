@@ -1,3 +1,5 @@
+import type { SpaceProgress } from './progress';
+
 export type User = {
   id: number;
   username: string;
@@ -37,7 +39,7 @@ export type Asset = {
 
 export type SpaceVisibility = 'private' | 'public';
 
-/** 空间完结状态：active=进行中；finished=已完结（仅视觉区分，不锁编辑） */
+/** 空间完结状态：active=进行中；finished=已完结（阶段 15 起废弃：改用 SpaceProgress，仅保留兼容） */
 export type SpaceStatus = 'active' | 'finished';
 
 export type Space = {
@@ -46,7 +48,12 @@ export type Space = {
   name: string;
   description: string | null;
   visibility: SpaceVisibility;
+  /** @deprecated 阶段 15 起废弃：改用 progress 七级进度，本列不再读写 */
   status: SpaceStatus;
+  /** 七级进度（替代 status） */
+  progress: SpaceProgress;
+  /** 进入当前进度的时间（SQLite UTC），前端据此显示「当前状态已维持 X」 */
+  progress_at: string;
   /** 空间序号（YYYYMMDD-NN，服务端自动生成）；历史空间为 null */
   space_no: string | null;
   /** 标签（JSON 字符串数组），前端用 parseSpaceTags 解析 */

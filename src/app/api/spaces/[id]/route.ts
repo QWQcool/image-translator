@@ -5,6 +5,7 @@ import { hardDeleteItems } from '@/lib/hard-delete';
 import { normalizeGlossaryInput, normalizeStyles } from '@/lib/labelplus';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
+import { PROGRESS_LABEL, isSpaceProgress, type SpaceProgress } from '@/lib/progress';
 import { cleanTagsInput } from '@/lib/tags';
 import type { Asset, Space, SpaceItem, SpaceStatus, SpaceVisibility } from '@/lib/types';
 
@@ -134,6 +135,7 @@ export async function PATCH(request: Request, { params }: Params) {
     description?: string;
     visibility?: string;
     status?: string;
+    progress?: string;
     tags?: unknown;
     lp_groups?: Array<{ id: number; name: string }>;
     lp_styles?: Record<string, unknown>;
@@ -171,10 +173,19 @@ export async function PATCH(request: Request, { params }: Params) {
     body.visibility === 'public' ? 'public' : undefined;
 
   // 完结状态：登录即可改（扁平权限，轻操作）；非法取值直接拒绝
+  // （阶段 15 起废弃：UI 全走 progress，本参数仅保留 API 兼容）
   const status: SpaceStatus | undefined =
     body.status === 'active' || body.status === 'finished' ? body.status : undefined;
   if (body.status !== undefined && status === undefined) {
     return NextResponse.json({ error: 'status 只能是 active 或 finished' }, { status: 400 });
+  }
+
+  // 七级进度：登录即可改（轻操作，与完结状态同级）；白名单校验，非法取值 400
+  const progress: SpaceProgress | undefined = isSpaceProgress(body.progress)
+    ? body.progress
+    : undefined;
+  if (body.progress !== undefined && progress === undefined) {
+    return NextResponse.json({ error: 'progress 不是合法的进度值' }, { status: 400 });
   }
 
   // LabelPlus 分组表：1~9 组，名字留空的组视为停用
@@ -223,6 +234,7 @@ export async function PATCH(request: Request, { params }: Params) {
     description === undefined &&
     visibility === undefined &&
     status === undefined &&
+    progress === undefined &&
     tagsJson === undefined &&
     lpGroupsJson === undefined &&
     lpStylesJson === undefined &&
@@ -231,29 +243,39 @@ export async function PATCH(request: Request, { params }: Params) {
     return NextResponse.json({ error: '没有需要更新的字段' }, { status: 400 });
   }
 
+  // 变更前进度（日志需要旧值）
+  const before = db
+    .prepare('SELECT name, progress FROM spaces WHERE id = ?')
+    .get(id) as { name: string; progress: SpaceProgress } | undefined;
+  if (!before) return NextResponse.json({ error: '空间不存在' }, { status: 404 });
+
   db.prepare(
     `UPDATE spaces
         SET name = COALESCE(?, name),
             description = COALESCE(?, description),
             visibility = COALESCE(?, visibility),
             status = COALESCE(?, status),
+            progress = COALESCE(?, progress),
+            progress_at = CASE WHEN ? IS NULL THEN progress_at ELSE datetime('now') END,
             tags = COALESCE(?, tags),
             lp_groups = COALESCE(?, lp_groups),
             lp_styles = COALESCE(?, lp_styles),
             lp_glossary = COALESCE(?, lp_glossary),
             updated_at = datetime('now')
       WHERE id = ?`,
-  ).run(name ?? null, description ?? null, visibility ?? null, status ?? null, tagsJson ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, lpGlossaryJson ?? null, id);
+  ).run(name ?? null, description ?? null, visibility ?? null, status ?? null, progress ?? null, progress ?? null, tagsJson ?? null, lpGroupsJson ?? null, lpStylesJson ?? null, lpGlossaryJson ?? null, id);
 
-  // 日志：只记管理类改动（名称/描述/可见性/完结状态），分组表与样式的编辑很频繁，不刷屏
+  // 日志：记管理类改动（名称/描述/可见性/进度），分组表与样式的编辑很频繁，不刷屏
   const changed: string[] = [];
   if (name !== undefined) changed.push('名称');
   if (description !== undefined) changed.push('描述');
   if (visibility !== undefined) changed.push('可见性');
   if (status !== undefined) changed.push(status === 'finished' ? '标记完结' : '重新开启');
+  if (progress !== undefined) {
+    changed.push(`进度：${PROGRESS_LABEL[before.progress]} → ${PROGRESS_LABEL[progress]}`);
+  }
   if (changed.length > 0) {
-    const current = db.prepare('SELECT name FROM spaces WHERE id = ?').get(id) as { name: string };
-    logOp(user.id, 'update', 'space', id, current.name, `修改空间${changed.join('、')}`);
+    logOp(user.id, 'update', 'space', id, before.name, `修改空间${changed.join('、')}`);
   }
 
   return NextResponse.json({

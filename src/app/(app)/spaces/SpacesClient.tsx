@@ -4,11 +4,19 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
+import ProgressBadge from '@/components/ProgressBadge';
 import TagPicker from '@/components/TagPicker';
 import { useStaggerReveal } from '@/lib/motion';
 import { formatDate, thumbUrl } from '@/lib/media';
-import { parseSpaceTags } from '@/lib/tags';
-import type { SpaceRole, SpaceStatus, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
+import {
+  PROGRESS_BADGE_CLASS,
+  PROGRESS_LABEL,
+  SPACE_PROGRESS_VALUES,
+  formatProgressAge,
+  type SpaceProgress,
+} from '@/lib/progress';
+import { PRESET_TAGS, parseSpaceTags } from '@/lib/tags';
+import type { SpaceRole, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
 
 type Draft = {
   id?: number;
@@ -33,28 +41,49 @@ export default function SpacesClient() {
   const [pendingDelete, setPendingDelete] = useState<SpaceWithCounts | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 全局查找：LIKE 匹配空间名 / 描述（走 API q 参数）
+  // 全局查找：LIKE 匹配空间名 / 描述 / 序号（走 API q 参数）
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
-  // 完结状态筛选：默认「全部」，完结的空间在列表里排后并带徽标
-  const [statusFilter, setStatusFilter] = useState<SpaceStatus | 'all'>('all');
+  // 多维筛选：进度（多选并集）
+  const [progressFilter, setProgressFilter] = useState<Set<SpaceProgress>>(() => new Set());
+  // 多维筛选：标签（多选并集，含任一标签即命中）
+  const [tagFilter, setTagFilter] = useState<Set<string>>(() => new Set());
+  // 多维筛选：保存时间（任意 / 相对窗口 / 自定义日期，取该日 00:00 之前保存的）
+  const [savedFilter, setSavedFilter] = useState<'any' | '3d' | '7d' | '30d' | 'custom'>('any');
+  const [customDate, setCustomDate] = useState('');
+  // 全库出现过的标签（服务端 distinct tags），预设之外的动态筛选候选
+  const [distinctTags, setDistinctTags] = useState<string[]>([]);
   // 卡片入场：数据到达/筛选变化时逐张上浮
   const gridScope = useStaggerReveal('.space-card', [spaces.length, debouncedQuery, loading]);
 
-  const load = useCallback(async (q: string = '', filter: SpaceStatus | 'all' = 'all') => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (q) params.set('q', q);
-      if (filter !== 'all') params.set('filter', filter);
-      const suffix = params.toString();
-      const res = await fetch(`/api/spaces${suffix ? `?${suffix}` : ''}`);
-      const data = await res.json();
-      setSpaces(Array.isArray(data.spaces) ? data.spaces : []);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // 自定义日期只有合法（YYYY-MM-DD）才作为筛选条件发出
+  const savedBeforeParam =
+    savedFilter === '3d' || savedFilter === '7d' || savedFilter === '30d'
+      ? savedFilter
+      : savedFilter === 'custom' && /^\d{4}-\d{2}-\d{2}$/.test(customDate)
+        ? customDate
+        : '';
+
+  const load = useCallback(
+    async (opts: { q: string; progress: string[]; tags: string[]; savedBefore?: string }) => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (opts.q) params.set('q', opts.q);
+        if (opts.progress.length > 0) params.set('progress', opts.progress.join(','));
+        if (opts.tags.length > 0) params.set('tag', opts.tags.join(','));
+        if (opts.savedBefore) params.set('savedBefore', opts.savedBefore);
+        const suffix = params.toString();
+        const res = await fetch(`/api/spaces${suffix ? `?${suffix}` : ''}`);
+        const data = await res.json();
+        setSpaces(Array.isArray(data.spaces) ? data.spaces : []);
+        if (Array.isArray(data.distinctTags)) setDistinctTags(data.distinctTags);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
   // 搜索防抖
   useEffect(() => {
@@ -63,8 +92,45 @@ export default function SpacesClient() {
   }, [query]);
 
   useEffect(() => {
-    void load(debouncedQuery, statusFilter);
-  }, [debouncedQuery, statusFilter, load]);
+    void load({
+      q: debouncedQuery,
+      progress: [...progressFilter],
+      tags: [...tagFilter],
+      savedBefore: savedBeforeParam,
+    });
+  }, [debouncedQuery, progressFilter, tagFilter, savedBeforeParam, load]);
+
+  function toggleProgressFilter(value: SpaceProgress) {
+    setProgressFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+      return next;
+    });
+  }
+
+  function toggleTagFilter(tag: string) {
+    setTagFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      return next;
+    });
+  }
+
+  /** 是否有任一筛选生效（控制「清空筛选」按钮显隐） */
+  const hasFilter =
+    progressFilter.size > 0 || tagFilter.size > 0 || savedFilter !== 'any' || customDate !== '';
+
+  function clearFilters() {
+    setProgressFilter(new Set());
+    setTagFilter(new Set());
+    setSavedFilter('any');
+    setCustomDate('');
+  }
+
+  // 筛选候选标签：预设在前，库内动态标签去重补后
+  const tagOptions = [...new Set([...PRESET_TAGS, ...distinctTags])];
 
   async function saveDraft() {
     if (!draft) return;
@@ -99,7 +165,12 @@ export default function SpacesClient() {
         return;
       }
       setDraft(null);
-      await load(debouncedQuery, statusFilter);
+      await load({
+        q: debouncedQuery,
+        progress: [...progressFilter],
+        tags: [...tagFilter],
+        savedBefore: savedBeforeParam,
+      });
     } finally {
       setSaving(false);
     }
@@ -114,7 +185,12 @@ export default function SpacesClient() {
       setError('删除失败');
       return;
     }
-    await load(debouncedQuery, statusFilter);
+    await load({
+      q: debouncedQuery,
+      progress: [...progressFilter],
+      tags: [...tagFilter],
+      savedBefore: savedBeforeParam,
+    });
   }
 
   const groups = [
@@ -134,31 +210,90 @@ export default function SpacesClient() {
           新建空间
         </button>
         <span className="text-sm text-ink-500">共 {spaces.length} 个可见空间</span>
-        {/* 完结状态筛选：默认显示全部，完结的空间排后带徽标 */}
-        <div className="seg">
-          {(
-            [
-              ['all', '全部'],
-              ['active', '进行中'],
-              ['finished', '已完结'],
-            ] as Array<[SpaceStatus | 'all', string]>
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              className={`seg-btn ${statusFilter === value ? 'seg-btn-on' : ''}`}
-              onClick={() => setStatusFilter(value)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
         <input
           className="input ml-auto w-56 py-1.5 text-xs"
           placeholder="搜索空间名称 / 描述 / 序号…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+      </div>
+
+      {/* 多维筛选：进度 chips + 标签 chips + 保存时间下拉，组合生效（并集） */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-ink-400">进度</span>
+          {SPACE_PROGRESS_VALUES.map((value) => {
+            const on = progressFilter.has(value);
+            return (
+              <button
+                key={value}
+                type="button"
+                className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
+                  on
+                    ? PROGRESS_BADGE_CLASS[value]
+                    : 'bg-paper text-ink-400 ring-1 ring-ink-700 hover:text-ink-200'
+                }`}
+                onClick={() => toggleProgressFilter(value)}
+              >
+                {PROGRESS_LABEL[value]}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-ink-400">标签</span>
+          {tagOptions.map((tag) => {
+            const on = tagFilter.has(tag);
+            return (
+              <button
+                key={tag}
+                type="button"
+                className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
+                  on
+                    ? 'bg-sky/15 text-sky-deep ring-1 ring-sky/40'
+                    : 'bg-paper text-ink-400 ring-1 ring-ink-700 hover:text-ink-200'
+                }`}
+                onClick={() => toggleTagFilter(tag)}
+              >
+                {tag}
+              </button>
+            );
+          })}
+        </div>
+        <label className="flex items-center gap-1.5 text-[11px] text-ink-400">
+          保存时间
+          <select
+            className="input py-1 text-xs"
+            value={savedFilter}
+            onChange={(e) =>
+              setSavedFilter(e.target.value as 'any' | '3d' | '7d' | '30d' | 'custom')
+            }
+          >
+            <option value="any">任意</option>
+            <option value="3d">3 天前</option>
+            <option value="7d">7 天前</option>
+            <option value="30d">30 天前</option>
+            <option value="custom">自定义</option>
+          </select>
+          {savedFilter === 'custom' && (
+            <input
+              type="date"
+              className="input py-1 text-xs"
+              value={customDate}
+              title="显示该日 00:00 之前保存的空间"
+              onChange={(e) => setCustomDate(e.target.value)}
+            />
+          )}
+        </label>
+        {hasFilter && (
+          <button
+            type="button"
+            className="text-xs text-ink-400 underline hover:text-ink-200"
+            onClick={clearFilters}
+          >
+            清空筛选
+          </button>
+        )}
       </div>
 
       {error && <p className="notice-error">{error}</p>}
@@ -219,12 +354,8 @@ export default function SpacesClient() {
                         )}
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
-                        {/* 已完结徽标：仅视觉区分，卡片仍可正常进入编辑 */}
-                        {space.status === 'finished' && (
-                          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] text-amber-600">
-                            已完结
-                          </span>
-                        )}
+                        {/* 七级进度徽标：配色梯度，hover 显示维持时长 */}
+                        <ProgressBadge progress={space.progress} progressAt={space.progress_at} />
                         <span
                           className={`rounded px-1.5 py-0.5 text-[11px] ${
                             ROLE_BADGE[space.role].className
@@ -263,6 +394,9 @@ export default function SpacesClient() {
                     <div className="mt-3 flex items-center justify-between text-[11px] text-ink-400">
                       <span>
                         {space.item_count} 图 · {space.annotation_count} 标注
+                        {/* 维持时长小字：进入当前进度至今 */}
+                        {formatProgressAge(space.progress_at) &&
+                          ` · 已维持 ${formatProgressAge(space.progress_at)}`}
                       </span>
                       <span>{formatDate(space.updated_at)}</span>
                     </div>

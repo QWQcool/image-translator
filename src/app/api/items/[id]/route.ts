@@ -108,7 +108,9 @@ export async function GET(_request: Request, { params }: Params) {
     description: null,
     visibility: row.space_visibility as Space['visibility'],
     status: (row.space_status as Space['status']) ?? 'active',
-    // 占位字段：本接口只用 id/名称等基本信息，序号与标签不在此查询范围
+    // 占位字段：本接口只用 id/名称等基本信息，进度/序号/标签不在此查询范围
+    progress: 'untranslated',
+    progress_at: '',
     space_no: null,
     tags: null,
     created_at: '',

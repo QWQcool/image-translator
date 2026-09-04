@@ -41,12 +41,18 @@ CREATE TABLE IF NOT EXISTS spaces (
   description TEXT,
   -- private: 仅成员可见；public: 所有登录用户可见，非成员一律只读
   visibility  TEXT NOT NULL DEFAULT 'private',
-  -- 空间完结状态：active=进行中；finished=已完结（仅视觉区分，不锁编辑）
+  -- 空间完结状态：active=进行中；finished=已完结
+  -- （阶段 15 起废弃：改用七级 progress 列，本列不再读写，仅保留兼容）
   status      TEXT NOT NULL DEFAULT 'active',
   -- 空间序号（YYYYMMDD-NN，服务端自动生成；可空，历史空间无序号）
   space_no    TEXT,
   -- 标签（JSON 字符串数组，如 ["纯爱","鬼畜"]）
   tags        TEXT NOT NULL DEFAULT '[]',
+  -- 七级进度：untranslated/translated_placeholder/translated/proofread_placeholder/
+  -- proofread/typeset_placeholder/typeset_done
+  progress    TEXT NOT NULL DEFAULT 'untranslated',
+  -- 进入当前进度的时间（展示「当前状态已维持 X」）
+  progress_at TEXT NOT NULL DEFAULT (datetime('now')),
   lp_groups   TEXT,
   lp_phrases  TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -282,9 +288,27 @@ function migrate(database: Database.Database): void {
     database.exec(`ALTER TABLE spaces ADD COLUMN lp_glossary TEXT NOT NULL DEFAULT '[]'`);
   }
 
-  // 空间完结状态：'active' | 'finished'，历史空间默认进行中
+  // 空间完结状态：'active' | 'finished'（阶段 15 起废弃：改用七级 progress，本列不再读写）
   if (!latestSpaceColumns.some((column) => column.name === 'status')) {
     database.exec(`ALTER TABLE spaces ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`);
+  }
+
+  // 七级进度体系：两态 status 一刀切映射（active→untranslated，finished→typeset_done），
+  // progress_at 初始化为 updated_at（「已维持」从最后保存时间起算）。
+  // 仅在 progress 列刚创建时执行一次（一次性守卫，幂等）。
+  // 注意：SQLite 的 ALTER TABLE ADD COLUMN 不允许非常量 DEFAULT（如 datetime('now')），
+  // progress_at 必须以可空列添加、靠紧随其后的 UPDATE 回填；整个迁移块包事务，
+  // 防止中途失败留下「列加了、回填没跑」的半迁移状态（守卫会误判为已完成）。
+  if (!latestSpaceColumns.some((column) => column.name === 'progress')) {
+    database.transaction(() => {
+      database.exec(`ALTER TABLE spaces ADD COLUMN progress TEXT NOT NULL DEFAULT 'untranslated'`);
+      database.exec(`ALTER TABLE spaces ADD COLUMN progress_at TEXT`);
+      database.exec(`
+        UPDATE spaces
+           SET progress = CASE status WHEN 'finished' THEN 'typeset_done' ELSE 'untranslated' END,
+               progress_at = updated_at
+      `);
+    })();
   }
 
   // 空间序号（YYYYMMDD-NN）：新空间由服务端在事务内自动生成，历史空间留空不回填

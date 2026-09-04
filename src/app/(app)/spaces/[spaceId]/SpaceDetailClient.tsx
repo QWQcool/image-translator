@@ -5,17 +5,17 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
+import ProgressBadge from '@/components/ProgressBadge';
 import TagPicker from '@/components/TagPicker';
 import { formatBytes, formatDate, originalUrl, thumbUrl } from '@/lib/media';
+import {
+  PROGRESS_LABEL,
+  SPACE_PROGRESS_VALUES,
+  formatProgressAge,
+  type SpaceProgress,
+} from '@/lib/progress';
 import { parseSpaceTags } from '@/lib/tags';
-import type {
-  Output,
-  Space,
-  SpaceAccess,
-  SpaceItem,
-  SpaceStatus,
-  SpaceVisibility,
-} from '@/lib/types';
+import type { Output, Space, SpaceAccess, SpaceItem, SpaceVisibility } from '@/lib/types';
 import AiBatchModal from './AiBatchModal';
 import ExportMenu from './ExportMenu';
 import { ROLE_LABEL } from './MembersPanel';
@@ -54,8 +54,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [uploadProgress, setUploadProgress] = useState<{ loaded: number; total: number } | null>(null);
   // 本轮上传的文件数与各文件大小（用于按字节边界推算「第几个文件」）
   const [uploadMeta, setUploadMeta] = useState<{ count: number; sizes: number[] } | null>(null);
-  // 完结状态切换中（防重复点击）
-  const [togglingStatus, setTogglingStatus] = useState(false);
+  // 七级进度：点击徽标弹出状态选择菜单
+  const [progressMenuOpen, setProgressMenuOpen] = useState(false);
   // 非致命提示（如 zip 内被跳过的文件）
   const [notice, setNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -239,16 +239,14 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     [spaceId, load, debouncedQuery],
   );
 
-  /** 切换空间完结状态（轻操作，不需要确认；完结只做视觉区分，不锁编辑） */
-  async function toggleSpaceStatus() {
-    if (!space) return;
-    const next: SpaceStatus = space.status === 'finished' ? 'active' : 'finished';
-    setTogglingStatus(true);
+  /** 切换七级进度（轻操作，登录即可改）；服务端返回更新后的空间（含新 progress_at） */
+  async function changeProgress(next: SpaceProgress) {
+    if (!space || next === space.progress) return;
     try {
       const res = await fetch(`/api/spaces/${spaceId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: next }),
+        body: JSON.stringify({ progress: next }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -256,11 +254,10 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         return;
       }
       setError(null);
-      setSpace((prev) => (prev ? { ...prev, status: next } : prev));
+      const data = await res.json();
+      if (data.space) setSpace(data.space);
     } catch {
-      setError('网络异常，切换完结状态失败');
-    } finally {
-      setTogglingStatus(false);
+      setError('网络异常，切换进度失败');
     }
   }
 
@@ -607,16 +604,46 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[11px] text-ink-400">
                 {ROLE_LABEL[access.role]}
               </span>
-              {/* 完结状态徽标：进行中=sky / 已完结=amber，仅视觉区分不锁编辑 */}
-              <span
-                className={`rounded px-1.5 py-0.5 text-[11px] ${
-                  space.status === 'finished'
-                    ? 'bg-amber-500/15 text-amber-600'
-                    : 'bg-sky/15 text-sky-deep'
-                }`}
-              >
-                {space.status === 'finished' ? '已完结' : '进行中'}
-              </span>
+              {/* 七级进度：点击徽标弹出状态选择，切换即 PATCH（登录即可改） */}
+              <div className="relative">
+                <button
+                  type="button"
+                  title="点击切换进度"
+                  onClick={() => setProgressMenuOpen((v) => !v)}
+                >
+                  <ProgressBadge progress={space.progress} progressAt={space.progress_at} />
+                </button>
+                {progressMenuOpen && (
+                  <>
+                    {/* 全屏透明遮罩：点空白处收起菜单 */}
+                    <div
+                      className="fixed inset-0 z-30"
+                      onClick={() => setProgressMenuOpen(false)}
+                    />
+                    <div className="absolute left-0 top-full z-40 mt-1 w-44 rounded-xl bg-cloud p-1 shadow-lg ring-1 ring-ink-700">
+                      <p className="px-2 py-1 text-[10px] text-ink-400">切换进度</p>
+                      {SPACE_PROGRESS_VALUES.map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-xs transition-colors ${
+                            value === space.progress
+                              ? 'bg-sky/10 text-sky-deep'
+                              : 'text-ink-200 hover:bg-paper'
+                          }`}
+                          onClick={() => {
+                            setProgressMenuOpen(false);
+                            void changeProgress(value);
+                          }}
+                        >
+                          {PROGRESS_LABEL[value]}
+                          {value === space.progress && <span>✓</span>}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
               {canManage && (
                 <button
                   type="button"
@@ -634,14 +661,6 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                   编辑
                 </button>
               )}
-              <button
-                type="button"
-                className="btn-ghost px-2 py-1 text-xs"
-                disabled={togglingStatus}
-                onClick={() => void toggleSpaceStatus()}
-              >
-                {space.status === 'finished' ? '重新开启' : '标记完结'}
-              </button>
             </div>
             {/* 标签 chips：sky 系小徽标，编辑弹窗里可增删 */}
             {parseSpaceTags(space.tags).length > 0 && (
@@ -658,7 +677,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
             )}
             <p className="mt-1 text-sm text-ink-400">{space.description || '还没写简介'}</p>
             <p className="mt-1.5 text-xs text-ink-400">
-              {items.length} 张图片 · {totalAnnotations} 条标注 · 🌐 公共文件夹（人人可编辑）
+              {items.length} 张图片 · {totalAnnotations} 条标注 · 当前状态已维持{' '}
+              {formatProgressAge(space.progress_at)} · 🌐 公共文件夹（人人可编辑）
             </p>
           </div>
         )}

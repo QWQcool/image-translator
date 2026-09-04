@@ -4,6 +4,7 @@ import { db } from '@/lib/db';
 import { DEFAULT_LP_STYLES } from '@/lib/labelplus';
 import { logOp } from '@/lib/oplog';
 import { addMember } from '@/lib/permissions';
+import { isSpaceProgress } from '@/lib/progress';
 import { cleanTagsInput } from '@/lib/tags';
 import type { Space, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
 
@@ -38,8 +39,8 @@ const LIST_SQL = `
     FROM spaces s
     LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = ?
    WHERE (m.user_id IS NOT NULL OR s.owner_id = ? OR s.visibility = 'public') __SEARCH__ __FILTER__
-   -- 完结空间只做视觉区分不锁编辑，列表里排到同组末尾（灰化的徽标足够辨识）
-   ORDER BY (m.user_id IS NULL), (s.status = 'finished'), s.updated_at DESC, s.id DESC
+   -- 已嵌字的空间只做视觉区分不锁编辑，列表里排到同组末尾（实心 emerald 徽标足够辨识）
+   ORDER BY (m.user_id IS NULL), (s.progress = 'typeset_done'), s.updated_at DESC, s.id DESC
 `;
 
 export async function GET(request: Request) {
@@ -53,15 +54,54 @@ export async function GET(request: Request) {
     : '';
   const searchArgs = keyword ? [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`] : [];
 
-  // 完结状态筛选：all=全部（默认，完结的排后）；active / finished 按状态过滤
+  // 完结状态筛选（遗留参数，阶段 15 后 UI 不再发送；status 列废弃仅保留兼容）
   const filterRaw = new URL(request.url).searchParams.get('filter');
   const filter = filterRaw === 'active' || filterRaw === 'finished' ? filterRaw : 'all';
   const filterClause = filter === 'all' ? '' : 'AND s.status = ?';
   const filterArgs = filter === 'all' ? [] : [filter];
 
+  // 进度筛选：逗号多值并集（s.progress IN (...)）；非法值直接忽略
+  const progressRaw = new URL(request.url).searchParams.get('progress') ?? '';
+  const progressValues = progressRaw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(isSpaceProgress);
+  const progressClause = progressValues.length
+    ? `AND s.progress IN (${progressValues.map(() => '?').join(',')})`
+    : '';
+
+  // 标签筛选：逗号多值，任一命中即命中（json_each 展开 JSON 数组做精确等值匹配）
+  const tagRaw = new URL(request.url).searchParams.get('tag') ?? '';
+  const tagValues = tagRaw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+  const tagClause = tagValues.length
+    ? `AND EXISTS (SELECT 1 FROM json_each(s.tags) je WHERE je.value IN (${tagValues
+        .map(() => '?')
+        .join(',')}))`
+    : '';
+
+  // 保存时间筛选：3d/7d/30d 相对窗口，或 ISO 日期（该日 00:00 之前保存的语义）
+  const savedRaw = (new URL(request.url).searchParams.get('savedBefore') ?? '').trim();
+  let savedClause = '';
+  let savedArgs: string[] = [];
+  if (savedRaw === '3d' || savedRaw === '7d' || savedRaw === '30d') {
+    savedClause = `AND s.updated_at < datetime('now', '-${parseInt(savedRaw, 10)} days')`;
+  } else if (/^\d{4}-\d{2}-\d{2}$/.test(savedRaw)) {
+    savedClause = 'AND s.updated_at < ?';
+    savedArgs = [`${savedRaw} 00:00:00`];
+  }
+
   const rows = db
-    .prepare(LIST_SQL.replace('__SEARCH__', searchClause).replace('__FILTER__', filterClause))
-    .all(user.id, user.id, user.id, ...searchArgs, ...filterArgs) as Array<
+    .prepare(
+      LIST_SQL.replace(
+        '__SEARCH__',
+        searchClause + progressClause + tagClause + savedClause,
+      ).replace('__FILTER__', filterClause),
+    )
+    .all(user.id, user.id, user.id, ...searchArgs, ...progressValues, ...tagValues, ...savedArgs, ...filterArgs) as Array<
     Omit<SpaceWithCounts, 'can_edit' | 'is_owner'>
   >;
 
@@ -72,7 +112,14 @@ export async function GET(request: Request) {
     is_owner: row.role === 'owner',
   }));
 
-  return NextResponse.json({ spaces });
+  // 全库出现过的标签（预设之外的动态候选），供列表页筛选 chips 使用
+  const distinctTags = (
+    db
+      .prepare(`SELECT DISTINCT je.value AS tag FROM spaces s, json_each(s.tags) je ORDER BY tag`)
+      .all() as Array<{ tag: string }>
+  ).map((row) => row.tag);
+
+  return NextResponse.json({ spaces, distinctTags });
 }
 
 export async function POST(request: Request) {
@@ -136,7 +183,7 @@ export async function POST(request: Request) {
   const createSpace = db.transaction(() => {
     const result = db
       .prepare(
-        'INSERT INTO spaces (owner_id, name, description, visibility, space_no, tags, lp_styles) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO spaces (owner_id, name, description, visibility, space_no, tags, lp_styles, progress, progress_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
       .run(
         user.id,
@@ -146,6 +193,10 @@ export async function POST(request: Request) {
         nextSpaceNo(),
         JSON.stringify(tags),
         JSON.stringify(DEFAULT_LP_STYLES),
+        'untranslated',
+        // 迁移库上 progress_at 为可空列且无默认值，建空间必须显式写入
+        // datetime('now') 与服务端时区/格式保持一致
+        new Date().toISOString().slice(0, 19).replace('T', ' '),
       );
     const spaceId = Number(result.lastInsertRowid);
     addMember(spaceId, user.id, 'owner');
