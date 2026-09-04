@@ -1081,6 +1081,59 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       // 竖排逐格布局启用条件：有字距，或开启纵中横排且文本含半角字符段
       const cellVertical =
         layer.vertical && (spacingPx !== 0 || (useTcy && hasHalfWidthChars(layer.text)));
+      const hLayout = !layer.vertical ? layoutHorizontal(layer) : null;
+
+      /**
+       * transform 组合顺序（与 DOM 侧一致）：translate(anchor) → rotate(R) → scale(S)
+       * 即：先按对齐锚点定位（originX/originY + 各分支的锚点语义），再绕「文本块包围盒中心」
+       * 旋转，最后缩放（缩放不改变中心）。DOM 侧 transform = translate(anchor) rotate() scale()，
+       * transform-origin 默认 = 包围盒中心，与这里的 rotate/scale 中心一一对应。
+       * 无旋转无缩放时坐标保持绝对值（ox/oy = originX/originY），老数据渲染路径零变化。
+       */
+      const rot = layer.rotation ?? 0;
+      const scl = layer.scale ?? 1;
+      const applyTransform = rot !== 0 || scl !== 1;
+      // 包围盒中心：竖排列组上下左右均居中于 (originX, originY)；横排按对齐锚点推算（左=右缘、右=左缘贴锚点）
+      let cx = originX;
+      let cy = originY;
+      if (!layer.vertical) {
+        const blockW = hLayout
+          ? Math.max(
+              0,
+              ...hLayout.map(
+                (cells) =>
+                  cells.reduce((sum, c) => sum + c.w, 0) + spacingPx * Math.max(0, cells.length - 1),
+              ),
+            )
+          : Math.max(0, ...lines.map((line) => ctx.measureText(line).width));
+        if (layer.align === 'left') cx = originX + blockW / 2;
+        else if (layer.align === 'right') cx = originX - blockW / 2;
+      }
+      if (applyTransform) {
+        ctx.translate(cx, cy);
+        if (rot !== 0) ctx.rotate((rot * Math.PI) / 180);
+        if (scl !== 1) ctx.scale(scl, scl); // 几何缩放：描边/阴影随缩放视觉变粗属预期（PS 同款，非破坏不改 fontSize）
+      }
+      const ox = applyTransform ? originX - cx : originX;
+      const oy = applyTransform ? originY - cy : originY;
+
+      // 渐变填充：fillGradient 非空时忽略纯色 color；方向/跨度用「整个文本块」包围盒（与 DOM 容器盒同口径）：
+      // 横排 = 垂直方向上→下（块高 = 行数×字号×行距）；竖排 = 水平方向左→右（块宽 = 列组宽度）
+      const grad = layer.fillGradient ?? null;
+      if (grad) {
+        let g: CanvasGradient;
+        if (layer.vertical) {
+          const columnGap = layer.fontSize * 0.35;
+          const blockW = (lines.length - 1) * (layer.fontSize + columnGap) + layer.fontSize;
+          g = ctx.createLinearGradient(ox - blockW / 2, oy, ox + blockW / 2, oy);
+        } else {
+          const blockH = lines.length * layer.fontSize * layer.lineHeight;
+          g = ctx.createLinearGradient(ox, oy - blockH / 2, ox, oy + blockH / 2);
+        }
+        g.addColorStop(0, grad.from);
+        g.addColorStop(1, grad.to);
+        ctx.fillStyle = g;
+      }
       if (cellVertical) {
         // 竖排逐格布局：每个字符/纵中横段占固定字格，字距 = 字格间距增量。
         // DOM 预览用同一套几何（列宽/字格高/段占格数），保证预览与导出一致。
@@ -1103,9 +1156,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           const advances = runs.map((run) =>
             run.kind === 'char' || run.small ? cellH : tcyCells(run.text) * cellH,
           );
-          const colX = originX - totalWidth / 2 + col * (layer.fontSize + columnGap);
+          const colX = ox - totalWidth / 2 + col * (layer.fontSize + columnGap);
           const total = advances.reduce((sum, a) => sum + a, 0);
-          let cursor = originY - total / 2;
+          let cursor = oy - total / 2;
           runs.forEach((run, ri) => {
             const cy = cursor + advances[ri] / 2;
             if (run.kind === 'char') {
@@ -1126,28 +1179,27 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         const columnGap = layer.fontSize * 0.35;
         const totalWidth = (lines.length - 1) * (layer.fontSize + columnGap);
         lines.forEach((line, col) => {
-          const colX = originX - totalWidth / 2 + col * (layer.fontSize + columnGap);
+          const colX = ox - totalWidth / 2 + col * (layer.fontSize + columnGap);
           const chars = Array.from(line);
           chars.forEach((ch, i) => {
-            const y = originY + (i - (chars.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+            const y = oy + (i - (chars.length - 1) / 2) * layer.fontSize * layer.lineHeight;
             drawOne(ch, colX, y);
           });
         });
       } else {
-        const hLayout = layoutHorizontal(layer);
         if (hLayout) {
           // 限宽自动换行 + 字距：逐行逐字符按测量宽度绘制（与 DOM 预览同一套行结果）
           ctx.textAlign = 'left';
           hLayout.forEach((cells, i) => {
-            const y = originY + (i - (hLayout.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+            const y = oy + (i - (hLayout.length - 1) / 2) * layer.fontSize * layer.lineHeight;
             const lineWidth =
               cells.reduce((sum, c) => sum + c.w, 0) + spacingPx * Math.max(0, cells.length - 1);
             let x =
               layer.align === 'left'
-                ? originX
+                ? ox
                 : layer.align === 'right'
-                  ? originX - lineWidth
-                  : originX - lineWidth / 2;
+                  ? ox - lineWidth
+                  : ox - lineWidth / 2;
             cells.forEach((cell) => {
               drawOne(cell.ch, x, y);
               x += cell.w + spacingPx;
@@ -1157,8 +1209,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           // 旧横排路径（不限宽且无字距）：保持原样，老数据导出不变
           ctx.textAlign = layer.align === 'left' ? 'left' : layer.align === 'right' ? 'right' : 'center';
           lines.forEach((line, i) => {
-            const y = originY + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
-            drawOne(line, originX, y);
+            const y = oy + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+            drawOne(line, ox, y);
           });
         }
       }
@@ -1558,10 +1610,25 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                     }px ${(layer.shadowBlurRatio ?? 0.15) * layer.fontSize}px ${layer.shadowColor}`
                   : undefined;
                 const selectedCls = selectedText === layer.id ? 'outline outline-2 outline-halo' : '';
+                // 渐变填充：非空时忽略纯色 color（color 透明 + background-clip:text），方向与导出同口径：
+                // 横排 = 线性 to bottom（跨文本块高），竖排 = to right（跨文本块宽），描边/阴影照常叠加
+                const grad = layer.fillGradient ?? null;
+                const gradCss = grad
+                  ? layer.vertical
+                    ? `linear-gradient(to right, ${grad.from}, ${grad.to})`
+                    : `linear-gradient(to bottom, ${grad.from}, ${grad.to})`
+                  : undefined;
                 const commonStyle = {
                   left: `${layer.x * 100}%`,
                   top: `${layer.y * 100}%`,
-                  color: layer.color,
+                  color: grad ? ('transparent' as const) : layer.color,
+                  ...(grad
+                    ? {
+                        backgroundImage: gradCss,
+                        WebkitBackgroundClip: 'text' as const,
+                        WebkitTextFillColor: 'transparent' as const,
+                      }
+                    : {}),
                   fontSize: layer.fontSize,
                   fontWeight: layer.fontWeight,
                   WebkitTextStroke: strokeCss,
@@ -1571,6 +1638,16 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   pointerEvents: tool === 'text' ? ('auto' as const) : ('none' as const),
                   cursor: tool === 'text' ? ('move' as const) : undefined,
                 };
+                /**
+                 * transform 组合顺序（与 canvas 导出一致）：translate(anchor) → rotate(R) → scale(S)
+                 * 先按对齐锚点定位，再绕包围盒中心旋转（transform-origin 默认 = 中心），最后缩放。
+                 * 选中描边框在容器上，自动跟随旋转。无旋转/缩放时 suffix 为空串，老数据行为不变。
+                 */
+                const rot = layer.rotation ?? 0;
+                const scl = layer.scale ?? 1;
+                const transformSuffix = `${rot !== 0 ? ` rotate(${rot}deg)` : ''}${
+                  scl !== 1 ? ` scale(${scl})` : ''
+                }`;
                 const onLayerPointerDown = (event: React.PointerEvent) => {
                   if (tool !== 'text') return;
                   event.stopPropagation();
@@ -1603,7 +1680,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                       className={`absolute ${selectedCls}`}
                       style={{
                         ...commonStyle,
-                        transform: `translate(${anchorX}, -50%)`,
+                        transform: `translate(${anchorX}, -50%)${transformSuffix}`,
                         lineHeight: layer.lineHeight,
                         display: layer.visible === false ? 'none' : 'flex',
                         flexDirection: 'column',
@@ -1662,8 +1739,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                     return (
                       <div
                         key={layer.id}
-                        className={`absolute -translate-x-1/2 -translate-y-1/2 ${selectedCls}`}
-                        style={commonStyle}
+                        className={`absolute ${selectedCls}`}
+                        style={{ ...commonStyle, transform: `translate(-50%, -50%)${transformSuffix}` }}
                         onPointerDown={onLayerPointerDown}
                       >
                         <div style={{ position: 'relative', width: containerW, height: containerH }}>
@@ -1724,11 +1801,12 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 return (
                   <div
                     key={layer.id}
-                    className={`absolute max-w-[40%] -translate-x-1/2 -translate-y-1/2 whitespace-pre-wrap ${
+                    className={`absolute max-w-[40%] whitespace-pre-wrap ${
                       layer.vertical ? 'text-start' : 'text-center'
                     } ${selectedCls}`}
                     style={{
                       ...commonStyle,
+                      transform: `translate(-50%, -50%)${transformSuffix}`,
                       lineHeight: layer.lineHeight,
                       writingMode: layer.vertical ? 'vertical-rl' : 'horizontal-tb',
                     }}
@@ -1950,6 +2028,117 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   className="mt-1 w-full accent-sky"
                 />
               </label>
+
+              {/* 填充：纯色（color）与渐变（fillGradient）互斥，开启渐变后忽略纯色 */}
+              <div className="space-y-1 rounded-md border border-ink-700 p-2 text-[11px] text-ink-500">
+                <span className="flex items-center justify-between">
+                  <span>填充</span>
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={selected.fillGradient != null}
+                      onChange={(e) =>
+                        patchLayer(selected.id, {
+                          fillGradient: e.target.checked
+                            ? { from: selected.color || '#243044', to: '#FFFFFF' }
+                            : null,
+                        })
+                      }
+                    />
+                    渐变
+                  </label>
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-8 shrink-0">纯色</span>
+                  <input
+                    type="color"
+                    className="h-6 w-8 cursor-pointer rounded border border-ink-700 bg-transparent"
+                    value={selected.color}
+                    disabled={selected.fillGradient != null}
+                    title={selected.fillGradient != null ? '已启用渐变，纯色被忽略' : '纯色填充'}
+                    onChange={(e) => patchLayer(selected.id, { color: e.target.value }, true)}
+                  />
+                  {selected.fillGradient != null && (
+                    <>
+                      <input
+                        type="color"
+                        className="h-6 w-8 cursor-pointer rounded border border-ink-700 bg-transparent"
+                        value={selected.fillGradient.from}
+                        title="渐变起点色"
+                        onChange={(e) =>
+                          patchLayer(
+                            selected.id,
+                            { fillGradient: { ...selected.fillGradient!, from: e.target.value } },
+                            true,
+                          )
+                        }
+                      />
+                      <span className="shrink-0">→</span>
+                      <input
+                        type="color"
+                        className="h-6 w-8 cursor-pointer rounded border border-ink-700 bg-transparent"
+                        value={selected.fillGradient.to}
+                        title="渐变终点色"
+                        onChange={(e) =>
+                          patchLayer(
+                            selected.id,
+                            { fillGradient: { ...selected.fillGradient!, to: e.target.value } },
+                            true,
+                          )
+                        }
+                      />
+                    </>
+                  )}
+                </span>
+              </div>
+
+              {/* 旋转：任意角度，绕文本块包围盒中心（滑杆连续合并，重置离散入栈） */}
+              <div className="text-[11px] text-ink-500">
+                <span className="flex items-center justify-between">
+                  <span>旋转 {Math.round(selected.rotation ?? 0)}°</span>
+                  <button
+                    type="button"
+                    className="btn-ghost px-1.5 py-0.5 text-[10px]"
+                    disabled={(selected.rotation ?? 0) === 0}
+                    onClick={() => patchLayer(selected.id, { rotation: 0 })}
+                  >
+                    0°
+                  </button>
+                </span>
+                <input
+                  type="range"
+                  min={-180}
+                  max={180}
+                  step={1}
+                  value={selected.rotation ?? 0}
+                  onChange={(e) => patchLayer(selected.id, { rotation: Number(e.target.value) }, true)}
+                  className="mt-1 w-full accent-sky"
+                />
+              </div>
+
+              {/* 缩放：非破坏几何缩放（不改 fontSize）；描边/阴影随缩放视觉变粗属预期（PS 同款） */}
+              <div className="text-[11px] text-ink-500">
+                <span className="flex items-center justify-between">
+                  <span>缩放 {Math.round((selected.scale ?? 1) * 100)}%</span>
+                  <button
+                    type="button"
+                    className="btn-ghost px-1.5 py-0.5 text-[10px]"
+                    disabled={(selected.scale ?? 1) === 1}
+                    onClick={() => patchLayer(selected.id, { scale: 1 })}
+                  >
+                    100%
+                  </button>
+                </span>
+                <input
+                  type="range"
+                  min={0.2}
+                  max={4}
+                  step={0.05}
+                  value={selected.scale ?? 1}
+                  onChange={(e) => patchLayer(selected.id, { scale: Number(e.target.value) }, true)}
+                  className="mt-1 w-full accent-sky"
+                />
+              </div>
 
               {/* 纵中横排：竖排半角字符段转正（仅竖排层显示） */}
               {selected.vertical && (

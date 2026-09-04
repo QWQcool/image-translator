@@ -29,6 +29,15 @@ function cleanFontFamily(value: unknown): string | undefined {
   return /^[-\w\s.,"'\u3000-\u30ff\u4e00-\u9fff]+$/.test(text) ? text : undefined;
 }
 
+/** 渐变填充清洗：from/to 均为合法颜色串才保留对象，否则回 null（= 纯色 color） */
+function cleanFillGradient(value: unknown): { from: string; to: string } | null {
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as { from?: unknown; to?: unknown };
+  const from = cleanEffectColor(obj.from);
+  const to = cleanEffectColor(obj.to);
+  return from && to ? { from, to } : null;
+}
+
 /**
  * 清洗文字层特效/排版字段（PUT 保存与客户端加载共用，保持协议形状不变）：
  * 颜色非法回 null（= 无特效），数字 clamp 到合法区间，缺省值与字段注释一致。
@@ -56,6 +65,9 @@ export function normalizeTextLayers(layers: unknown): TypesetTextLayer[] {
       letterSpacing: clampRatio(layer.letterSpacing, -0.2, 0.5, 0),
       fontFamily: cleanFontFamily(layer.fontFamily),
       tcyEnabled: layer.tcyEnabled === undefined ? true : Boolean(layer.tcyEnabled),
+      rotation: clampRatio(layer.rotation, -180, 180, 0),
+      scale: clampRatio(layer.scale, 0.2, 4, 1),
+      fillGradient: cleanFillGradient(layer.fillGradient),
     } as TypesetTextLayer;
   });
 }

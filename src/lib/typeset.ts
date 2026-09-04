@@ -40,6 +40,13 @@ export type TypesetTextLayer = {
   fontFamily?: string;
   /** 纵中横排：竖排半角字符段转正，缺省 true（仅竖排层生效，横排忽略） */
   tcyEnabled?: boolean;
+  // ---- 拟声词变换三件套（逐层可选，老数据缺省 = 无变换，零迁移）----
+  /** 任意角度旋转：角度制 -180~180，缺省 0；绕「文本块包围盒中心」旋转（DOM/canvas 同口径） */
+  rotation?: number;
+  /** 整体缩放：0.2~4，缺省 1；非破坏性（不改 fontSize）。几何缩放，描边/阴影随缩放视觉变粗属预期（PS 同款） */
+  scale?: number;
+  /** 渐变填充：from→to，缺省 null = 纯色 color。横排纵向（上→下）、竖排横向（左→右），跨整个文本块包围盒 */
+  fillGradient?: { from: string; to: string } | null;
 };
 
 export type TypesetMeta = {
