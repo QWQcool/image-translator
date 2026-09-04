@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 type ProviderView = {
   id: number;
@@ -59,6 +59,90 @@ const DETECTION_TEMPLATES: Array<{ id: string; label: string; baseUrl: string; h
   },
 ];
 
+/** Provider 快速模板：选中即自动填名称/BaseURL/对话模型/视觉模型（apiKey 留空），备选模型只放在 hint 文案里 */
+const PROVIDER_TEMPLATES: Array<{
+  id: string;
+  label: string;
+  name: string;
+  baseUrl: string;
+  chatModel: string;
+  ocrModel: string;
+  hint: string;
+}> = [
+  {
+    id: 'ollama-14b',
+    label: '[本地-高阶档 12~16G显存] Ollama (Qwen3-14B)',
+    name: '本地 Ollama (14B 高阶)',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    chatModel: 'qwen3:14b',
+    ocrModel: 'qwen3-vl:8b',
+    hint: '对话备选 qwen2.5:14b，视觉备选 qwen2.5-vl:7b；Key 随便填（如 ollama）即可，可先在项目根运行 setup-local-ai.bat 一键检测硬件并拉模型。',
+  },
+  {
+    id: 'ollama-8b',
+    label: '[本地-主流档 6~8G显存] Ollama (Qwen3-8B)',
+    name: '本地 Ollama (8B 主流)',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    chatModel: 'qwen3:8b',
+    ocrModel: 'qwen3-vl:8b',
+    hint: '对话备选 qwen2.5:7b，视觉备选 qwen2.5-vl:7b；Key 随便填（如 ollama）即可。',
+  },
+  {
+    id: 'ollama-3b',
+    label: '[本地-轻量档 CPU/核显] Ollama (Qwen3-3B)',
+    name: '本地 Ollama (3B 轻量)',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    chatModel: 'qwen3:3b',
+    ocrModel: '',
+    hint: '轻量档不拉视觉模型（视觉识别走云端服务或纯算法出框），仅做对话翻译；Key 随便填（如 ollama）即可。',
+  },
+  {
+    id: 'siliconflow',
+    label: '[国内免费/极速] 硅基流动 SiliconFlow',
+    name: '硅基流动 (免梯子免费)',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    chatModel: 'Qwen/Qwen2.5-7B-Instruct',
+    ocrModel: 'Qwen/Qwen2.5-VL-7B-Instruct',
+    hint: '对话模型为官方长期免费档（备选 deepseek-ai/DeepSeek-V3）；到 cloud.siliconflow.cn 注册即送额度，取 Key 后填入。',
+  },
+  {
+    id: 'groq',
+    label: '[海外极速免费] Groq Cloud',
+    name: 'Groq (极速免费)',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    chatModel: 'llama-3.3-70b-versatile',
+    ocrModel: '',
+    hint: '对话备选 qwen-2.5-32b；免费额度+推理极快，但没有视觉模型，OCR 需另配别家视觉服务或走本地 sidecar；到 console.groq.com 取 Key。',
+  },
+  {
+    id: 'openrouter',
+    label: '[多模型免Token] OpenRouter Free',
+    name: 'OpenRouter (免费档)',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    chatModel: 'meta-llama/llama-3.3-70b-instruct:free',
+    ocrModel: 'google/gemini-2.0-flash-exp:free',
+    hint: '带 :free 后缀的模型免 Token（有速率限制）；到 openrouter.ai 注册取 Key。',
+  },
+  {
+    id: 'deepseek',
+    label: '[性价比顶流] DeepSeek 官方',
+    name: 'DeepSeek 官方',
+    baseUrl: 'https://api.deepseek.com/v1',
+    chatModel: 'deepseek-chat',
+    ocrModel: 'deepseek-v4-flash-vision-exp',
+    hint: '便宜且质量稳定；到 platform.deepseek.com 注册充值后取 Key。',
+  },
+  {
+    id: 'custom',
+    label: '[自定义] 不套模板',
+    name: '',
+    baseUrl: '',
+    chatModel: '',
+    ocrModel: '',
+    hint: '不覆盖当前输入，自行填写全部字段。',
+  },
+];
+
 /** 6a 多 Provider：列表管理（添加/编辑/删除/设默认），每人的配置互相不可见 */
 export default function AiSettingsClient() {
   const [tab, setTab] = useState<'config' | 'docs'>('config');
@@ -70,6 +154,8 @@ export default function AiSettingsClient() {
   /** 编辑中的 Provider id；'new' = 新增表单；null = 列表视图 */
   const [editing, setEditing] = useState<number | 'new' | null>(null);
   const [form, setForm] = useState<ProviderForm>(EMPTY_FORM);
+  const [providerTemplate, setProviderTemplate] = useState('custom');
+  const apiKeyRef = useRef<HTMLInputElement>(null);
   const [saving, setSaving] = useState(false);
   // 文本块检测服务（每用户独立，可选）
   const [detForm, setDetForm] = useState(EMPTY_DETECTION_FORM);
@@ -120,6 +206,7 @@ export default function AiSettingsClient() {
 
   function openNew() {
     setForm(EMPTY_FORM);
+    setProviderTemplate('custom');
     setEditing('new');
   }
 
@@ -132,6 +219,7 @@ export default function AiSettingsClient() {
       chatModel: provider.chatModel,
       imageModel: provider.imageModel,
     });
+    setProviderTemplate('custom');
     setEditing(provider.id);
   }
 
@@ -327,6 +415,36 @@ export default function AiSettingsClient() {
           <div className="card space-y-3">
             <h3 className="text-sm font-medium text-ink-100">{formTitle}</h3>
             <label className="block text-sm">
+              <span className="label">快速模板</span>
+              <select
+                className="input mt-1"
+                value={providerTemplate}
+                onChange={(e) => {
+                  setProviderTemplate(e.target.value);
+                  const tpl = PROVIDER_TEMPLATES.find((t) => t.id === e.target.value);
+                  if (tpl && tpl.id !== 'custom') {
+                    setForm((f) => ({
+                      ...f,
+                      name: tpl.name,
+                      baseUrl: tpl.baseUrl,
+                      chatModel: tpl.chatModel,
+                      ocrModel: tpl.ocrModel,
+                    }));
+                    apiKeyRef.current?.focus();
+                  }
+                }}
+              >
+                {PROVIDER_TEMPLATES.map((tpl) => (
+                  <option key={tpl.id} value={tpl.id}>
+                    {tpl.label}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-[11px] text-ink-500">
+                {PROVIDER_TEMPLATES.find((t) => t.id === providerTemplate)?.hint}
+              </span>
+            </label>
+            <label className="block text-sm">
               <span className="label">名称</span>
               <input
                 className="input mt-1"
@@ -349,6 +467,7 @@ export default function AiSettingsClient() {
                 API Key {editing !== 'new' && '（留空保持不变，输入 clear 清除）'}
               </span>
               <input
+                ref={apiKeyRef}
                 className="input mt-1"
                 type="password"
                 placeholder={editing === 'new' ? 'sk-…' : '留空则保持不变'}
@@ -671,6 +790,87 @@ function AiDocs() {
             Ollama / vLLM 暴露的 OpenAI 兼容端点（如 http://127.0.0.1:11434/v1），Key 随便填。
           </li>
         </ul>
+      </section>
+
+      <section className="card space-y-2">
+        <h2 className="font-medium text-ink-100">本地大模型配置与硬件梯度指南</h2>
+        <p className="text-ink-400">
+          显存决定本地能跑多大的模型，按下面梯度选档即可（以 Ollama + Qwen3 系列为例）：
+        </p>
+        <div className="overflow-hidden rounded-md border border-ink-700 text-xs">
+          <table className="w-full text-left">
+            <thead className="bg-ink-800 text-ink-300">
+              <tr>
+                <th className="px-3 py-1.5 font-medium">显存（VRAM）</th>
+                <th className="px-3 py-1.5 font-medium">推荐对话模型</th>
+                <th className="px-3 py-1.5 font-medium">档位</th>
+              </tr>
+            </thead>
+            <tbody className="text-ink-400">
+              <tr className="border-t border-ink-700">
+                <td className="px-3 py-1.5">&lt; 6 GB（无独显 / 核显）</td>
+                <td className="px-3 py-1.5">qwen3:3b</td>
+                <td className="px-3 py-1.5">轻量档</td>
+              </tr>
+              <tr className="border-t border-ink-700">
+                <td className="px-3 py-1.5">6 ~ 10 GB（主流 N 卡）</td>
+                <td className="px-3 py-1.5">qwen3:8b</td>
+                <td className="px-3 py-1.5">主流档</td>
+              </tr>
+              <tr className="border-t border-ink-700">
+                <td className="px-3 py-1.5">12 ~ 16 GB</td>
+                <td className="px-3 py-1.5">qwen3:14b</td>
+                <td className="px-3 py-1.5">高阶档</td>
+              </tr>
+              <tr className="border-t border-ink-700">
+                <td className="px-3 py-1.5">≥ 24 GB</td>
+                <td className="px-3 py-1.5">qwen3:32b</td>
+                <td className="px-3 py-1.5">旗舰档</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="text-xs text-ink-500">
+          视觉模型（OCR 出框用）推荐 <code>qwen3-vl:8b</code>，约需 6~8G 显存，建议 8B / 14B
+          档搭配使用；3B 轻量档不拉视觉模型，识别走云端服务或纯算法出框。
+          显存介于两档之间时按就近原则选低一档更稳。
+        </p>
+        <p className="text-ink-400">
+          提示：项目根目录提供了 <code>setup-local-ai.bat</code>，双击即可自动检测显卡显存、
+          匹配推荐档位并拉取对应模型（还会设置 <code>OLLAMA_ORIGINS</code> 跨域变量）。
+        </p>
+        <ul className="list-disc space-y-1.5 pl-5 text-ink-400">
+          <li>100% 私密：图片与文字不出本机，不上传任何服务器</li>
+          <li>断网可用：装好模型后离线也能跑全流程</li>
+          <li>0 费用：无 Token、无限流，随便折腾</li>
+        </ul>
+      </section>
+
+      <section className="card space-y-2">
+        <h2 className="font-medium text-ink-100">零成本 / 免费商业 API 获取通道</h2>
+        <ul className="list-disc space-y-1.5 pl-5 text-ink-400">
+          <li>
+            <strong className="text-ink-200">硅基流动 SiliconFlow</strong>（cloud.siliconflow.cn）：
+            免梯子、国内直连，注册即送额度，Qwen 等开源模型有长期免费档。
+            注册后在「API 密钥」页面新建 Key，Base URL 填 <code>https://api.siliconflow.cn/v1</code>。
+          </li>
+          <li>
+            <strong className="text-ink-200">Groq Cloud</strong>（console.groq.com）：
+            注册即有免费额度，推理速度极快（海外网络）。控制台「API Keys」创建 Key，
+            Base URL 填 <code>https://api.groq.com/openai/v1</code>。
+          </li>
+          <li>
+            <strong className="text-ink-200">OpenRouter</strong>（openrouter.ai）：
+            聚合多厂商，带 <code>:free</code> 后缀的模型免 Token 直接用。注册后在「Keys」页面创建，
+            Base URL 填 <code>https://openrouter.ai/api/v1</code>。
+          </li>
+        </ul>
+        <p className="text-ink-400">
+          为什么推荐免费商业 API 而不是网页爬虫式翻译：
+          结构化接口返回稳定可控、支持注入 system 提示词与术语表、
+          长篇上下文翻译前后连贯、稳定不易封号——网页方案这几样全都做不好。
+          本站的「快速模板」下拉可直接一键填入这几家的配置。
+        </p>
       </section>
 
       <section className="card space-y-2">
