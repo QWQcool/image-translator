@@ -14,6 +14,14 @@ export function middleware(request: NextRequest) {
     return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
+  // 试用模式（TRIAL_MODE=1，仅限本机体验）：登录墙完全放行，所有页面免登录直达。
+  // 身份兜底在 server 侧 getCurrentUser()（src/lib/auth.ts → src/lib/trial.ts）。
+  // 注意：middleware 运行于 Edge runtime，此环境变量在构建期内联——
+  // 体验版构建（.github/workflows/release.yml）会在 npm run build 前设置 TRIAL_MODE=1。
+  if (process.env.TRIAL_MODE === '1') {
+    return NextResponse.next({ request: { headers: requestHeaders } });
+  }
+
   const session = request.cookies.get(SESSION_COOKIE)?.value;
   if (!session) {
     const loginUrl = request.nextUrl.clone();

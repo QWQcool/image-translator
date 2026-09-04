@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { SignJWT, jwtVerify } from 'jose';
 import { db } from './db';
+import { ensureTrialUser, isTrialMode } from './trial';
 import type { User } from './types';
 
 const SESSION_COOKIE = 'tximg_session';
@@ -57,6 +58,15 @@ export async function destroySession(): Promise<void> {
 }
 
 export async function getCurrentUser(): Promise<User | null> {
+  const user = await getSessionUser();
+  // 试用模式（TRIAL_MODE=1，仅限本机体验）：任何请求无有效会话时自动视为内置体验用户。
+  // 正常部署不设置 TRIAL_MODE，本分支永远不触发，行为零变化。
+  if (!user && isTrialMode()) return ensureTrialUser();
+  return user;
+}
+
+/** 原始会话解析：JWT 验签 + 查库。试用模式的回退逻辑包在其外层（见 getCurrentUser） */
+async function getSessionUser(): Promise<User | null> {
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!token) return null;
 

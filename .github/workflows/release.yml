@@ -1,0 +1,76 @@
+# 体验版便携包构建与发布工作流。
+# 触发：push 形如 v1.2.3 的 tag（由维护者手动打 tag 推送，本仓库不自动发版）。
+# 产物：tuanyi-space-trial-win64.zip（解压双击 start.bat 即用的 Windows 便携包），
+#       自动创建 GitHub Release 并挂载 zip 附件。
+#
+# 关键决策（与维护者评审相关）：
+# 1. 选「普通 build + 全量 node_modules + 内置 Node 运行时」而非 output:'standalone'——
+#    better-sqlite3 / sharp 是 serverExternalPackages 原生模块（.node 文件），
+#    standalone 对其 trace 在 Windows 上风险不可控且 CI 内无法验证；
+#    全量方案体积偏大（zip 约 100~150MB）但走标准 `next start` 链路，可靠性最高。
+# 2. TRIAL_MODE=1 必须在 `npm run build` 之前设置：middleware 运行于 Edge runtime，
+#    其环境变量在构建期内联，运行时设置对 middleware 无效（server 侧代码不受此限制，
+#    start.bat 仍会再设一遍作为运行期保险）。
+# 3. 内置 Node 与 runner 上构建用的 Node 版本一致（动态读取 process.version），
+#    保证 better-sqlite3 预编译产物 ABI 兼容。
+
+name: 构建体验版便携包
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 创建 Release 需要写权限
+permissions:
+  contents: write
+
+jobs:
+  build-portable:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 标记试用模式（构建期变量，middleware 内联依赖此步）
+        run: '"TRIAL_MODE=1" | Add-Content -Path $env:GITHUB_ENV'
+        shell: pwsh
+
+      - name: 安装依赖
+        run: npm ci
+        shell: pwsh
+
+      - name: 构建
+        run: npm run build
+        shell: pwsh
+
+      - name: 组装便携目录并压缩
+        run: ./scripts/package-portable.ps1
+        shell: pwsh
+
+      - name: 创建 Release 并上传体验包
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 图译空间 体验版 ${{ github.ref_name }}
+          body: |
+            免安装体验版（Windows 64 位）。
+
+            ## 使用方法
+            1. 下载下方 `tuanyi-space-trial-win64.zip`
+            2. 解压到任意**独立文件夹**（数据会存在该目录的 data/ 里）
+            3. 双击 `start.bat`，浏览器会自动打开 http://localhost:3000
+
+            ## 注意事项
+            - 本包为**试用模式**：免登录、数据仅保存在本机 data/ 目录，
+              **请勿将此服务暴露到公网**
+            - Windows 首次运行可能弹出 SmartScreen 提示：点「更多信息」→「仍要运行」
+            - 升级方式：解压新版本覆盖到同一目录，data/ 目录（你的数据）会保留
+            - 正式多人部署请参考仓库 README 的「部署到公网」章节
+          files: tuanyi-space-trial-win64.zip
+          fail_on_unmatched_files: true
