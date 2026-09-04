@@ -364,12 +364,12 @@ function migrate(database: Database.Database): void {
   );
 
   // 管理员标记（0/1）：站点唯一保留的权限差异——管理员可发放邀请码，与空间无关。
-  // 迁移时一次性把最早注册的用户（id 最小）设为管理员，之后不再自动变更。
+  // 管理员不自动授予（避免公网部署被抢注），由 CLI 命令手动指定：
+  //   npm run admin -- list            查看全部用户与管理员状态
+  //   npm run admin -- set <用户名>    赋予管理员
+  //   npm run admin -- unset <用户名>  收回管理员
   if (!userColumns.some((column) => column.name === 'is_admin')) {
     database.exec(`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`);
-    database.exec(
-      `UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)`,
-    );
   }
 
   // 邀请码表：管理员在页面上生成/作废，注册时消费（env INVITE_CODE 仍是本地便捷通道）。
