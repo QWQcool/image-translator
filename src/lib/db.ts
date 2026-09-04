@@ -295,18 +295,33 @@ function migrate(database: Database.Database): void {
 
   // 七级进度体系：两态 status 一刀切映射（active→untranslated，finished→typeset_done），
   // progress_at 初始化为 updated_at（「已维持」从最后保存时间起算）。
-  // 仅在 progress 列刚创建时执行一次（一次性守卫，幂等）。
+  // 自愈能力：progress 与 progress_at 两列独立检查——兼容历史「半迁移库」
+  // （旧版迁移在 ALTER progress 成功后、ALTER progress_at 抛错中断，留下
+  //  只有 progress 列且全为默认值的库，守卫若只看 progress 列会永久跳过）。
   // 注意：SQLite 的 ALTER TABLE ADD COLUMN 不允许非常量 DEFAULT（如 datetime('now')），
-  // progress_at 必须以可空列添加、靠紧随其后的 UPDATE 回填；整个迁移块包事务，
-  // 防止中途失败留下「列加了、回填没跑」的半迁移状态（守卫会误判为已完成）。
-  if (!latestSpaceColumns.some((column) => column.name === 'progress')) {
+  // progress_at 必须以可空列添加、靠紧随其后的 UPDATE 回填；每个迁移步骤包事务，
+  // 防止中途失败留下「列加了、回填没跑」的半迁移状态。
+  const hasProgressColumn = latestSpaceColumns.some((column) => column.name === 'progress');
+  const hasProgressAtColumn = latestSpaceColumns.some((column) => column.name === 'progress_at');
+  if (!hasProgressColumn) {
     database.transaction(() => {
       database.exec(`ALTER TABLE spaces ADD COLUMN progress TEXT NOT NULL DEFAULT 'untranslated'`);
+      database.exec(`
+        UPDATE spaces
+           SET progress = CASE status WHEN 'finished' THEN 'typeset_done' ELSE 'untranslated' END
+       WHERE progress = 'untranslated'
+      `);
+    })();
+  }
+  if (!hasProgressAtColumn) {
+    database.transaction(() => {
       database.exec(`ALTER TABLE spaces ADD COLUMN progress_at TEXT`);
+      // 回填：半迁移库的 progress 曾被重置为默认值，这里按 status 重新映射一次；
+      // progress_at 缺失（NULL）的行补 updated_at（「已维持」从最后保存时间起算）
       database.exec(`
         UPDATE spaces
            SET progress = CASE status WHEN 'finished' THEN 'typeset_done' ELSE 'untranslated' END,
-               progress_at = updated_at
+               progress_at = COALESCE(progress_at, updated_at)
       `);
     })();
   }

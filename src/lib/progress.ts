@@ -53,6 +53,8 @@ export const PROGRESS_BADGE_CLASS: Record<SpaceProgress, string> = {
  * <1h 显示分钟、<24h 显示小时、其余显示天数。
  */
 export function formatProgressAge(progressAt: string): string {
+  // 防御：异常行 progress_at 可能为空（历史半迁移数据等），缺省不参与计算直接显示空
+  if (!progressAt) return '';
   const date = new Date(
     progressAt.includes('T') ? progressAt : `${progressAt.replace(' ', 'T')}Z`,
   );
