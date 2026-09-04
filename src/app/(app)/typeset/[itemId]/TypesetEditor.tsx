@@ -11,6 +11,7 @@ import { DEFAULT_LP_STYLES, normalizeStyles, parseGroups, parseStyles } from '@/
 import { originalUrl } from '@/lib/media';
 import { useCollabRoom, type CollabOp } from '@/lib/use-collab-room';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
+import { writePsd, type Layer as PsdLayer, type Psd } from 'ag-psd';
 import {
   groupVerticalRuns,
   hasHalfWidthChars,
@@ -29,9 +30,17 @@ const TOOLS: Array<{ id: Tool; label: string }> = [
   { id: 'eyedropper', label: '吸管' },
   { id: 'rect', label: '选区填充' },
   { id: 'lasso', label: '套索填充' },
-  { id: 'clone', label: '仿制' },
+  { id: 'clone', label: '图章' },
   { id: 'text', label: '文字' },
 ];
+
+/** 颜色串追加透明度（仅支持 #RRGGBB 形态，软边径向渐变用；其余形态回退不透明） */
+function withAlpha(hex: string, alpha: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return alpha >= 1 ? hex : 'transparent';
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
 
 /** 常用系统字体预设（CSS font-family 栈，DOM 预览与 canvas 导出共用同一份值） */
 const SYSTEM_FONT_OPTIONS: Array<{ label: string; value: string }> = [
@@ -61,12 +70,14 @@ type PaintOp =
       color: string;
       size: number;
       opacity: number;
+      soft?: boolean;
       points: { x: number; y: number }[];
     }
   | {
       type: 'clone';
       size: number;
       opacity: number;
+      soft?: boolean;
       points: { x: number; y: number }[];
       from: { x: number; y: number };
     }
@@ -114,6 +125,12 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const [opacity, setOpacity] = useState(100);
   const [textLayers, setTextLayers] = useState<TypesetTextLayer[]>([]);
   const [selectedText, setSelectedText] = useState<string | null>(null);
+  /** 多选集合：Shift+点击追加；主选中（属性面板绑定对象）= selectedText */
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  /** 软边笔刷：径向渐变透明度（对画笔/橡皮生效；图章因 clip 采样保持硬边） */
+  const [softBrush, setSoftBrush] = useState(false);
+  /** 参考线开关（仅预览辅助，不进层数据、不导出；localStorage 记忆） */
+  const [showGuides, setShowGuides] = useState(false);
   /** 删除文字层前的二次确认 */
   const [confirmDeleteLayer, setConfirmDeleteLayer] = useState(false);
   const [zoom, setZoom] = useState(1);
@@ -194,6 +211,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   textLayersRef.current = textLayers;
   const selectedTextRef = useRef(selectedText);
   selectedTextRef.current = selectedText;
+  const selectedIdsRef = useRef(selectedIds);
+  selectedIdsRef.current = selectedIds;
   const hasPaintRef = useRef(hasPaint);
   hasPaintRef.current = hasPaint;
   const colorRef = useRef(color);
@@ -202,6 +221,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   sizeRef.current = size;
   const opacityRef = useRef(opacity);
   opacityRef.current = opacity;
+  const softBrushRef = useRef(softBrush);
+  softBrushRef.current = softBrush;
 
   /** 正在进行的笔画，落笔时打包成一条矢量操作广播给房间 */
   const liveStroke = useRef<{
@@ -209,6 +230,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     color: string;
     size: number;
     opacity: number;
+    soft?: boolean;
     points: { x: number; y: number }[];
     from?: { x: number; y: number };
   } | null>(null);
@@ -267,6 +289,11 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     };
   }, []);
 
+  // 参考线开关记忆（仅预览辅助，零持久化到层数据）
+  useEffect(() => {
+    if (localStorage.getItem('typeset-guides') === '1') setShowGuides(true);
+  }, []);
+
   const saveRef = useRef<() => Promise<void>>(async () => {});
   const undoRef = useRef<() => Promise<void>>(async () => {});
   const redoRef = useRef<() => Promise<void>>(async () => {});
@@ -293,6 +320,16 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         void saveRef.current();
+      }
+      // 工具快捷键与删除（输入态不抢键）
+      if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key.toLowerCase() === 's') setTool('clone');
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          if (selectedIdsRef.current.length > 0) {
+            e.preventDefault();
+            setConfirmDeleteLayer(true);
+          }
+        }
       }
     };
     const up = (e: KeyboardEvent) => {
@@ -371,7 +408,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       }
     }
     setTextLayers(snapshot.layers);
-    setSelectedText(snapshot.selected);
+    setSelection(snapshot.selected ? [snapshot.selected] : []);
     setDirty(histIndex.current !== savedIndex.current);
   }
 
@@ -416,7 +453,14 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     ctx: CanvasRenderingContext2D,
     x: number,
     y: number,
-    opts: { erase?: boolean; color?: string; size?: number; opacity?: number; cloneFrom?: { x: number; y: number } },
+    opts: {
+      erase?: boolean;
+      color?: string;
+      size?: number;
+      opacity?: number;
+      soft?: boolean;
+      cloneFrom?: { x: number; y: number };
+    },
   ) {
     const erase = opts.erase ?? false;
     const r = (opts.size ?? sizeRef.current) / 2;
@@ -432,7 +476,18 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       ctx.drawImage(ctx.canvas, opts.cloneFrom.x - x, opts.cloneFrom.y - y);
     } else {
       ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
-      ctx.fillStyle = opts.color ?? colorRef.current;
+      const col = opts.color ?? colorRef.current;
+      // 重放协作笔画时以 op 自带 soft 为准（缺省硬边），
+      // 不回落本端软边开关——否则旧对端的硬边笔画会被本端重放成软边
+      if (opts.soft ?? false) {
+        // 软边：径向渐变透明度（50% 半径内全强度，向边缘渐隐）；橡皮用 destination-out 同理渐隐
+        const g = ctx.createRadialGradient(x, y, r * 0.5, x, y, r);
+        g.addColorStop(0, withAlpha(col, 1));
+        g.addColorStop(1, withAlpha(col, 0));
+        ctx.fillStyle = g;
+      } else {
+        ctx.fillStyle = col;
+      }
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.fill();
@@ -496,7 +551,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       };
       const next = [...textLayersRef.current, layer];
       setTextLayers(next);
-      setSelectedText(layer.id);
+      setSelection([layer.id]);
       setDirty(true);
       void pushHistory(next, layer.id);
       broadcastText(next);
@@ -520,6 +575,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         color: colorRef.current,
         size: sizeRef.current,
         opacity: opacityRef.current,
+        soft: softBrushRef.current,
         points: [pt],
       };
     }
@@ -532,6 +588,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         color: colorRef.current,
         size: sizeRef.current,
         opacity: opacityRef.current,
+        soft: softBrushRef.current,
         points: [pt],
         from: { ...cloneOrigin.current },
       };
@@ -628,6 +685,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         color: op.type === 'stroke' ? op.color : undefined,
         size: op.size,
         opacity: op.opacity,
+        soft: op.soft,
         cloneFrom,
       });
       for (let i = 1; i < pts.length; i += 1) {
@@ -642,6 +700,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
             color: op.type === 'stroke' ? op.color : undefined,
             size: op.size,
             opacity: op.opacity,
+            soft: op.soft,
             cloneFrom,
           });
         }
@@ -707,6 +766,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
             type: 'clone',
             size: stroke.size,
             opacity: stroke.opacity,
+            soft: stroke.soft,
             points: stroke.points,
             from: stroke.from,
           });
@@ -718,6 +778,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           color: stroke.color,
           size: stroke.size,
           opacity: stroke.opacity,
+          soft: stroke.soft,
           points: stroke.points,
         });
       }
@@ -958,13 +1019,35 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     );
   }
 
+  /** 设置选中集合：selectedIds 为全集，selectedText 恒为主选中（最后一个），兼容单选链路 */
+  function setSelection(ids: string[]) {
+    setSelectedIds(ids);
+    setSelectedText(ids.length > 0 ? ids[ids.length - 1] : null);
+  }
+
+  /** 选中文字层：additive = Shift 追加/移除；否则裸选单层 */
+  function selectLayer(id: string, additive: boolean) {
+    const cur = selectedIdsRef.current;
+    const next = additive
+      ? cur.includes(id)
+        ? cur.filter((x) => x !== id)
+        : [...cur, id]
+      : [id];
+    setSelection(next);
+  }
+
   /**
    * 更新选中文字层的通用入口（字号/颜色/特效等属性面板共用）：
    * coalesce=true 用于滑杆等连续输入（停手后落一步历史 + 广播一次），
    * 否则立即落历史 + 广播（与「竖排/上移一层」同一模式）。
+   * 多选时（id 属于选中集合且 ≥2 层）改动批量应用到全部选中层。
    */
   function patchLayer(id: string, patch: Partial<TypesetTextLayer>, coalesce = false) {
-    const next = textLayersRef.current.map((l) => (l.id === id ? { ...l, ...patch } : l));
+    const ids =
+      selectedIdsRef.current.length > 1 && selectedIdsRef.current.includes(id)
+        ? selectedIdsRef.current
+        : [id];
+    const next = textLayersRef.current.map((l) => (ids.includes(l.id) ? { ...l, ...patch } : l));
     setTextLayers(next);
     setDirty(true);
     if (coalesce) scheduleHistory(next, id);
@@ -972,6 +1055,90 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       void pushHistory(next, id);
       broadcastText(next);
     }
+  }
+
+  /** 文字层包围盒（画布 px）：锚点口径与渲染/导出一致（横排左/右对齐时 x 是边缘锚点，其余 x/y 是块中心锚点） */
+  function layerBBox(layer: TypesetTextLayer): { left: number; top: number; w: number; h: number } {
+    const fs = layer.fontSize;
+    const lines = layer.text.split('\n');
+    let w = 0;
+    let h = 0;
+    if (layer.vertical) {
+      // 竖排：块宽 = 列组宽度；块高 = 最高列的字格总高（与渲染同一套公式）
+      const gap = fs * 0.35;
+      w = (lines.length - 1) * (fs + gap) + fs;
+      const spacingPx = (layer.letterSpacing ?? 0) * fs;
+      const useTcy = layer.tcyEnabled !== false;
+      const cellH = fs * layer.lineHeight + spacingPx;
+      const tcyCells = (runText: string) =>
+        Math.max(2, Math.ceil((runText.length * 0.5 * fs) / Math.max(1, fs * layer.lineHeight)));
+      const runH = (line: string) => {
+        const runs =
+          spacingPx !== 0 || (useTcy && hasHalfWidthChars(line))
+            ? groupVerticalRuns(line)
+            : Array.from(line).map((ch) => ({ kind: 'char' as const, text: ch }));
+        return runs.reduce(
+          (sum, run) => sum + (run.kind === 'char' || run.small ? cellH : tcyCells(run.text) * cellH),
+          0,
+        );
+      };
+      h = Math.max(0, ...lines.map(runH));
+    } else {
+      const spacingPx = (layer.letterSpacing ?? 0) * fs;
+      const layout = layoutHorizontal(layer);
+      if (layout) {
+        w = Math.max(
+          0,
+          ...layout.map((cells) => cells.reduce((s, c) => s + c.w, 0) + spacingPx * Math.max(0, cells.length - 1)),
+        );
+      } else {
+        const m = measureFor(layer) ?? ((ch: string) => ch.length * fs);
+        w = Math.max(0, ...lines.map((line) => Array.from(line).reduce((s, ch) => s + m(ch), 0)));
+      }
+      h = lines.length * fs * layer.lineHeight;
+    }
+    const left =
+      !layer.vertical && layer.align === 'left'
+        ? layer.x * imageWidth
+        : !layer.vertical && layer.align === 'right'
+          ? layer.x * imageWidth - w
+          : layer.x * imageWidth - w / 2;
+    return { left, top: layer.y * imageHeight - h / 2, w, h };
+  }
+
+  /** 批量对齐选中文字层（≥2 层生效）：按选中层包围盒的极值/中心改 x/y（锚点语义不变，只平移） */
+  function alignLayers(mode: 'left' | 'centerH' | 'right' | 'top' | 'centerV') {
+    const ids = selectedIdsRef.current;
+    if (ids.length < 2) return;
+    const boxes = new Map<string, ReturnType<typeof layerBBox>>();
+    for (const id of ids) {
+      const l = textLayersRef.current.find((x) => x.id === id);
+      if (l) boxes.set(id, layerBBox(l));
+    }
+    if (boxes.size < 2) return;
+    const list = [...boxes.values()];
+    const minLeft = Math.min(...list.map((b) => b.left));
+    const maxRight = Math.max(...list.map((b) => b.left + b.w));
+    const minTop = Math.min(...list.map((b) => b.top));
+    const maxBottom = Math.max(...list.map((b) => b.top + b.h));
+    const groupCx = (minLeft + maxRight) / 2;
+    const groupCy = (minTop + maxBottom) / 2;
+    const next = textLayersRef.current.map((l) => {
+      const b = boxes.get(l.id);
+      if (!b) return l;
+      let dx = 0;
+      let dy = 0;
+      if (mode === 'left') dx = minLeft - b.left;
+      else if (mode === 'centerH') dx = groupCx - (b.left + b.w / 2);
+      else if (mode === 'right') dx = maxRight - (b.left + b.w);
+      else if (mode === 'top') dy = minTop - b.top;
+      else dy = groupCy - (b.top + b.h / 2);
+      return { ...l, x: l.x + dx / imageWidth, y: l.y + dy / imageHeight };
+    });
+    setTextLayers(next);
+    setDirty(true);
+    void pushHistory(next, selectedTextRef.current);
+    broadcastText(next);
   }
 
   /** 对比分隔线拖拽：pointer 事件，stopPropagation 避免触发画笔工具 */
@@ -999,13 +1166,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     compareDragging.current = false;
   }
 
-  /** 把底图 + 涂改层 + 文字层渲染成 PNG blob（导出 / 写入空间 / 保存成品共用） */
-  async function renderPngBlob(): Promise<Blob | null> {
-    const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
-    const paint = paintRef.current;
-    if (!img || !paint) return null;
-    // 导出前确保自定义字体就绪：canvas 绘制不会自动等待 FontFace 加载完成，
-    // 不等会回落默认字体导致导出与预览不一致
+  /** 导出前确保自定义字体就绪：canvas 绘制不会自动等待 FontFace 加载完成（PNG/PSD 导出共用） */
+  async function ensureExportFontsReady() {
     await document.fonts.ready;
     await Promise.all(
       textLayers
@@ -1016,6 +1178,211 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
             .catch(() => undefined),
         ),
     );
+  }
+
+  /**
+   * 把单个文字层绘制到指定 2d 上下文（renderPngBlob 与 PSD 导出栅格化共用同一份绘制逻辑，
+   * 保证导出 PNG 与 PSD 里的文字层像素完全一致）。调用方自行 save/restore 包裹。
+   */
+  function drawTextLayerOnCtx(ctx: CanvasRenderingContext2D, layer: TypesetTextLayer) {
+    ctx.save();
+    ctx.font = layerFontExpr(layer);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = layer.strokeWidth;
+    ctx.strokeStyle = layer.stroke;
+    ctx.fillStyle = layer.color;
+    const strokeNew = layer.strokeColor ?? null;
+    const shadow = layer.shadowColor ?? null;
+    if (strokeNew) {
+      // 新描边：宽度按字号比例，圆角连接避免尖角刺出
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      ctx.lineWidth = Math.max(0, (layer.strokeWidthRatio ?? 0.12) * layer.fontSize);
+      ctx.strokeStyle = strokeNew;
+    }
+    if (shadow) {
+      // 阴影参数按字号像素换算；方向与 CSS 一致（offsetY 正值向下）
+      ctx.shadowColor = shadow;
+      ctx.shadowBlur = Math.max(0, (layer.shadowBlurRatio ?? 0.15) * layer.fontSize);
+      ctx.shadowOffsetX = (layer.shadowOffset?.x ?? 0) * layer.fontSize;
+      ctx.shadowOffsetY = (layer.shadowOffset?.y ?? 0.06) * layer.fontSize;
+    }
+    /**
+     * 单个字形/行的绘制顺序（叠加取舍）：
+     * - 有阴影：先带阴影填充（阴影只随填充投影一次），立即清掉阴影再描边，避免描边重复投影糊边；
+     * - 无阴影 + 新描边：先填充再描边（描边压在填充上，观感接近 PS 外描边）；
+     * - 无阴影 + 旧 px 描边：保持既有「先描后填」顺序，老图层导出效果不变。
+     */
+    const drawOne = (glyph: string, gx: number, gy: number) => {
+      if (shadow) {
+        ctx.fillText(glyph, gx, gy);
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        if (strokeNew || layer.strokeWidth > 0) ctx.strokeText(glyph, gx, gy);
+        return;
+      }
+      if (strokeNew) {
+        ctx.fillText(glyph, gx, gy);
+        ctx.strokeText(glyph, gx, gy);
+        return;
+      }
+      if (layer.strokeWidth > 0) ctx.strokeText(glyph, gx, gy);
+      ctx.fillText(glyph, gx, gy);
+    };
+    const originX = layer.x * imageWidth;
+    const originY = layer.y * imageHeight;
+    const lines = layer.text.split('\n');
+    // 字距（px）与纵中横排开关（纵中横排仅竖排生效，横排忽略）
+    const spacingPx = (layer.letterSpacing ?? 0) * layer.fontSize;
+    const useTcy = layer.tcyEnabled !== false;
+    // 竖排逐格布局启用条件：有字距，或开启纵中横排且文本含半角字符段
+    const cellVertical =
+      layer.vertical && (spacingPx !== 0 || (useTcy && hasHalfWidthChars(layer.text)));
+    const hLayout = !layer.vertical ? layoutHorizontal(layer) : null;
+
+    /**
+     * transform 组合顺序（与 DOM 侧一致）：translate(anchor) → rotate(R) → scale(S)
+     * 即：先按对齐锚点定位（originX/originY + 各分支的锚点语义），再绕「文本块包围盒中心」
+     * 旋转，最后缩放（缩放不改变中心）。DOM 侧 transform = translate(anchor) rotate() scale()，
+     * transform-origin 默认 = 包围盒中心，与这里的 rotate/scale 中心一一对应。
+     * 无旋转无缩放时坐标保持绝对值（ox/oy = originX/originY），老数据渲染路径零变化。
+     */
+    const rot = layer.rotation ?? 0;
+    const scl = layer.scale ?? 1;
+    const applyTransform = rot !== 0 || scl !== 1;
+    // 包围盒中心：竖排列组上下左右均居中于 (originX, originY)；横排按对齐锚点推算（左=右缘、右=左缘贴锚点）
+    let cx = originX;
+    let cy = originY;
+    if (!layer.vertical) {
+      const blockW = hLayout
+        ? Math.max(
+            0,
+            ...hLayout.map(
+              (cells) =>
+                cells.reduce((sum, c) => sum + c.w, 0) + spacingPx * Math.max(0, cells.length - 1),
+            ),
+          )
+        : Math.max(0, ...lines.map((line) => ctx.measureText(line).width));
+      if (layer.align === 'left') cx = originX + blockW / 2;
+      else if (layer.align === 'right') cx = originX - blockW / 2;
+    }
+    if (applyTransform) {
+      ctx.translate(cx, cy);
+      if (rot !== 0) ctx.rotate((rot * Math.PI) / 180);
+      if (scl !== 1) ctx.scale(scl, scl); // 几何缩放：描边/阴影随缩放视觉变粗属预期（PS 同款，非破坏不改 fontSize）
+    }
+    const ox = applyTransform ? originX - cx : originX;
+    const oy = applyTransform ? originY - cy : originY;
+
+    // 渐变填充：fillGradient 非空时忽略纯色 color；方向/跨度用「整个文本块」包围盒（与 DOM 容器盒同口径）：
+    // 横排 = 垂直方向上→下（块高 = 行数×字号×行距）；竖排 = 水平方向左→右（块宽 = 列组宽度）
+    const grad = layer.fillGradient ?? null;
+    if (grad) {
+      let g: CanvasGradient;
+      if (layer.vertical) {
+        const columnGap = layer.fontSize * 0.35;
+        const blockW = (lines.length - 1) * (layer.fontSize + columnGap) + layer.fontSize;
+        g = ctx.createLinearGradient(ox - blockW / 2, oy, ox + blockW / 2, oy);
+      } else {
+        const blockH = lines.length * layer.fontSize * layer.lineHeight;
+        g = ctx.createLinearGradient(ox, oy - blockH / 2, ox, oy + blockH / 2);
+      }
+      g.addColorStop(0, grad.from);
+      g.addColorStop(1, grad.to);
+      ctx.fillStyle = g;
+    }
+    if (cellVertical) {
+      // 竖排逐格布局：每个字符/纵中横段占固定字格，字距 = 字格间距增量。
+      // DOM 预览用同一套几何（列宽/字格高/段占格数），保证预览与导出一致。
+      const cellH = layer.fontSize * layer.lineHeight + spacingPx;
+      const columnGap = layer.fontSize * 0.35;
+      const totalWidth = (lines.length - 1) * (layer.fontSize + columnGap);
+      // 纵中横段占格数：半角字符按 0.5em 估宽，向上取整到字格（与 DOM 侧同一公式）
+      const tcyCells = (runText: string) =>
+        Math.max(
+          2,
+          Math.ceil(
+            (runText.length * 0.5 * layer.fontSize) /
+              Math.max(1, layer.fontSize * layer.lineHeight),
+          ),
+        );
+      lines.forEach((line, col) => {
+        const runs: VerticalRun[] = useTcy
+          ? groupVerticalRuns(line)
+          : Array.from(line).map((ch) => ({ kind: 'char' as const, text: ch }));
+        const advances = runs.map((run) =>
+          run.kind === 'char' || run.small ? cellH : tcyCells(run.text) * cellH,
+        );
+        const colX = ox - totalWidth / 2 + col * (layer.fontSize + columnGap);
+        const total = advances.reduce((sum, a) => sum + a, 0);
+        let cursor = oy - total / 2;
+        runs.forEach((run, ri) => {
+          const cy = cursor + advances[ri] / 2;
+          if (run.kind === 'char') {
+            drawOne(run.text, colX, cy);
+          } else {
+            // 纵中横排：整段顺时针旋转 90°（≤2 字符占一格，≥3 字符占多格）
+            ctx.save();
+            ctx.translate(colX, cy);
+            ctx.rotate(Math.PI / 2);
+            drawOne(run.text, 0, 0);
+            ctx.restore();
+          }
+          cursor += advances[ri];
+        });
+      });
+    } else if (layer.vertical) {
+      // 旧竖排路径（无字距、无纵中横排）：保持原样，老数据导出不变
+      const columnGap = layer.fontSize * 0.35;
+      const totalWidth = (lines.length - 1) * (layer.fontSize + columnGap);
+      lines.forEach((line, col) => {
+        const colX = ox - totalWidth / 2 + col * (layer.fontSize + columnGap);
+        const chars = Array.from(line);
+        chars.forEach((ch, i) => {
+          const y = oy + (i - (chars.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+          drawOne(ch, colX, y);
+        });
+      });
+    } else {
+      if (hLayout) {
+        // 限宽自动换行 + 字距：逐行逐字符按测量宽度绘制（与 DOM 预览同一套行结果）
+        ctx.textAlign = 'left';
+        hLayout.forEach((cells, i) => {
+          const y = oy + (i - (hLayout.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+          const lineWidth =
+            cells.reduce((sum, c) => sum + c.w, 0) + spacingPx * Math.max(0, cells.length - 1);
+          let x =
+            layer.align === 'left'
+              ? ox
+              : layer.align === 'right'
+                ? ox - lineWidth
+                : ox - lineWidth / 2;
+          cells.forEach((cell) => {
+            drawOne(cell.ch, x, y);
+            x += cell.w + spacingPx;
+          });
+        });
+      } else {
+        // 旧横排路径（不限宽且无字距）：保持原样，老数据导出不变
+        ctx.textAlign = layer.align === 'left' ? 'left' : layer.align === 'right' ? 'right' : 'center';
+        lines.forEach((line, i) => {
+          const y = oy + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+          drawOne(line, ox, y);
+        });
+      }
+    }
+    ctx.restore();
+  }
+
+  /** 把底图 + 涂改层 + 文字层渲染成 PNG blob（导出 / 写入空间 / 保存成品共用） */
+  async function renderPngBlob(): Promise<Blob | null> {
+    const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
+    const paint = paintRef.current;
+    if (!img || !paint) return null;
+    await ensureExportFontsReady();
     const canvas = document.createElement('canvas');
     canvas.width = imageWidth;
     canvas.height = imageHeight;
@@ -1025,198 +1392,81 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     ctx.drawImage(paint, 0, 0);
     for (const layer of textLayers) {
       if (layer.visible === false) continue;
-      ctx.save();
-      ctx.font = layerFontExpr(layer);
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.lineWidth = layer.strokeWidth;
-      ctx.strokeStyle = layer.stroke;
-      ctx.fillStyle = layer.color;
-      const strokeNew = layer.strokeColor ?? null;
-      const shadow = layer.shadowColor ?? null;
-      if (strokeNew) {
-        // 新描边：宽度按字号比例，圆角连接避免尖角刺出
-        ctx.lineJoin = 'round';
-        ctx.miterLimit = 2;
-        ctx.lineWidth = Math.max(0, (layer.strokeWidthRatio ?? 0.12) * layer.fontSize);
-        ctx.strokeStyle = strokeNew;
-      }
-      if (shadow) {
-        // 阴影参数按字号像素换算；方向与 CSS 一致（offsetY 正值向下）
-        ctx.shadowColor = shadow;
-        ctx.shadowBlur = Math.max(0, (layer.shadowBlurRatio ?? 0.15) * layer.fontSize);
-        ctx.shadowOffsetX = (layer.shadowOffset?.x ?? 0) * layer.fontSize;
-        ctx.shadowOffsetY = (layer.shadowOffset?.y ?? 0.06) * layer.fontSize;
-      }
-      /**
-       * 单个字形/行的绘制顺序（叠加取舍）：
-       * - 有阴影：先带阴影填充（阴影只随填充投影一次），立即清掉阴影再描边，避免描边重复投影糊边；
-       * - 无阴影 + 新描边：先填充再描边（描边压在填充上，观感接近 PS 外描边）；
-       * - 无阴影 + 旧 px 描边：保持既有「先描后填」顺序，老图层导出效果不变。
-       */
-      const drawOne = (glyph: string, gx: number, gy: number) => {
-        if (shadow) {
-          ctx.fillText(glyph, gx, gy);
-          ctx.shadowColor = 'transparent';
-          ctx.shadowBlur = 0;
-          ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = 0;
-          if (strokeNew || layer.strokeWidth > 0) ctx.strokeText(glyph, gx, gy);
-          return;
-        }
-        if (strokeNew) {
-          ctx.fillText(glyph, gx, gy);
-          ctx.strokeText(glyph, gx, gy);
-          return;
-        }
-        if (layer.strokeWidth > 0) ctx.strokeText(glyph, gx, gy);
-        ctx.fillText(glyph, gx, gy);
-      };
-      const originX = layer.x * imageWidth;
-      const originY = layer.y * imageHeight;
-      const lines = layer.text.split('\n');
-      // 字距（px）与纵中横排开关（纵中横排仅竖排生效，横排忽略）
-      const spacingPx = (layer.letterSpacing ?? 0) * layer.fontSize;
-      const useTcy = layer.tcyEnabled !== false;
-      // 竖排逐格布局启用条件：有字距，或开启纵中横排且文本含半角字符段
-      const cellVertical =
-        layer.vertical && (spacingPx !== 0 || (useTcy && hasHalfWidthChars(layer.text)));
-      const hLayout = !layer.vertical ? layoutHorizontal(layer) : null;
-
-      /**
-       * transform 组合顺序（与 DOM 侧一致）：translate(anchor) → rotate(R) → scale(S)
-       * 即：先按对齐锚点定位（originX/originY + 各分支的锚点语义），再绕「文本块包围盒中心」
-       * 旋转，最后缩放（缩放不改变中心）。DOM 侧 transform = translate(anchor) rotate() scale()，
-       * transform-origin 默认 = 包围盒中心，与这里的 rotate/scale 中心一一对应。
-       * 无旋转无缩放时坐标保持绝对值（ox/oy = originX/originY），老数据渲染路径零变化。
-       */
-      const rot = layer.rotation ?? 0;
-      const scl = layer.scale ?? 1;
-      const applyTransform = rot !== 0 || scl !== 1;
-      // 包围盒中心：竖排列组上下左右均居中于 (originX, originY)；横排按对齐锚点推算（左=右缘、右=左缘贴锚点）
-      let cx = originX;
-      let cy = originY;
-      if (!layer.vertical) {
-        const blockW = hLayout
-          ? Math.max(
-              0,
-              ...hLayout.map(
-                (cells) =>
-                  cells.reduce((sum, c) => sum + c.w, 0) + spacingPx * Math.max(0, cells.length - 1),
-              ),
-            )
-          : Math.max(0, ...lines.map((line) => ctx.measureText(line).width));
-        if (layer.align === 'left') cx = originX + blockW / 2;
-        else if (layer.align === 'right') cx = originX - blockW / 2;
-      }
-      if (applyTransform) {
-        ctx.translate(cx, cy);
-        if (rot !== 0) ctx.rotate((rot * Math.PI) / 180);
-        if (scl !== 1) ctx.scale(scl, scl); // 几何缩放：描边/阴影随缩放视觉变粗属预期（PS 同款，非破坏不改 fontSize）
-      }
-      const ox = applyTransform ? originX - cx : originX;
-      const oy = applyTransform ? originY - cy : originY;
-
-      // 渐变填充：fillGradient 非空时忽略纯色 color；方向/跨度用「整个文本块」包围盒（与 DOM 容器盒同口径）：
-      // 横排 = 垂直方向上→下（块高 = 行数×字号×行距）；竖排 = 水平方向左→右（块宽 = 列组宽度）
-      const grad = layer.fillGradient ?? null;
-      if (grad) {
-        let g: CanvasGradient;
-        if (layer.vertical) {
-          const columnGap = layer.fontSize * 0.35;
-          const blockW = (lines.length - 1) * (layer.fontSize + columnGap) + layer.fontSize;
-          g = ctx.createLinearGradient(ox - blockW / 2, oy, ox + blockW / 2, oy);
-        } else {
-          const blockH = lines.length * layer.fontSize * layer.lineHeight;
-          g = ctx.createLinearGradient(ox, oy - blockH / 2, ox, oy + blockH / 2);
-        }
-        g.addColorStop(0, grad.from);
-        g.addColorStop(1, grad.to);
-        ctx.fillStyle = g;
-      }
-      if (cellVertical) {
-        // 竖排逐格布局：每个字符/纵中横段占固定字格，字距 = 字格间距增量。
-        // DOM 预览用同一套几何（列宽/字格高/段占格数），保证预览与导出一致。
-        const cellH = layer.fontSize * layer.lineHeight + spacingPx;
-        const columnGap = layer.fontSize * 0.35;
-        const totalWidth = (lines.length - 1) * (layer.fontSize + columnGap);
-        // 纵中横段占格数：半角字符按 0.5em 估宽，向上取整到字格（与 DOM 侧同一公式）
-        const tcyCells = (runText: string) =>
-          Math.max(
-            2,
-            Math.ceil(
-              (runText.length * 0.5 * layer.fontSize) /
-                Math.max(1, layer.fontSize * layer.lineHeight),
-            ),
-          );
-        lines.forEach((line, col) => {
-          const runs: VerticalRun[] = useTcy
-            ? groupVerticalRuns(line)
-            : Array.from(line).map((ch) => ({ kind: 'char' as const, text: ch }));
-          const advances = runs.map((run) =>
-            run.kind === 'char' || run.small ? cellH : tcyCells(run.text) * cellH,
-          );
-          const colX = ox - totalWidth / 2 + col * (layer.fontSize + columnGap);
-          const total = advances.reduce((sum, a) => sum + a, 0);
-          let cursor = oy - total / 2;
-          runs.forEach((run, ri) => {
-            const cy = cursor + advances[ri] / 2;
-            if (run.kind === 'char') {
-              drawOne(run.text, colX, cy);
-            } else {
-              // 纵中横排：整段顺时针旋转 90°（≤2 字符占一格，≥3 字符占多格）
-              ctx.save();
-              ctx.translate(colX, cy);
-              ctx.rotate(Math.PI / 2);
-              drawOne(run.text, 0, 0);
-              ctx.restore();
-            }
-            cursor += advances[ri];
-          });
-        });
-      } else if (layer.vertical) {
-        // 旧竖排路径（无字距、无纵中横排）：保持原样，老数据导出不变
-        const columnGap = layer.fontSize * 0.35;
-        const totalWidth = (lines.length - 1) * (layer.fontSize + columnGap);
-        lines.forEach((line, col) => {
-          const colX = ox - totalWidth / 2 + col * (layer.fontSize + columnGap);
-          const chars = Array.from(line);
-          chars.forEach((ch, i) => {
-            const y = oy + (i - (chars.length - 1) / 2) * layer.fontSize * layer.lineHeight;
-            drawOne(ch, colX, y);
-          });
-        });
-      } else {
-        if (hLayout) {
-          // 限宽自动换行 + 字距：逐行逐字符按测量宽度绘制（与 DOM 预览同一套行结果）
-          ctx.textAlign = 'left';
-          hLayout.forEach((cells, i) => {
-            const y = oy + (i - (hLayout.length - 1) / 2) * layer.fontSize * layer.lineHeight;
-            const lineWidth =
-              cells.reduce((sum, c) => sum + c.w, 0) + spacingPx * Math.max(0, cells.length - 1);
-            let x =
-              layer.align === 'left'
-                ? ox
-                : layer.align === 'right'
-                  ? ox - lineWidth
-                  : ox - lineWidth / 2;
-            cells.forEach((cell) => {
-              drawOne(cell.ch, x, y);
-              x += cell.w + spacingPx;
-            });
-          });
-        } else {
-          // 旧横排路径（不限宽且无字距）：保持原样，老数据导出不变
-          ctx.textAlign = layer.align === 'left' ? 'left' : layer.align === 'right' ? 'right' : 'center';
-          lines.forEach((line, i) => {
-            const y = oy + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
-            drawOne(line, ox, y);
-          });
-        }
-      }
-      ctx.restore();
+      drawTextLayerOnCtx(ctx, layer);
     }
     return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+  }
+
+
+  /**
+   * 导出 PSD（ag-psd，RLE 压缩）：图层组装 = 底层原图 → 涂改层（整幅透明像素图层）
+   * → 每个可见文字层一个栅格化像素图层（第一版不做 TypeTool 文字图层，规避旧版 PS
+   * 打开文字层兼容风险；图层名 = 文字内容前 20 字符；逐层离屏绘制后及时释放）。
+   */
+  async function exportPsd() {
+    const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
+    const paint = paintRef.current;
+    if (!img || !paint) return;
+    await ensureExportFontsReady();
+    const children: PsdLayer[] = [];
+    try {
+      // 底层：原图
+      const bg = document.createElement('canvas');
+      bg.width = imageWidth;
+      bg.height = imageHeight;
+      bg.getContext('2d')?.drawImage(img, 0, 0, imageWidth, imageHeight);
+      children.push({ name: '背景原图', canvas: bg });
+      // 涂改层：整幅透明像素图层（画布可能为空，导出空图层保持结构完整）
+      const paintCopy = document.createElement('canvas');
+      paintCopy.width = imageWidth;
+      paintCopy.height = imageHeight;
+      paintCopy.getContext('2d')?.drawImage(paint, 0, 0);
+      children.push({ name: '涂改层', canvas: paintCopy });
+      // 文字层：逐层栅格化（隐藏层不导出；复用 renderPngBlob 同款逐层绘制，观感一致）
+      for (const layer of textLayers) {
+        if (layer.visible === false) continue;
+        const c = document.createElement('canvas');
+        c.width = imageWidth;
+        c.height = imageHeight;
+        const cctx = c.getContext('2d');
+        if (!cctx) continue;
+        drawTextLayerOnCtx(cctx, layer);
+        children.push({
+          name: layer.text.replace(/\n/g, ' ').trim().slice(0, 20) || '文字层',
+          canvas: c,
+        });
+      }
+      // 合成图（composite）：PS 打开 PSD 的首屏渲染源。ag-psd 不会从子图层自动合成，
+      // 不设置 psd.canvas 时写入的是不透明纯黑图（PS 首屏全黑、像导出失败）——必须手绘。
+      const composite = document.createElement('canvas');
+      composite.width = imageWidth;
+      composite.height = imageHeight;
+      const cctx2 = composite.getContext('2d');
+      if (cctx2) {
+        for (const child of children) {
+          const layerCanvas = (child as { canvas?: HTMLCanvasElement }).canvas;
+          if (layerCanvas) cctx2.drawImage(layerCanvas, 0, 0);
+        }
+      }
+      const psd: Psd = { width: imageWidth, height: imageHeight, canvas: composite, children };
+      // ag-psd 默认即 RLE 压缩（无损、兼容性最好）；trimImageData 裁掉图层透明边缘减小体积。
+      // WriteOptions.compress = ZIP 压缩体积更小但部分软件不兼容，不用。
+      const buffer = writePsd(psd, { trimImageData: true });
+      // 大图内存：写入完成后立即释放逐层离屏画布引用
+      children.forEach((l) => {
+        delete (l as { canvas?: HTMLCanvasElement }).canvas;
+      });
+      children.length = 0;
+      const blob = new Blob([buffer], { type: 'image/vnd.adobe.photoshop' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${item?.title || asset?.original_name?.replace(/\.[^.]+$/, '') || 'typeset'}.psd`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError('导出 PSD 失败');
+    }
   }
 
   async function exportPng(writeBack: boolean) {
@@ -1360,6 +1610,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           </button>
           <button type="button" className="btn-ghost text-xs" onClick={() => void exportPng(false)}>
             导出 PNG
+          </button>
+          <button type="button" className="btn-ghost text-xs" onClick={() => void exportPsd()}>
+            导出 PSD
           </button>
           <button
             type="button"
@@ -1509,7 +1762,17 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
               className="mt-1 w-full accent-sky"
             />
           </label>
-          <p className="text-[11px] text-ink-400">原图层已锁定。橡皮只擦涂改层。仿制：Alt 取源后涂抹（同源对齐）。</p>
+          <label className="flex items-center gap-1 text-[11px] text-ink-500">
+            <input
+              type="checkbox"
+              checked={softBrush}
+              onChange={(e) => setSoftBrush(e.target.checked)}
+            />
+            软边笔刷
+          </label>
+          <p className="text-[11px] text-ink-400">
+            原图层已锁定。橡皮只擦涂改层。图章(S)：Alt+点击取源，拖动复制背景；软边对画笔/橡皮生效。
+          </p>
         </div>
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1563,6 +1826,19 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
               }}
             >
               对比
+            </button>
+            <button
+              type="button"
+              className={`btn-ghost px-2 py-1 ${showGuides ? 'btn-primary' : ''}`}
+              onClick={() =>
+                setShowGuides((v) => {
+                  localStorage.setItem('typeset-guides', v ? '0' : '1');
+                  return !v;
+                })
+              }
+              title="三分线 + 5% 安全框（仅预览辅助，不导出）"
+            >
+              参考线
             </button>
             <span className="text-ink-500">{Math.round(zoom * 100)}% · {imageWidth}×{imageHeight}</span>
           </div>
@@ -1651,7 +1927,12 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 const onLayerPointerDown = (event: React.PointerEvent) => {
                   if (tool !== 'text') return;
                   event.stopPropagation();
-                  setSelectedText(layer.id);
+                  // Shift+点击：追加/移除多选，不启动拖拽
+                  if (event.shiftKey) {
+                    selectLayer(layer.id, true);
+                    return;
+                  }
+                  if (!selectedIdsRef.current.includes(layer.id)) setSelection([layer.id]);
                   try {
                     event.currentTarget.setPointerCapture(event.pointerId);
                   } catch {
@@ -1822,6 +2103,20 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
                 />
               )}
+              {showGuides && (
+                <div className="pointer-events-none absolute inset-0 z-20">
+                  {/* 安全框：距边缘 5% 的虚线框（仅预览辅助，不进导出） */}
+                  <div
+                    className="absolute border border-dashed border-amber-400/70"
+                    style={{ left: '5%', top: '5%', right: '5%', bottom: '5%' }}
+                  />
+                  {/* 三分线 */}
+                  <div className="absolute bottom-0 top-0 w-px bg-amber-300/50" style={{ left: '33.333%' }} />
+                  <div className="absolute bottom-0 top-0 w-px bg-amber-300/50" style={{ left: '66.667%' }} />
+                  <div className="absolute left-0 right-0 h-px bg-amber-300/50" style={{ top: '33.333%' }} />
+                  <div className="absolute left-0 right-0 h-px bg-amber-300/50" style={{ top: '66.667%' }} />
+                </div>
+              )}
               {compareMode && (
                 <>
                   {/* 对比覆盖层：分隔线左侧盖一层原图，右侧露出下面的当前合成（涂改+文字层） */}
@@ -1869,7 +2164,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 <li
                   key={layer.id}
                   className={`flex items-center gap-1 rounded px-1 py-0.5 ${
-                    selectedText === layer.id ? 'bg-sky/15' : 'bg-paper'
+                    selectedIds.includes(layer.id) ? 'bg-sky/15' : 'bg-paper'
                   }`}
                 >
                   <button
@@ -1890,12 +2185,14 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   </button>
                   <button
                     type="button"
-                    className="min-w-0 flex-1 truncate text-left text-[11px] text-ink-200 hover:text-ink-100"
-                    onClick={() => {
+                    className={`min-w-0 flex-1 truncate text-left text-[11px] hover:text-ink-100 ${
+                      selectedIds.includes(layer.id) ? 'text-sky-deep' : 'text-ink-200'
+                    }`}
+                    onClick={(e) => {
                       setTool('text');
-                      setSelectedText(layer.id);
+                      selectLayer(layer.id, e.shiftKey);
                     }}
-                    title="选中该层（切换到文字工具可拖动）"
+                    title="选中该层（Shift+点击追加多选；切换到文字工具可拖动）"
                   >
                     {layer.text.split('\n')[0] || '（空）'}
                   </button>
@@ -1906,18 +2203,25 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           </div>
           {selected && (
             <div className="mt-3 space-y-2">
-              <textarea
-                className="input min-h-[80px] text-xs"
-                value={selected.text}
-                onChange={(e) => {
-                  const next = textLayersRef.current.map((l) =>
-                    l.id === selected.id ? { ...l, text: e.target.value } : l,
-                  );
-                  setTextLayers(next);
-                  setDirty(true);
-                  scheduleHistory(next, selected.id);
-                }}
-              />
+              {selectedIds.length > 1 && (
+                <p className="rounded bg-sky/15 px-2 py-1 text-[11px] text-sky-deep">
+                  已选 {selectedIds.length} 层（字号/字体/填充/特效等改动批量应用）
+                </p>
+              )}
+              {selectedIds.length <= 1 && (
+                <textarea
+                  className="input min-h-[80px] text-xs"
+                  value={selected.text}
+                  onChange={(e) => {
+                    const next = textLayersRef.current.map((l) =>
+                      l.id === selected.id ? { ...l, text: e.target.value } : l,
+                    );
+                    setTextLayers(next);
+                    setDirty(true);
+                    scheduleHistory(next, selected.id);
+                  }}
+                />
+              )}
               <label className="text-[11px] text-ink-500">
                 字号
                 <input
@@ -2282,19 +2586,35 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   </div>
                 )}
               </div>
+              {/* 对齐：多选（≥2 层）时按选中层包围盒对齐（改 x/y，锚点语义不变） */}
+              {selectedIds.length >= 2 && (
+                <div className="flex flex-wrap gap-1 text-[11px] text-ink-500">
+                  <span className="w-full">对齐</span>
+                  {(
+                    [
+                      ['left', '左'],
+                      ['centerH', '水平中'],
+                      ['right', '右'],
+                      ['top', '顶'],
+                      ['centerV', '垂直中'],
+                    ] as const
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className="btn-ghost px-1.5 py-0.5 text-[10px]"
+                      onClick={() => alignLayers(mode)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   className={`btn-ghost py-1 text-xs ${selected.vertical ? 'btn-primary' : ''}`}
-                  onClick={() => {
-                    const next = textLayersRef.current.map((l) =>
-                      l.id === selected.id ? { ...l, vertical: !selected.vertical } : l,
-                    );
-                    setTextLayers(next);
-                    setDirty(true);
-                    void pushHistory(next, selected.id);
-                    broadcastText(next);
-                  }}
+                  onClick={() => patchLayer(selected.id, { vertical: !selected.vertical })}
                 >
                   {selected.vertical ? '竖排' : '横排'}
                 </button>
@@ -2331,14 +2651,19 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       <ConfirmDialog
         open={confirmDeleteLayer}
         title="删除文字层"
-        message={`确认删除选中的文字层「${selected?.text?.slice(0, 20) ?? ''}」？可用 Ctrl+Z 撤销，但保存后将无法恢复。`}
+        message={
+          selectedIdsRef.current.length > 1
+            ? `确认删除选中的 ${selectedIdsRef.current.length} 个文字层？可用 Ctrl+Z 撤销，但保存后将无法恢复。`
+            : `确认删除选中的文字层「${selected?.text?.slice(0, 20) ?? ''}」？可用 Ctrl+Z 撤销，但保存后将无法恢复。`
+        }
         onConfirm={() => {
           setConfirmDeleteLayer(false);
-          if (!selected) return;
+          const ids = selectedIdsRef.current.length > 0 ? selectedIdsRef.current : (selected ? [selected.id] : []);
+          if (ids.length === 0) return;
           clearCoalesce();
-          const next = textLayersRef.current.filter((l) => l.id !== selected.id);
+          const next = textLayersRef.current.filter((l) => !ids.includes(l.id));
           setTextLayers(next);
-          setSelectedText(null);
+          setSelection([]);
           setDirty(true);
           void pushHistory(next, null);
           broadcastText(next);
