@@ -32,11 +32,19 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     description: string;
     tags: string[];
     visibility: SpaceVisibility;
+    author: string;
+    translator: string;
+    proofreader: string;
+    typesetter: string;
   }>({
     name: '',
     description: '',
     tags: [],
     visibility: 'private',
+    author: '',
+    translator: '',
+    proofreader: '',
+    typesetter: '',
   });
   const [pendingDeleteItem, setPendingDeleteItem] = useState<SpaceItem | null>(null);
   const [pendingDeleteItems, setPendingDeleteItems] = useState<SpaceItem[] | null>(null);
@@ -435,6 +443,10 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         description: spaceDraft.description.trim() || null,
         visibility: spaceDraft.visibility,
         tags: spaceDraft.tags,
+        author: spaceDraft.author.trim(),
+        translator: spaceDraft.translator.trim(),
+        proofreader: spaceDraft.proofreader.trim(),
+        typesetter: spaceDraft.typesetter.trim(),
       }),
     });
     if (!res.ok) {
@@ -578,6 +590,44 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 onChange={(e) => setSpaceDraft((d) => ({ ...d, description: e.target.value }))}
               />
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">作者</label>
+                <input
+                  className="input text-xs"
+                  placeholder="原作者名"
+                  value={spaceDraft.author}
+                  onChange={(e) => setSpaceDraft((d) => ({ ...d, author: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label className="label">翻译</label>
+                <input
+                  className="input text-xs"
+                  placeholder="翻译担当"
+                  value={spaceDraft.translator}
+                  onChange={(e) => setSpaceDraft((d) => ({ ...d, translator: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label className="label">校对</label>
+                <input
+                  className="input text-xs"
+                  placeholder="校对担当"
+                  value={spaceDraft.proofreader}
+                  onChange={(e) => setSpaceDraft((d) => ({ ...d, proofreader: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label className="label">嵌字</label>
+                <input
+                  className="input text-xs"
+                  placeholder="嵌字担当"
+                  value={spaceDraft.typesetter}
+                  onChange={(e) => setSpaceDraft((d) => ({ ...d, typesetter: e.target.value }))}
+                />
+              </div>
+            </div>
             <p className="rounded-lg bg-sky/10 px-3 py-2 text-[11px] leading-relaxed text-ink-500">
               📁 文件夹对所有登录用户开放：人人可看、可编辑、可删除
             </p>
@@ -667,6 +717,10 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                       description: space.description ?? '',
                       tags: parseSpaceTags(space.tags),
                       visibility: space.visibility,
+                      author: space.author ?? '',
+                      translator: space.translator ?? '',
+                      proofreader: space.proofreader ?? '',
+                      typesetter: space.typesetter ?? '',
                     });
                     setRenamingSpace(true);
                   }}
@@ -686,6 +740,30 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                     {tag}
                   </span>
                 ))}
+              </div>
+            )}
+            {(space.author || space.translator || space.proofreader || space.typesetter) && (
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-400">
+                {space.author && (
+                  <span>
+                    作者：<span className="text-ink-200">{space.author}</span>
+                  </span>
+                )}
+                {space.translator && (
+                  <span>
+                    翻译：<span className="text-ink-200">{space.translator}</span>
+                  </span>
+                )}
+                {space.proofreader && (
+                  <span>
+                    校对：<span className="text-ink-200">{space.proofreader}</span>
+                  </span>
+                )}
+                {space.typesetter && (
+                  <span>
+                    嵌字：<span className="text-ink-200">{space.typesetter}</span>
+                  </span>
+                )}
               </div>
             )}
             <p className="mt-1 text-sm text-ink-400">{space.description || '还没写简介'}</p>

@@ -44,7 +44,32 @@ type ExportQueryRow = {
   asset_created_at: string;
 };
 
-function buildPayload(space: Space, rows: ExportRow[]) {
+const ILLEGAL_CHARS = /[\\/:*?"<>|\u0000-\u001f]/g;
+
+function sanitizeExportName(name: string): string {
+  const cleaned = name.replace(ILLEGAL_CHARS, '_').trim();
+  return cleaned || 'image';
+}
+
+function buildExportFilenames(rows: ExportRow[]): string[] {
+  const result: string[] = [];
+  const counts = new Map<string, number>();
+
+  for (const { asset } of rows) {
+    const raw = sanitizeExportName(asset.original_name || asset.filename);
+    const ext = path.extname(raw);
+    const base = ext ? raw.slice(0, -ext.length) : raw;
+    const seen = counts.get(raw) ?? 0;
+    counts.set(raw, seen + 1);
+
+    const finalName = seen === 0 ? raw : `${base}_${seen + 1}${ext}`;
+    result.push(finalName);
+  }
+
+  return result;
+}
+
+function buildPayload(space: Space, rows: ExportRow[], exportFilenames: string[]) {
   return {
     schema: 'twitter-image-translator/export@1',
     exportedAt: new Date().toISOString(),
@@ -55,13 +80,15 @@ function buildPayload(space: Space, rows: ExportRow[]) {
       createdAt: space.created_at,
       updatedAt: space.updated_at,
     },
-    images: rows.map(({ item, asset, annotations }) => {
+    images: rows.map(({ item, asset, annotations }, index) => {
       const width = asset.width ?? 0;
       const height = asset.height ?? 0;
+      const exportName = exportFilenames[index] || asset.original_name || asset.filename;
       return {
         itemId: item.id,
         title: item.title ?? '',
-        file: `images/${asset.filename}`,
+        file: `images/${exportName}`,
+        filename: exportName,
         originalName: asset.original_name,
         sourceUrl: asset.source_url,
         sourceAuthor: asset.source_author,
@@ -121,17 +148,18 @@ const CSV_HEADER = [
   '背景色',
 ];
 
-function buildCsv(rows: ExportRow[]): string {
+function buildCsv(rows: ExportRow[], exportFilenames: string[]): string {
   const lines: string[] = [CSV_HEADER.join(',')];
   rows.forEach(({ item, asset, annotations }, imageIndex) => {
     const width = asset.width ?? 0;
     const height = asset.height ?? 0;
+    const exportName = exportFilenames[imageIndex] || asset.original_name || asset.filename;
     if (annotations.length === 0) {
       lines.push(
         [
           imageIndex + 1,
           item.title ?? '',
-          asset.original_name ?? asset.filename,
+          exportName,
           asset.source_author ?? '',
           asset.source_url ?? '',
           width,
@@ -148,7 +176,7 @@ function buildCsv(rows: ExportRow[]): string {
         [
           imageIndex + 1,
           item.title ?? '',
-          asset.original_name ?? asset.filename,
+          exportName,
           asset.source_author ?? '',
           asset.source_url ?? '',
           width,
@@ -173,7 +201,7 @@ function buildCsv(rows: ExportRow[]): string {
     });
   });
   // BOM 让 Excel 正确识别 UTF-8 中文
-  return `﻿${lines.join('\r\n')}`;
+  return `\uFEFF${lines.join('\r\n')}`;
 }
 
 function disposition(filename: string): string {
@@ -265,8 +293,10 @@ export async function GET(request: Request, { params }: Params) {
   const safeName = space.name.replace(/[\\/:*?"<>|]/g, '_');
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 
+  const exportFilenames = buildExportFilenames(rows);
+
   if (format === 'csv') {
-    return new NextResponse(buildCsv(rows), {
+    return new NextResponse(buildCsv(rows, exportFilenames), {
       headers: {
         'Content-Type': 'text/csv; charset=utf-8',
         'Content-Disposition': disposition(`${safeName}-标注-${stamp}.csv`),
@@ -274,12 +304,12 @@ export async function GET(request: Request, { params }: Params) {
     });
   }
 
-  const json = JSON.stringify(buildPayload(space, rows), null, 2);
+  const json = JSON.stringify(buildPayload(space, rows, exportFilenames), null, 2);
 
   const labelPlusTxt = serializeLabelPlus({
     groups: parseGroups(space.lp_groups),
-    files: rows.map(({ asset, annotations }) => ({
-      filename: asset.original_name || asset.filename,
+    files: rows.map(({ annotations }, index) => ({
+      filename: exportFilenames[index],
       labels: annotations
         .filter((an) => an.kind === 'pin')
         .map((an) => ({ x: an.x, y: an.y, groupId: an.group_id || 1, text: an.text })),
@@ -299,7 +329,7 @@ export async function GET(request: Request, { params }: Params) {
     const includeImages = new URL(request.url).searchParams.get('images') !== '0';
     const zip = new JSZip();
     zip.file('annotations.json', json);
-    zip.file('annotations.csv', buildCsv(rows));
+    zip.file('annotations.csv', buildCsv(rows, exportFilenames));
     zip.file('翻译_0.txt', labelPlusTxt);
 
     // 图片放 images/，与 annotations.json 里的 file 字段对应，解包即可直接用
@@ -310,8 +340,10 @@ export async function GET(request: Request, { params }: Params) {
 
     if (includeImages) {
       const imageFolder = zip.folder('images') ?? zip;
-      for (const { asset } of rows) {
-        if (packed.includes(asset.filename)) continue;
+      for (let i = 0; i < rows.length; i++) {
+        const { asset } = rows[i];
+        const exportName = exportFilenames[i];
+        if (packed.includes(exportName)) continue;
         try {
           const file = await fs.readFile(path.join(IMAGES_DIR, asset.filename));
           if (packedBytes + file.byteLength > MAX_ZIP_IMAGE_BYTES) {
@@ -319,13 +351,15 @@ export async function GET(request: Request, { params }: Params) {
             continue;
           }
           // 图片本身已压缩，再 deflate 只会白烧 CPU
-          imageFolder.file(asset.filename, file, { compression: 'STORE' });
-          packed.push(asset.filename);
+          imageFolder.file(exportName, file, { compression: 'STORE' });
+          packed.push(exportName);
           packedBytes += file.byteLength;
         } catch {
-          missing.push(asset.original_name || asset.filename);
+          missing.push(exportName);
         }
       }
+      // 将 翻译_0.txt 也写入 images/ 文件夹，确保解压后 txt 与图片在同一个文件夹下
+      imageFolder.file('翻译_0.txt', labelPlusTxt);
     }
 
     zip.file(
@@ -340,7 +374,7 @@ export async function GET(request: Request, { params }: Params) {
         '  annotations.json —— 完整结构，坐标同时提供 0~1 归一化值与像素值。',
         '  annotations.csv  —— 表格形式，可直接用 Excel 打开。',
         '  翻译_0.txt       —— LabelPlus 格式译文，PS-Script 可直接读取。',
-        '  images/          —— 原图文件，annotations.json 的 file 字段指向这里。',
+        '  images/          —— 原图文件与配套的 翻译_0.txt（同目录方便直接导入 PS-Script）。',
         '',
         '坐标说明：x/y 为框左上角，w/h 为框宽高，均相对图片左上角。',
         '',

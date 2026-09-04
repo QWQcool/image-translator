@@ -47,12 +47,47 @@ export async function GET(request: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: '未登录' }, { status: 401 });
 
-  // 全局查找：LIKE 匹配空间名 / 描述 / 空间序号（序号部分匹配天然支持：20260904、0904-01、09 等）
+  // 全局查找：LIKE 匹配空间名 / 描述 / 空间序号 / 作者 / 翻译 / 校对 / 嵌字
   const keyword = (new URL(request.url).searchParams.get('q') ?? '').trim();
   const searchClause = keyword
-    ? `AND (s.name LIKE ? OR IFNULL(s.description, '') LIKE ? OR IFNULL(s.space_no, '') LIKE ?)`
+    ? `AND (s.name LIKE ? OR IFNULL(s.description, '') LIKE ? OR IFNULL(s.space_no, '') LIKE ? OR IFNULL(s.author, '') LIKE ? OR IFNULL(s.translator, '') LIKE ? OR IFNULL(s.proofreader, '') LIKE ? OR IFNULL(s.typesetter, '') LIKE ?)`
     : '';
-  const searchArgs = keyword ? [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`] : [];
+  const searchArgs = keyword
+    ? [
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+        `%${keyword}%`,
+      ]
+    : [];
+
+  // 制作人员独立筛选：作者、翻译、校对、嵌字（模糊匹配）
+  const authorRaw = (new URL(request.url).searchParams.get('author') ?? '').trim();
+  const translatorRaw = (new URL(request.url).searchParams.get('translator') ?? '').trim();
+  const proofreaderRaw = (new URL(request.url).searchParams.get('proofreader') ?? '').trim();
+  const typesetterRaw = (new URL(request.url).searchParams.get('typesetter') ?? '').trim();
+
+  let creditClause = '';
+  const creditArgs: string[] = [];
+  if (authorRaw) {
+    creditClause += ` AND IFNULL(s.author, '') LIKE ?`;
+    creditArgs.push(`%${authorRaw}%`);
+  }
+  if (translatorRaw) {
+    creditClause += ` AND IFNULL(s.translator, '') LIKE ?`;
+    creditArgs.push(`%${translatorRaw}%`);
+  }
+  if (proofreaderRaw) {
+    creditClause += ` AND IFNULL(s.proofreader, '') LIKE ?`;
+    creditArgs.push(`%${proofreaderRaw}%`);
+  }
+  if (typesetterRaw) {
+    creditClause += ` AND IFNULL(s.typesetter, '') LIKE ?`;
+    creditArgs.push(`%${typesetterRaw}%`);
+  }
 
   // 完结状态筛选（遗留参数，阶段 15 后 UI 不再发送；status 列废弃仅保留兼容）
   const filterRaw = new URL(request.url).searchParams.get('filter');
@@ -98,10 +133,20 @@ export async function GET(request: Request) {
     .prepare(
       LIST_SQL.replace(
         '__SEARCH__',
-        searchClause + progressClause + tagClause + savedClause,
+        searchClause + progressClause + tagClause + savedClause + creditClause,
       ).replace('__FILTER__', filterClause),
     )
-    .all(user.id, user.id, user.id, ...searchArgs, ...progressValues, ...tagValues, ...savedArgs, ...filterArgs) as Array<
+    .all(
+      user.id,
+      user.id,
+      user.id,
+      ...searchArgs,
+      ...creditArgs,
+      ...progressValues,
+      ...tagValues,
+      ...savedArgs,
+      ...filterArgs,
+    ) as Array<
     Omit<SpaceWithCounts, 'can_edit' | 'is_owner'>
   >;
 
@@ -131,6 +176,10 @@ export async function POST(request: Request) {
     description?: string;
     visibility?: string;
     tags?: unknown;
+    author?: string;
+    translator?: string;
+    proofreader?: string;
+    typesetter?: string;
   };
   try {
     body = await request.json();
@@ -140,6 +189,10 @@ export async function POST(request: Request) {
 
   const name = (body.name ?? '').trim();
   const description = (body.description ?? '').trim() || null;
+  const author = typeof body.author === 'string' ? body.author.trim().slice(0, 50) : '';
+  const translator = typeof body.translator === 'string' ? body.translator.trim().slice(0, 50) : '';
+  const proofreader = typeof body.proofreader === 'string' ? body.proofreader.trim().slice(0, 50) : '';
+  const typesetter = typeof body.typesetter === 'string' ? body.typesetter.trim().slice(0, 50) : '';
   // tags 存取为 JSON 字符串（与列表接口 distinctTags 的数组形状不一致是历史设计，
   // 前端 parseSpaceTags 已适配）
   const tags = cleanTagsInput(body.tags);
@@ -210,7 +263,7 @@ export async function POST(request: Request) {
   const createSpace = db.transaction(() => {
     const result = db
       .prepare(
-        'INSERT INTO spaces (owner_id, name, description, visibility, space_no, tags, lp_styles, progress, progress_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO spaces (owner_id, name, description, visibility, space_no, tags, lp_styles, progress, progress_at, author, translator, proofreader, typesetter) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
       .run(
         user.id,
@@ -224,6 +277,10 @@ export async function POST(request: Request) {
         // 迁移库上 progress_at 为可空列且无默认值，建空间必须显式写入
         // datetime('now') 与服务端时区/格式保持一致
         new Date().toISOString().slice(0, 19).replace('T', ' '),
+        author,
+        translator,
+        proofreader,
+        typesetter,
       );
     const spaceId = Number(result.lastInsertRowid);
     addMember(spaceId, user.id, 'owner');

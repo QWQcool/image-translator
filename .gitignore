@@ -22,9 +22,12 @@ blob-report/
 .DS_Store
 *.log
 
-# 鏈湴 IDE 鏁版嵁
+# 本地 IDE 数据与临时产物
 .codebuddy/
+.workbuddy/
+.qa-stagea/
 
 # UI 审查截图等本地产物
 /ui-review-*.png
 .tmp-tc/
+

@@ -24,9 +24,22 @@ type Draft = {
   description: string;
   tags: string[];
   visibility: SpaceVisibility;
+  author: string;
+  translator: string;
+  proofreader: string;
+  typesetter: string;
 };
 
-const EMPTY_DRAFT: Draft = { name: '', description: '', tags: [], visibility: 'private' };
+const EMPTY_DRAFT: Draft = {
+  name: '',
+  description: '',
+  tags: [],
+  visibility: 'private',
+  author: '',
+  translator: '',
+  proofreader: '',
+  typesetter: '',
+};
 
 /** 「进行中」预设：除 typeset_done 外的六态（seg 快捷键对应的 progressSet） */
 const ACTIVE_PRESET: readonly SpaceProgress[] = SPACE_PROGRESS_VALUES.filter(
@@ -40,13 +53,18 @@ export default function SpacesClient() {
   const [pendingDelete, setPendingDelete] = useState<SpaceWithCounts | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 全局查找：LIKE 匹配空间名 / 描述 / 序号（走 API q 参数）
+  // 全局查找：LIKE 匹配空间名 / 描述 / 序号 / 制作人员（走 API q 参数）
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   // 多维筛选：进度（多选并集）
   const [progressFilter, setProgressFilter] = useState<Set<SpaceProgress>>(() => new Set());
   // 多维筛选：标签（多选并集，含任一标签即命中）
   const [tagFilter, setTagFilter] = useState<Set<string>>(() => new Set());
+  // 多维筛选：制作人员独立筛选（作者 / 翻译 / 校对 / 嵌字）
+  const [authorFilter, setAuthorFilter] = useState('');
+  const [translatorFilter, setTranslatorFilter] = useState('');
+  const [proofreaderFilter, setProofreaderFilter] = useState('');
+  const [typesetterFilter, setTypesetterFilter] = useState('');
   // 多维筛选：保存时间（任意 / 相对窗口 / 自定义日期，取该日 00:00 之前保存的）
   const [savedFilter, setSavedFilter] = useState<'any' | '3d' | '7d' | '30d' | 'custom'>('any');
   const [customDate, setCustomDate] = useState('');
@@ -70,7 +88,16 @@ export default function SpacesClient() {
         : '';
 
   const load = useCallback(
-    async (opts: { q: string; progress: string[]; tags: string[]; savedBefore?: string }) => {
+    async (opts: {
+      q: string;
+      progress: string[];
+      tags: string[];
+      savedBefore?: string;
+      author?: string;
+      translator?: string;
+      proofreader?: string;
+      typesetter?: string;
+    }) => {
       setLoading(true);
       try {
         const params = new URLSearchParams();
@@ -78,6 +105,10 @@ export default function SpacesClient() {
         if (opts.progress.length > 0) params.set('progress', opts.progress.join(','));
         if (opts.tags.length > 0) params.set('tag', opts.tags.join(','));
         if (opts.savedBefore) params.set('savedBefore', opts.savedBefore);
+        if (opts.author) params.set('author', opts.author);
+        if (opts.translator) params.set('translator', opts.translator);
+        if (opts.proofreader) params.set('proofreader', opts.proofreader);
+        if (opts.typesetter) params.set('typesetter', opts.typesetter);
         const suffix = params.toString();
         const res = await fetch(`/api/spaces${suffix ? `?${suffix}` : ''}`);
         const data = await res.json();
@@ -102,8 +133,22 @@ export default function SpacesClient() {
       progress: [...progressFilter],
       tags: [...tagFilter],
       savedBefore: savedBeforeParam,
+      author: authorFilter.trim(),
+      translator: translatorFilter.trim(),
+      proofreader: proofreaderFilter.trim(),
+      typesetter: typesetterFilter.trim(),
     });
-  }, [debouncedQuery, progressFilter, tagFilter, savedBeforeParam, load]);
+  }, [
+    debouncedQuery,
+    progressFilter,
+    tagFilter,
+    savedBeforeParam,
+    authorFilter,
+    translatorFilter,
+    proofreaderFilter,
+    typesetterFilter,
+    load,
+  ]);
 
   function toggleProgressFilter(value: SpaceProgress) {
     setProgressFilter((prev) => {
@@ -125,7 +170,14 @@ export default function SpacesClient() {
 
   /** 是否有任一筛选生效（控制「清空筛选」按钮显隐） */
   const hasFilter =
-    progressFilter.size > 0 || tagFilter.size > 0 || savedFilter !== 'any' || customDate !== '';
+    progressFilter.size > 0 ||
+    tagFilter.size > 0 ||
+    savedFilter !== 'any' ||
+    customDate !== '' ||
+    authorFilter.trim() !== '' ||
+    translatorFilter.trim() !== '' ||
+    proofreaderFilter.trim() !== '' ||
+    typesetterFilter.trim() !== '';
 
   // seg 快捷预设与 progressSet 联动：由当前 progressSet 反推命中的预设
   // （空=全部；六态全勾=进行中；仅已嵌字=已完结；其余=三个都不亮，筛选按钮高亮标记微调态）
@@ -139,9 +191,15 @@ export default function SpacesClient() {
           ? 'done'
           : null;
 
-  // 筛选按钮 badge：seg 预设之外生效中的筛选数（标签数 + 保存时间 + 微调过的进度集合）
+  // 筛选按钮 badge：seg 预设之外生效中的筛选数（标签数 + 保存时间 + 制作人员筛选 + 微调过的进度集合）
   const extraFilterCount =
-    tagFilter.size + (savedBeforeParam ? 1 : 0) + (segActive === null ? 1 : 0);
+    tagFilter.size +
+    (savedBeforeParam ? 1 : 0) +
+    (segActive === null ? 1 : 0) +
+    (authorFilter.trim() ? 1 : 0) +
+    (translatorFilter.trim() ? 1 : 0) +
+    (proofreaderFilter.trim() ? 1 : 0) +
+    (typesetterFilter.trim() ? 1 : 0);
 
   /** seg 快捷键：选中即把 progressSet 设为对应预设 */
   function applySeg(kind: 'all' | 'active' | 'done') {
@@ -155,6 +213,10 @@ export default function SpacesClient() {
     setTagFilter(new Set());
     setSavedFilter('any');
     setCustomDate('');
+    setAuthorFilter('');
+    setTranslatorFilter('');
+    setProofreaderFilter('');
+    setTypesetterFilter('');
   }
 
   // 筛选候选标签：站点配置预设在前，库内动态标签去重补后
@@ -181,6 +243,10 @@ export default function SpacesClient() {
         description: draft.description.trim() || null,
         visibility: draft.visibility,
         tags: draft.tags,
+        author: draft.author.trim(),
+        translator: draft.translator.trim(),
+        proofreader: draft.proofreader.trim(),
+        typesetter: draft.typesetter.trim(),
       };
       const res = draft.id
         ? await fetch(`/api/spaces/${draft.id}`, {
@@ -204,6 +270,10 @@ export default function SpacesClient() {
         progress: [...progressFilter],
         tags: [...tagFilter],
         savedBefore: savedBeforeParam,
+        author: authorFilter.trim(),
+        translator: translatorFilter.trim(),
+        proofreader: proofreaderFilter.trim(),
+        typesetter: typesetterFilter.trim(),
       });
     } finally {
       setSaving(false);
@@ -224,6 +294,10 @@ export default function SpacesClient() {
       progress: [...progressFilter],
       tags: [...tagFilter],
       savedBefore: savedBeforeParam,
+      author: authorFilter.trim(),
+      translator: translatorFilter.trim(),
+      proofreader: proofreaderFilter.trim(),
+      typesetter: typesetterFilter.trim(),
     });
   }
 
@@ -235,8 +309,8 @@ export default function SpacesClient() {
         </button>
         <span className="text-sm text-ink-500">共 {spaces.length} 个可见空间</span>
         <input
-          className="input ml-auto w-56 py-1.5 text-xs"
-          placeholder="搜索空间名称 / 描述 / 序号…"
+          className="input ml-auto w-64 py-1.5 text-xs"
+          placeholder="搜索空间名称 / 描述 / 序号 / 制作人员…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -291,7 +365,7 @@ export default function SpacesClient() {
         )}
       </div>
 
-      {/* 筛选面板：进度七态 chips（预勾选当前 progressSet）+ 标签 chips/自定义 + 保存时间 */}
+      {/* 筛选面板：进度七态 chips + 标签 chips/自定义 + 保存时间 + 制作人员（作者/翻译/校对/嵌字） */}
       {panelOpen && (
         <div className="card space-y-3 p-4">
           <div className="flex flex-wrap items-center gap-1.5">
@@ -375,6 +449,46 @@ export default function SpacesClient() {
               />
             )}
           </label>
+
+          {/* 制作人员独立自定义筛选 */}
+          <div className="grid grid-cols-2 gap-2 border-t border-ink-800 pt-2.5 sm:grid-cols-4">
+            <label className="flex flex-col gap-1 text-[11px] text-ink-400">
+              作者
+              <input
+                className="input py-1 text-xs"
+                placeholder="按作者筛选…"
+                value={authorFilter}
+                onChange={(e) => setAuthorFilter(e.target.value)}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] text-ink-400">
+              翻译
+              <input
+                className="input py-1 text-xs"
+                placeholder="按翻译筛选…"
+                value={translatorFilter}
+                onChange={(e) => setTranslatorFilter(e.target.value)}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] text-ink-400">
+              校对
+              <input
+                className="input py-1 text-xs"
+                placeholder="按校对筛选…"
+                value={proofreaderFilter}
+                onChange={(e) => setProofreaderFilter(e.target.value)}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] text-ink-400">
+              嵌字
+              <input
+                className="input py-1 text-xs"
+                placeholder="按嵌字筛选…"
+                value={typesetterFilter}
+                onChange={(e) => setTypesetterFilter(e.target.value)}
+              />
+            </label>
+          </div>
         </div>
       )}
 
@@ -477,6 +591,31 @@ export default function SpacesClient() {
                       <span>创建者：{space.owner_name ?? '—'}</span>
                     </div>
 
+                    {(space.author || space.translator || space.proofreader || space.typesetter) && (
+                      <div className="mt-2 flex flex-wrap gap-x-2.5 gap-y-1 text-[11px] text-ink-400">
+                        {space.author && (
+                          <span>
+                            作者：<span className="text-ink-200">{space.author}</span>
+                          </span>
+                        )}
+                        {space.translator && (
+                          <span>
+                            翻译：<span className="text-ink-200">{space.translator}</span>
+                          </span>
+                        )}
+                        {space.proofreader && (
+                          <span>
+                            校对：<span className="text-ink-200">{space.proofreader}</span>
+                          </span>
+                        )}
+                        {space.typesetter && (
+                          <span>
+                            嵌字：<span className="text-ink-200">{space.typesetter}</span>
+                          </span>
+                        )}
+                      </div>
+                    )}
+
                     <div className="mt-3 flex gap-2 opacity-0 transition-opacity group-hover:opacity-100">
                       {space.can_edit ? (
                         <button
@@ -489,6 +628,10 @@ export default function SpacesClient() {
                               description: space.description ?? '',
                               tags: parseSpaceTags(space.tags),
                               visibility: space.visibility,
+                              author: space.author ?? '',
+                              translator: space.translator ?? '',
+                              proofreader: space.proofreader ?? '',
+                              typesetter: space.typesetter ?? '',
                             })
                           }
                         >
@@ -568,6 +711,56 @@ export default function SpacesClient() {
               onChange={(e) => setDraft((d) => (d ? { ...d, description: e.target.value } : d))}
               placeholder="简单说明这个空间收集什么内容"
             />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label" htmlFor="space-author">
+                作者
+              </label>
+              <input
+                id="space-author"
+                className="input text-xs"
+                value={draft?.author ?? ''}
+                onChange={(e) => setDraft((d) => (d ? { ...d, author: e.target.value } : d))}
+                placeholder="原作者名"
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="space-translator">
+                翻译
+              </label>
+              <input
+                id="space-translator"
+                className="input text-xs"
+                value={draft?.translator ?? ''}
+                onChange={(e) => setDraft((d) => (d ? { ...d, translator: e.target.value } : d))}
+                placeholder="翻译担当"
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="space-proofreader">
+                校对
+              </label>
+              <input
+                id="space-proofreader"
+                className="input text-xs"
+                value={draft?.proofreader ?? ''}
+                onChange={(e) => setDraft((d) => (d ? { ...d, proofreader: e.target.value } : d))}
+                placeholder="校对担当"
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="space-typesetter">
+                嵌字
+              </label>
+              <input
+                id="space-typesetter"
+                className="input text-xs"
+                value={draft?.typesetter ?? ''}
+                onChange={(e) => setDraft((d) => (d ? { ...d, typesetter: e.target.value } : d))}
+                placeholder="嵌字担当"
+              />
+            </div>
           </div>
           <p className="rounded-lg bg-sky/10 px-3 py-2 text-[11px] leading-relaxed text-ink-500">
             📁 文件夹对所有登录用户开放：人人可看、可编辑、可删除

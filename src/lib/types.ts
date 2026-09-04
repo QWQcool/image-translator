@@ -58,6 +58,14 @@ export type Space = {
   space_no: string | null;
   /** 标签（JSON 字符串数组），前端用 parseSpaceTags 解析 */
   tags: string | null;
+  /** 作者 */
+  author?: string | null;
+  /** 翻译 */
+  translator?: string | null;
+  /** 校对 */
+  proofreader?: string | null;
+  /** 嵌字 */
+  typesetter?: string | null;
   created_at: string;
   updated_at: string;
   lp_groups?: string | null;

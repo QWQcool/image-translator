@@ -140,6 +140,10 @@ export async function PATCH(request: Request, { params }: Params) {
     lp_groups?: Array<{ id: number; name: string }>;
     lp_styles?: Record<string, unknown>;
     lp_glossary?: unknown;
+    author?: string | null;
+    translator?: string | null;
+    proofreader?: string | null;
+    typesetter?: string | null;
   };
   try {
     body = await request.json();
@@ -148,7 +152,13 @@ export async function PATCH(request: Request, { params }: Params) {
   }
 
   const wantsManage =
-    body.name !== undefined || body.description !== undefined || body.visibility !== undefined;
+    body.name !== undefined ||
+    body.description !== undefined ||
+    body.visibility !== undefined ||
+    body.author !== undefined ||
+    body.translator !== undefined ||
+    body.proofreader !== undefined ||
+    body.typesetter !== undefined;
 
   // 标签与分组表同级（公共工作数据），edit 级权限即可修改（开放权限：登录即可改）
   // tags 存取为 JSON 字符串（列表接口 distinctTags 返回的是数组，两者形状不一致是历史
@@ -183,6 +193,32 @@ export async function PATCH(request: Request, { params }: Params) {
   // 开放空间模型：不再接受 private
   const visibility: SpaceVisibility | undefined =
     body.visibility === 'public' ? 'public' : undefined;
+
+  // 制作人员独立字段：作者、翻译、校对、嵌字（支持设为空字符串清空）
+  const author =
+    body.author !== undefined
+      ? typeof body.author === 'string'
+        ? body.author.trim().slice(0, 50)
+        : ''
+      : undefined;
+  const translator =
+    body.translator !== undefined
+      ? typeof body.translator === 'string'
+        ? body.translator.trim().slice(0, 50)
+        : ''
+      : undefined;
+  const proofreader =
+    body.proofreader !== undefined
+      ? typeof body.proofreader === 'string'
+        ? body.proofreader.trim().slice(0, 50)
+        : ''
+      : undefined;
+  const typesetter =
+    body.typesetter !== undefined
+      ? typeof body.typesetter === 'string'
+        ? body.typesetter.trim().slice(0, 50)
+        : ''
+      : undefined;
 
   // 完结状态：登录即可改（扁平权限，轻操作）；非法取值直接拒绝
   // （阶段 15 起废弃：UI 全走 progress，本参数仅保留 API 兼容）
@@ -250,7 +286,11 @@ export async function PATCH(request: Request, { params }: Params) {
     tagsJson === undefined &&
     lpGroupsJson === undefined &&
     lpStylesJson === undefined &&
-    lpGlossaryJson === undefined
+    lpGlossaryJson === undefined &&
+    author === undefined &&
+    translator === undefined &&
+    proofreader === undefined &&
+    typesetter === undefined
   ) {
     return NextResponse.json({ error: '没有需要更新的字段' }, { status: 400 });
   }
@@ -275,6 +315,10 @@ export async function PATCH(request: Request, { params }: Params) {
             lp_groups = COALESCE(?, lp_groups),
             lp_styles = COALESCE(?, lp_styles),
             lp_glossary = COALESCE(?, lp_glossary),
+            author = CASE WHEN ? = 1 THEN ? ELSE author END,
+            translator = CASE WHEN ? = 1 THEN ? ELSE translator END,
+            proofreader = CASE WHEN ? = 1 THEN ? ELSE proofreader END,
+            typesetter = CASE WHEN ? = 1 THEN ? ELSE typesetter END,
             updated_at = datetime('now')
       WHERE id = ?`,
   ).run(
@@ -289,10 +333,18 @@ export async function PATCH(request: Request, { params }: Params) {
     lpGroupsJson ?? null,
     lpStylesJson ?? null,
     lpGlossaryJson ?? null,
+    author !== undefined ? 1 : 0,
+    author ?? '',
+    translator !== undefined ? 1 : 0,
+    translator ?? '',
+    proofreader !== undefined ? 1 : 0,
+    proofreader ?? '',
+    typesetter !== undefined ? 1 : 0,
+    typesetter ?? '',
     id,
   );
 
-  // 日志：记管理类改动（名称/描述/可见性/进度），分组表与样式的编辑很频繁，不刷屏
+  // 日志：记管理类改动（名称/描述/可见性/进度/制作人员），分组表与样式的编辑很频繁，不刷屏
   const changed: string[] = [];
   if (name !== undefined) changed.push('名称');
   if (description !== undefined) changed.push('描述');
@@ -300,6 +352,14 @@ export async function PATCH(request: Request, { params }: Params) {
   if (status !== undefined) changed.push(status === 'finished' ? '标记完结' : '重新开启');
   if (progress !== undefined) {
     changed.push(`进度：${PROGRESS_LABEL[before.progress]} → ${PROGRESS_LABEL[progress]}`);
+  }
+  if (
+    author !== undefined ||
+    translator !== undefined ||
+    proofreader !== undefined ||
+    typesetter !== undefined
+  ) {
+    changed.push('制作人员');
   }
   if (changed.length > 0) {
     logOp(user.id, 'update', 'space', id, before.name, `修改空间${changed.join('、')}`);

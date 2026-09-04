@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
@@ -74,9 +75,17 @@ export async function GET(_request: Request, { params }: Params) {
     `SELECT * FROM annotations WHERE item_id = ? AND kind = 'pin' ORDER BY order_index, id`,
   );
 
+  const counts = new Map<string, number>();
   for (const item of items) {
-    // 文件名用 original_name ?? filename，PS 脚本按文件名顺序匹配图层
-    const filename = item.asset_original_name || item.asset_filename;
+    const raw =
+      (item.asset_original_name || item.asset_filename)
+        .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+        .trim() || 'image';
+    const ext = path.extname(raw);
+    const base = ext ? raw.slice(0, -ext.length) : raw;
+    const seen = counts.get(raw) ?? 0;
+    counts.set(raw, seen + 1);
+    const filename = seen === 0 ? raw : `${base}_${seen + 1}${ext}`;
     lines.push(`>>>>>>[${filename}]<<<<<<`);
 
     const pins = selectPins.all(item.item_id) as Annotation[];

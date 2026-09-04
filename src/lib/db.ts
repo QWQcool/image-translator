@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS spaces (
   space_no    TEXT,
   -- 标签（JSON 字符串数组，如 ["纯爱","鬼畜"]）
   tags        TEXT NOT NULL DEFAULT '[]',
+  -- 制作人员：作者、翻译、校对、嵌字
+  author      TEXT NOT NULL DEFAULT '',
+  translator  TEXT NOT NULL DEFAULT '',
+  proofreader TEXT NOT NULL DEFAULT '',
+  typesetter  TEXT NOT NULL DEFAULT '',
   -- 七级进度：untranslated/translated_placeholder/translated/proofread_placeholder/
   -- proofread/typeset_placeholder/typeset_done
   progress    TEXT NOT NULL DEFAULT 'untranslated',
@@ -346,6 +351,20 @@ function migrate(database: Database.Database): void {
   // 标签（JSON 字符串数组），历史空间默认空数组
   if (!latestSpaceColumns.some((column) => column.name === 'tags')) {
     database.exec(`ALTER TABLE spaces ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'`);
+  }
+
+  // 制作人员字段：作者、翻译、校对、嵌字（历史空间默认空串）
+  if (!latestSpaceColumns.some((column) => column.name === 'author')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN author TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!latestSpaceColumns.some((column) => column.name === 'translator')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN translator TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!latestSpaceColumns.some((column) => column.name === 'proofreader')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN proofreader TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!latestSpaceColumns.some((column) => column.name === 'typesetter')) {
+    database.exec(`ALTER TABLE spaces ADD COLUMN typesetter TEXT NOT NULL DEFAULT ''`);
   }
 
   // 开放空间改造：历史遗留的私人空间/私人素材一次性转成公共，
