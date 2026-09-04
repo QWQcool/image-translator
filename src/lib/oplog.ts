@@ -22,7 +22,7 @@ export type OpAction =
   | 'invite_create'
   | 'invite_delete';
 
-export type OpTargetType = 'space' | 'item' | 'asset' | 'member' | 'ai' | 'invite';
+export type OpTargetType = 'space' | 'item' | 'asset' | 'member' | 'ai' | 'invite' | 'font';
 
 /**
  * 写入一条操作日志。日志失败绝不阻断业务主流程，

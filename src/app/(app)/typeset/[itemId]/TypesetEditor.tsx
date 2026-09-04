@@ -11,7 +11,14 @@ import { DEFAULT_LP_STYLES, normalizeStyles, parseGroups, parseStyles } from '@/
 import { originalUrl } from '@/lib/media';
 import { useCollabRoom, type CollabOp } from '@/lib/use-collab-room';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
-import { normalizeTextLayers, type TypesetTextLayer } from '@/lib/typeset-layer';
+import {
+  groupVerticalRuns,
+  hasHalfWidthChars,
+  normalizeTextLayers,
+  wrapTextWithWidth,
+  type TypesetTextLayer,
+  type VerticalRun,
+} from '@/lib/typeset-layer';
 
 type Tool = 'pan' | 'brush' | 'eraser' | 'eyedropper' | 'rect' | 'lasso' | 'clone' | 'text';
 
@@ -24,6 +31,15 @@ const TOOLS: Array<{ id: Tool; label: string }> = [
   { id: 'lasso', label: '套索填充' },
   { id: 'clone', label: '仿制' },
   { id: 'text', label: '文字' },
+];
+
+/** 常用系统字体预设（CSS font-family 栈，DOM 预览与 canvas 导出共用同一份值） */
+const SYSTEM_FONT_OPTIONS: Array<{ label: string; value: string }> = [
+  { label: '微软雅黑', value: '"Microsoft YaHei", "微软雅黑"' },
+  { label: '思源黑体', value: '"Source Han Sans SC", "Noto Sans CJK SC"' },
+  { label: '宋体', value: 'SimSun, "宋体"' },
+  { label: '黑体', value: 'SimHei, "黑体"' },
+  { label: '楷体', value: 'KaiTi, "楷体"' },
 ];
 
 function newLayerId(): string {
@@ -123,6 +139,14 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   // 保存成品：进行中 / 成功提示（「已保存，本图共 n 个成品版本」）
   const [savingOutput, setSavingOutput] = useState(false);
   const [outputNotice, setOutputNotice] = useState<string | null>(null);
+  // 自定义字体：已上传列表 + 上传进行中标记
+  const [fontList, setFontList] = useState<string[]>([]);
+  const [fontUploading, setFontUploading] = useState(false);
+  const fontInputRef = useRef<HTMLInputElement>(null);
+  /** 已注册到 document.fonts 的字体名（幂等加载） */
+  const loadedFonts = useRef<Set<string>>(new Set());
+  /** 离屏测量 canvas（横排限宽断行用，复用单个上下文） */
+  const measureCtx = useRef<CanvasRenderingContext2D | null>(null);
 
   const imageWidth = asset?.width ?? 1200;
   const imageHeight = asset?.height ?? 800;
@@ -221,6 +245,27 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 进入嵌字页：拉取自定义字体列表并逐个注册到 document.fonts（失败字体静默跳过，不影响编辑）
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/fonts');
+        if (!res.ok) return;
+        const data = (await res.json()) as { fonts?: unknown };
+        if (cancelled) return;
+        const names = Array.isArray(data.fonts) ? (data.fonts as string[]) : [];
+        setFontList(names);
+        names.forEach((name) => void loadCustomFont(name));
+      } catch {
+        // 字体列表拉取失败不影响编辑
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const saveRef = useRef<() => Promise<void>>(async () => {});
   const undoRef = useRef<() => Promise<void>>(async () => {});
@@ -833,6 +878,86 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     }));
   }
 
+  /** 注册单个自定义字体到 document.fonts；重复调用幂等，失败静默跳过 */
+  async function loadCustomFont(name: string) {
+    if (loadedFonts.current.has(name)) return;
+    loadedFonts.current.add(name); // 先占位，避免并发重复加载同一字体
+    try {
+      const res = await fetch(`/api/fonts/${encodeURIComponent(name)}`);
+      if (!res.ok) {
+        loadedFonts.current.delete(name);
+        return;
+      }
+      const buf = await res.arrayBuffer();
+      const face = new FontFace(name, buf);
+      await face.load();
+      document.fonts.add(face);
+    } catch {
+      loadedFonts.current.delete(name);
+    }
+  }
+
+  /** 上传自定义字体：成功后注册进 document.fonts 并自动选中到当前文字层 */
+  async function uploadFont(file: File) {
+    setFontUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const res = await fetch('/api/fonts', { method: 'POST', body: form });
+      const data = (await res.json().catch(() => ({}))) as { name?: string; error?: string };
+      if (!res.ok) {
+        setError(data.error ?? '字体上传失败');
+        return;
+      }
+      const name = data.name ?? '';
+      if (!name) return;
+      setFontList((prev) => (prev.includes(name) ? prev : [...prev, name]));
+      await loadCustomFont(name);
+      if (selectedTextRef.current) {
+        // 存带引号的字体名，DOM / canvas 的 font-family 直接可用
+        patchLayer(selectedTextRef.current, { fontFamily: JSON.stringify(name) });
+      }
+    } catch {
+      setError('字体上传失败');
+    } finally {
+      setFontUploading(false);
+    }
+  }
+
+  /** 层的 canvas 字体表达式（DOM 预览与导出共用同一份，保证两端字体一致） */
+  function layerFontExpr(layer: TypesetTextLayer): string {
+    const family = layer.fontFamily
+      ? `${layer.fontFamily}, "Noto Sans SC", sans-serif`
+      : '"Noto Sans SC", sans-serif';
+    return `${layer.fontWeight} ${layer.fontSize}px ${family}`;
+  }
+
+  /** 离屏逐字符测量（横排限宽断行用）；SSR 或 ctx 不可用时返回 null */
+  function measureFor(layer: TypesetTextLayer): ((ch: string) => number) | null {
+    if (typeof document === 'undefined') return null;
+    if (!measureCtx.current) {
+      measureCtx.current = document.createElement('canvas').getContext('2d');
+    }
+    const ctx = measureCtx.current;
+    if (!ctx) return null;
+    ctx.font = layerFontExpr(layer);
+    return (ch: string) => ctx.measureText(ch).width;
+  }
+
+  /**
+   * 横排限宽/字距布局（DOM 预览与 renderPngBlob 共用）：
+   * 返回逐行逐字符宽度；null = 走旧渲染路径（不限宽且无字距，老数据零变化）。
+   */
+  function layoutHorizontal(layer: TypesetTextLayer): Array<Array<{ ch: string; w: number }>> | null {
+    if (layer.width == null && !layer.letterSpacing) return null;
+    const m = measureFor(layer) ?? ((ch: string) => ch.length * layer.fontSize);
+    const spacingPx = (layer.letterSpacing ?? 0) * layer.fontSize;
+    const maxWidth = (layer.width ?? 1) * imageWidth;
+    return wrapTextWithWidth(layer.text, m, maxWidth, spacingPx).map((line) =>
+      Array.from(line).map((ch) => ({ ch, w: m(ch) })),
+    );
+  }
+
   /**
    * 更新选中文字层的通用入口（字号/颜色/特效等属性面板共用）：
    * coalesce=true 用于滑杆等连续输入（停手后落一步历史 + 广播一次），
@@ -879,6 +1004,18 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
     const paint = paintRef.current;
     if (!img || !paint) return null;
+    // 导出前确保自定义字体就绪：canvas 绘制不会自动等待 FontFace 加载完成，
+    // 不等会回落默认字体导致导出与预览不一致
+    await document.fonts.ready;
+    await Promise.all(
+      textLayers
+        .filter((l) => l.visible !== false && l.fontFamily)
+        .map((l) =>
+          document.fonts
+            .load(`${l.fontWeight} ${l.fontSize}px ${l.fontFamily}`, l.text)
+            .catch(() => undefined),
+        ),
+    );
     const canvas = document.createElement('canvas');
     canvas.width = imageWidth;
     canvas.height = imageHeight;
@@ -889,7 +1026,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     for (const layer of textLayers) {
       if (layer.visible === false) continue;
       ctx.save();
-      ctx.font = `${layer.fontWeight} ${layer.fontSize}px "Noto Sans SC", sans-serif`;
+      ctx.font = layerFontExpr(layer);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.lineWidth = layer.strokeWidth;
@@ -938,8 +1075,54 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       const originX = layer.x * imageWidth;
       const originY = layer.y * imageHeight;
       const lines = layer.text.split('\n');
-      if (layer.vertical) {
-        // 竖排：每行文字单独成一列，从右往左排（阅读顺序与日漫一致）
+      // 字距（px）与纵中横排开关（纵中横排仅竖排生效，横排忽略）
+      const spacingPx = (layer.letterSpacing ?? 0) * layer.fontSize;
+      const useTcy = layer.tcyEnabled !== false;
+      // 竖排逐格布局启用条件：有字距，或开启纵中横排且文本含半角字符段
+      const cellVertical =
+        layer.vertical && (spacingPx !== 0 || (useTcy && hasHalfWidthChars(layer.text)));
+      if (cellVertical) {
+        // 竖排逐格布局：每个字符/纵中横段占固定字格，字距 = 字格间距增量。
+        // DOM 预览用同一套几何（列宽/字格高/段占格数），保证预览与导出一致。
+        const cellH = layer.fontSize * layer.lineHeight + spacingPx;
+        const columnGap = layer.fontSize * 0.35;
+        const totalWidth = (lines.length - 1) * (layer.fontSize + columnGap);
+        // 纵中横段占格数：半角字符按 0.5em 估宽，向上取整到字格（与 DOM 侧同一公式）
+        const tcyCells = (runText: string) =>
+          Math.max(
+            2,
+            Math.ceil(
+              (runText.length * 0.5 * layer.fontSize) /
+                Math.max(1, layer.fontSize * layer.lineHeight),
+            ),
+          );
+        lines.forEach((line, col) => {
+          const runs: VerticalRun[] = useTcy
+            ? groupVerticalRuns(line)
+            : Array.from(line).map((ch) => ({ kind: 'char' as const, text: ch }));
+          const advances = runs.map((run) =>
+            run.kind === 'char' || run.small ? cellH : tcyCells(run.text) * cellH,
+          );
+          const colX = originX - totalWidth / 2 + col * (layer.fontSize + columnGap);
+          const total = advances.reduce((sum, a) => sum + a, 0);
+          let cursor = originY - total / 2;
+          runs.forEach((run, ri) => {
+            const cy = cursor + advances[ri] / 2;
+            if (run.kind === 'char') {
+              drawOne(run.text, colX, cy);
+            } else {
+              // 纵中横排：整段顺时针旋转 90°（≤2 字符占一格，≥3 字符占多格）
+              ctx.save();
+              ctx.translate(colX, cy);
+              ctx.rotate(Math.PI / 2);
+              drawOne(run.text, 0, 0);
+              ctx.restore();
+            }
+            cursor += advances[ri];
+          });
+        });
+      } else if (layer.vertical) {
+        // 旧竖排路径（无字距、无纵中横排）：保持原样，老数据导出不变
         const columnGap = layer.fontSize * 0.35;
         const totalWidth = (lines.length - 1) * (layer.fontSize + columnGap);
         lines.forEach((line, col) => {
@@ -951,11 +1134,33 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           });
         });
       } else {
-        ctx.textAlign = layer.align === 'left' ? 'left' : layer.align === 'right' ? 'right' : 'center';
-        lines.forEach((line, i) => {
-          const y = originY + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
-          drawOne(line, originX, y);
-        });
+        const hLayout = layoutHorizontal(layer);
+        if (hLayout) {
+          // 限宽自动换行 + 字距：逐行逐字符按测量宽度绘制（与 DOM 预览同一套行结果）
+          ctx.textAlign = 'left';
+          hLayout.forEach((cells, i) => {
+            const y = originY + (i - (hLayout.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+            const lineWidth =
+              cells.reduce((sum, c) => sum + c.w, 0) + spacingPx * Math.max(0, cells.length - 1);
+            let x =
+              layer.align === 'left'
+                ? originX
+                : layer.align === 'right'
+                  ? originX - lineWidth
+                  : originX - lineWidth / 2;
+            cells.forEach((cell) => {
+              drawOne(cell.ch, x, y);
+              x += cell.w + spacingPx;
+            });
+          });
+        } else {
+          // 旧横排路径（不限宽且无字距）：保持原样，老数据导出不变
+          ctx.textAlign = layer.align === 'left' ? 'left' : layer.align === 'right' ? 'right' : 'center';
+          lines.forEach((line, i) => {
+            const y = originY + (i - (lines.length - 1) / 2) * layer.fontSize * layer.lineHeight;
+            drawOne(line, originX, y);
+          });
+        }
       }
       ctx.restore();
     }
@@ -1352,46 +1557,185 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                       (layer.shadowOffset?.y ?? 0.06) * layer.fontSize
                     }px ${(layer.shadowBlurRatio ?? 0.15) * layer.fontSize}px ${layer.shadowColor}`
                   : undefined;
+                const selectedCls = selectedText === layer.id ? 'outline outline-2 outline-halo' : '';
+                const commonStyle = {
+                  left: `${layer.x * 100}%`,
+                  top: `${layer.y * 100}%`,
+                  color: layer.color,
+                  fontSize: layer.fontSize,
+                  fontWeight: layer.fontWeight,
+                  WebkitTextStroke: strokeCss,
+                  textShadow: shadowCss,
+                  fontFamily: `${layer.fontFamily ? `${layer.fontFamily}, ` : ''}"Noto Sans SC", sans-serif`,
+                  display: layer.visible === false ? ('none' as const) : undefined,
+                  pointerEvents: tool === 'text' ? ('auto' as const) : ('none' as const),
+                  cursor: tool === 'text' ? ('move' as const) : undefined,
+                };
+                const onLayerPointerDown = (event: React.PointerEvent) => {
+                  if (tool !== 'text') return;
+                  event.stopPropagation();
+                  setSelectedText(layer.id);
+                  try {
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                  } catch {
+                    // 浏览器不支持时退化为窗口级监听，拖拽仍然可用
+                  }
+                  textDrag.current = {
+                    id: layer.id,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    origX: layer.x,
+                    origY: layer.y,
+                  };
+                };
+
+                // 横排限宽自动换行 + 字距：逐行逐字符布局（与导出共用同一套断行/测量结果）
+                const hLayout = !layer.vertical ? layoutHorizontal(layer) : null;
+                if (hLayout) {
+                  const spacingPx = (layer.letterSpacing ?? 0) * layer.fontSize;
+                  // 水平对齐锚点与 canvas 导出一致：左对齐=行首贴 originX，右对齐=行尾贴 originX，
+                  // 居中=容器中心贴 originX（canvas 侧见 renderPngBlob 的 align 分支）
+                  const anchorX =
+                    layer.align === 'left' ? '0%' : layer.align === 'right' ? '-100%' : '-50%';
+                  return (
+                    <div
+                      key={layer.id}
+                      className={`absolute ${selectedCls}`}
+                      style={{
+                        ...commonStyle,
+                        transform: `translate(${anchorX}, -50%)`,
+                        lineHeight: layer.lineHeight,
+                        display: layer.visible === false ? 'none' : 'flex',
+                        flexDirection: 'column',
+                        alignItems:
+                          layer.align === 'left' ? 'flex-start' : layer.align === 'right' ? 'flex-end' : 'center',
+                      }}
+                      onPointerDown={onLayerPointerDown}
+                    >
+                      {hLayout.map((cells, i) => (
+                        <div key={i} style={{ display: 'flex', whiteSpace: 'pre' }}>
+                          {cells.map((cell, j) => (
+                            <span
+                              key={j}
+                              style={{
+                                display: 'inline-block',
+                                width: cell.w,
+                                marginRight: j < cells.length - 1 ? spacingPx : 0,
+                                textAlign: 'center',
+                              }}
+                            >
+                              {cell.ch}
+                            </span>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                }
+
+                // 竖排逐格布局：字距 / 纵中横排（与导出共用同一套几何公式）
+                if (layer.vertical) {
+                  const fs = layer.fontSize;
+                  const spacingPx = (layer.letterSpacing ?? 0) * fs;
+                  const useTcy = layer.tcyEnabled !== false;
+                  if (spacingPx !== 0 || (useTcy && hasHalfWidthChars(layer.text))) {
+                    const cellH = fs * layer.lineHeight + spacingPx;
+                    const columnGap = fs * 0.35;
+                    const tcyCells = (runText: string) =>
+                      Math.max(
+                        2,
+                        Math.ceil((runText.length * 0.5 * fs) / Math.max(1, fs * layer.lineHeight)),
+                      );
+                    const columns = layer.text.split('\n').map((line) =>
+                      useTcy
+                        ? groupVerticalRuns(line)
+                        : Array.from(line).map((ch) => ({ kind: 'char' as const, text: ch })),
+                    );
+                    const colHeights = columns.map((runs) =>
+                      runs.reduce(
+                        (sum, run) => sum + (run.kind === 'char' || run.small ? cellH : tcyCells(run.text) * cellH),
+                        0,
+                      ),
+                    );
+                    const containerW = (columns.length - 1) * (fs + columnGap) + fs;
+                    const containerH = Math.max(fs, ...colHeights);
+                    return (
+                      <div
+                        key={layer.id}
+                        className={`absolute -translate-x-1/2 -translate-y-1/2 ${selectedCls}`}
+                        style={commonStyle}
+                        onPointerDown={onLayerPointerDown}
+                      >
+                        <div style={{ position: 'relative', width: containerW, height: containerH }}>
+                          {columns.map((runs, col) => (
+                            <div
+                              key={col}
+                              style={{
+                                position: 'absolute',
+                                left: col * (fs + columnGap),
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                width: fs,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                              }}
+                            >
+                              {runs.map((run, ri) => {
+                                const h = run.kind === 'char' || run.small ? cellH : tcyCells(run.text) * cellH;
+                                return (
+                                  <div
+                                    key={ri}
+                                    style={{
+                                      height: h,
+                                      width: '100%',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                    }}
+                                  >
+                                    {run.kind === 'char' ? (
+                                      <span style={{ lineHeight: 1 }}>{run.text}</span>
+                                    ) : run.small ? (
+                                      // 纵中横排（≤2 字符）：顺时针旋转 90°，占一个字格
+                                      <span
+                                        style={{ display: 'inline-block', transform: 'rotate(90deg)', whiteSpace: 'nowrap', lineHeight: 1 }}
+                                      >
+                                        {run.text}
+                                      </span>
+                                    ) : (
+                                      // 纵中横排（≥3 字符）：整段横倒，占竖向多格
+                                      <span style={{ writingMode: 'vertical-rl', textOrientation: 'sideways', lineHeight: 1 }}>
+                                        {run.text}
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  }
+                }
+
+                // 旧路径（不限宽且无字距的横排 / 无字距无纵中横排的竖排）：保持原有 CSS 行为
                 return (
-                <div
-                  key={layer.id}
-                  className={`absolute max-w-[40%] -translate-x-1/2 -translate-y-1/2 whitespace-pre-wrap ${
-                    layer.vertical ? 'text-start' : 'text-center'
-                  } ${selectedText === layer.id ? 'outline outline-2 outline-halo' : ''}`}
-                  style={{
-                    left: `${layer.x * 100}%`,
-                    top: `${layer.y * 100}%`,
-                    color: layer.color,
-                    fontSize: layer.fontSize,
-                    fontWeight: layer.fontWeight,
-                    WebkitTextStroke: strokeCss,
-                    textShadow: shadowCss,
-                    lineHeight: layer.lineHeight,
-                    writingMode: layer.vertical ? 'vertical-rl' : 'horizontal-tb',
-                    display: layer.visible === false ? 'none' : undefined,
-                    pointerEvents: tool === 'text' ? 'auto' : 'none',
-                    cursor: tool === 'text' ? 'move' : undefined,
-                  }}
-                  onPointerDown={(event) => {
-                    if (tool !== 'text') return;
-                    event.stopPropagation();
-                    setSelectedText(layer.id);
-                    try {
-                      event.currentTarget.setPointerCapture(event.pointerId);
-                    } catch {
-                      // 浏览器不支持时退化为窗口级监听，拖拽仍然可用
-                    }
-                    textDrag.current = {
-                      id: layer.id,
-                      startX: event.clientX,
-                      startY: event.clientY,
-                      origX: layer.x,
-                      origY: layer.y,
-                    };
-                  }}
-                >
-                  {layer.text}
-                </div>
+                  <div
+                    key={layer.id}
+                    className={`absolute max-w-[40%] -translate-x-1/2 -translate-y-1/2 whitespace-pre-wrap ${
+                      layer.vertical ? 'text-start' : 'text-center'
+                    } ${selectedCls}`}
+                    style={{
+                      ...commonStyle,
+                      lineHeight: layer.lineHeight,
+                      writingMode: layer.vertical ? 'vertical-rl' : 'horizontal-tb',
+                    }}
+                    onPointerDown={onLayerPointerDown}
+                  >
+                    {layer.text}
+                  </div>
                 );
               })}
               {rect && (
@@ -1515,6 +1859,108 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   className="w-full accent-sky"
                 />
               </label>
+
+              {/* 字体：默认 / 系统预设 / 自定义上传（上传成功后注册并自动选中） */}
+              <label className="block text-[11px] text-ink-500">
+                字体
+                <span className="mt-1 flex items-center gap-1">
+                  <select
+                    className="input h-7 min-w-0 flex-1 text-xs"
+                    value={selected.fontFamily ?? ''}
+                    onChange={(e) =>
+                      patchLayer(selected.id, { fontFamily: e.target.value || undefined })
+                    }
+                  >
+                    <option value="">默认字体</option>
+                    <optgroup label="系统">
+                      {SYSTEM_FONT_OPTIONS.map((f) => (
+                        <option key={f.value} value={f.value}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                    {fontList.length > 0 && (
+                      <optgroup label="自定义">
+                        {fontList.map((name) => (
+                          <option key={name} value={JSON.stringify(name)}>
+                            {name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn-ghost shrink-0 px-1.5 py-0.5 text-[10px]"
+                    disabled={fontUploading}
+                    title="上传 .ttf/.otf/.woff/.woff2（≤30MB）"
+                    onClick={() => fontInputRef.current?.click()}
+                  >
+                    {fontUploading ? '…' : '上传'}
+                  </button>
+                  <input
+                    ref={fontInputRef}
+                    type="file"
+                    accept=".ttf,.otf,.woff,.woff2"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (file) void uploadFont(file);
+                    }}
+                  />
+                </span>
+              </label>
+
+              {/* 宽度：横排限宽自动换行（相对画布宽度比例 0.05~1），不限宽保持手动 \n 断行 */}
+              <div className="text-[11px] text-ink-500">
+                <span className="flex items-center justify-between">
+                  <span>宽度 {selected.width != null ? `${Math.round(selected.width * 100)}%` : '不限宽'}</span>
+                  <label className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={selected.width != null}
+                      onChange={(e) => patchLayer(selected.id, { width: e.target.checked ? 0.5 : null })}
+                    />
+                    限宽
+                  </label>
+                </span>
+                <input
+                  type="range"
+                  min={0.05}
+                  max={1}
+                  step={0.01}
+                  value={selected.width ?? 0.5}
+                  disabled={selected.width == null}
+                  onChange={(e) => patchLayer(selected.id, { width: Number(e.target.value) }, true)}
+                  className="mt-1 w-full accent-sky"
+                />
+              </div>
+
+              {/* 字距：横排 = 字间距，竖排 = 字格间距（相对字号比例） */}
+              <label className="block text-[11px] text-ink-500">
+                字距 {(selected.letterSpacing ?? 0).toFixed(2)}
+                <input
+                  type="range"
+                  min={-0.2}
+                  max={0.5}
+                  step={0.01}
+                  value={selected.letterSpacing ?? 0}
+                  onChange={(e) => patchLayer(selected.id, { letterSpacing: Number(e.target.value) }, true)}
+                  className="mt-1 w-full accent-sky"
+                />
+              </label>
+
+              {/* 纵中横排：竖排半角字符段转正（仅竖排层显示） */}
+              {selected.vertical && (
+                <button
+                  type="button"
+                  className={`btn-ghost w-full py-1 text-xs ${selected.tcyEnabled ?? true ? 'btn-primary' : ''}`}
+                  onClick={() => patchLayer(selected.id, { tcyEnabled: !(selected.tcyEnabled ?? true) })}
+                >
+                  纵中横排 {(selected.tcyEnabled ?? true) ? '开' : '关'}
+                </button>
+              )}
 
               {/* 文字特效：描边与阴影（宽度/模糊/偏移均为字号比例，随保存/广播/撤销链路走） */}
               <div className="space-y-2 rounded-md border border-ink-700 p-2">

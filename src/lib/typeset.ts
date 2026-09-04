@@ -31,6 +31,15 @@ export type TypesetTextLayer = {
   shadowBlurRatio?: number;
   /** 阴影偏移，相对字号比例 -0.5~0.5，缺省 { x: 0, y: 0.06 } */
   shadowOffset?: { x: number; y: number };
+  // ---- 排版第一梯队（逐层可选，老数据缺省 = 旧行为，零迁移）----
+  /** 文本框宽度：相对画布宽度比例 0.05~1；null = 不限宽（保持手动 \n 断行的旧行为）。仅横排生效 */
+  width?: number | null;
+  /** 字距：相对字号比例 -0.2~0.5，缺省 0。横排 = 字间距，竖排 = 字格间距 */
+  letterSpacing?: number;
+  /** 字体：CSS font-family 名（自定义字体为带引号的字体名），缺省 undefined = 默认字体 */
+  fontFamily?: string;
+  /** 纵中横排：竖排半角字符段转正，缺省 true（仅竖排层生效，横排忽略） */
+  tcyEnabled?: boolean;
 };
 
 export type TypesetMeta = {
