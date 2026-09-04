@@ -1,5 +1,6 @@
 node_modules/
 .next/
+.next-e2e-*/
 out/
 build/
 *.tsbuildinfo
@@ -7,6 +8,12 @@ next-env.d.ts
 
 # 运行时数据：数据库与上传的图片
 data/
+
+# Playwright E2E：临时 DATA_DIR 与报告产物
+.tmp/
+test-results/
+playwright-report/
+blob-report/
 
 .env
 .env.local

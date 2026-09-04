@@ -355,6 +355,16 @@ src/
 
 ---
 
+## 测试
+
+- **API 全量回归**：`node tests/api-regression.mjs [baseUrl]`（139 项断言，内置 mock OpenAI，
+  自建数据自清理；可用 `INVITE_CODE` / `USERNAME`+`PASSWORD` / `SKIP_AI=1` 控制行为）
+- **E2E 冒烟**：`npx playwright install chromium` 后 `npm run e2e`（7 条核心链路，
+  TRIAL_MODE 生产构建 + 独立端口/DATA_DIR，不污染本地数据；详见 tests/e2e/README.md）
+- **CI**：push 到 master 自动跑 E2E（ubuntu）；打 `v*` tag 自动构建体验版 Release
+
+---
+
 ## 图片来源
 
 **全部零 API 成本**：
