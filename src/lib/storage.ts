@@ -32,6 +32,7 @@ export type StoredImage = {
   sizeBytes: number;
   /** 原文件 MIME，与上传格式一致 */
   storedMimeType: string;
+  sha256: string;
 };
 
 function stemOf(filename: string): string {
@@ -114,6 +115,7 @@ export async function storeImage(input: Buffer, mimeType: string): Promise<Store
   }
 
   const stat = await fs.stat(path.join(IMAGES_DIR, filename));
+  const sha256 = crypto.createHash('sha256').update(input).digest('hex');
 
   return {
     filename,
@@ -122,6 +124,7 @@ export async function storeImage(input: Buffer, mimeType: string): Promise<Store
     height,
     sizeBytes: stat.size,
     storedMimeType: mimeType === 'image/jpg' ? 'image/jpeg' : mimeType,
+    sha256,
   };
 }
 

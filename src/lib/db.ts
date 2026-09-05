@@ -28,9 +28,11 @@ CREATE TABLE IF NOT EXISTS assets (
   source_url     TEXT,
   source_author  TEXT,
   source_post_id TEXT,
+  sha256         TEXT,
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_assets_owner ON assets(owner_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_assets_sha256 ON assets(sha256) WHERE sha256 IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_source
   ON assets(owner_id, source_post_id) WHERE source_post_id IS NOT NULL;
 
@@ -237,6 +239,11 @@ function migrate(database: Database.Database): void {
 
   // 素材软删除：deleted_at 非空 = 在回收站里；磁盘文件保留，恢复即可用
   safeAddColumn('assets', 'deleted_at', `deleted_at TEXT`);
+  // 素材哈希：内容查重
+  safeAddColumn('assets', 'sha256', `sha256 TEXT`);
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_assets_sha256 ON assets(sha256) WHERE sha256 IS NOT NULL`,
+  );
 
   // 全站操作日志：空间/素材/条目的增删改、AI 调用等，日志页只展示最近 500 条
   database.exec(`

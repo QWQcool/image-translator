@@ -207,7 +207,7 @@ export async function PATCH(request: Request, { params }: Params) {
         ? body.translator.trim().slice(0, 50)
         : ''
       : undefined;
-  const proofreader =
+  let proofreader =
     body.proofreader !== undefined
       ? typeof body.proofreader === 'string'
         ? body.proofreader.trim().slice(0, 50)
@@ -234,6 +234,20 @@ export async function PATCH(request: Request, { params }: Params) {
     : undefined;
   if (body.progress !== undefined && progress === undefined) {
     return NextResponse.json({ error: 'progress 不是合法的进度值' }, { status: 400 });
+  }
+
+  // 制作人员自动填充：若切换至校对进度，且未显式指定校对人，若当前空间校对人为空，自动填入当前登录人
+  if (
+    proofreader === undefined &&
+    progress !== undefined &&
+    (progress === 'proofread' || progress === 'proofread_placeholder')
+  ) {
+    const currentSpace = db.prepare('SELECT proofreader FROM spaces WHERE id = ?').get(id) as
+      | { proofreader: string }
+      | undefined;
+    if (currentSpace && !currentSpace.proofreader) {
+      proofreader = user.username;
+    }
   }
 
   // LabelPlus 分组表：1~9 组，名字留空的组视为停用

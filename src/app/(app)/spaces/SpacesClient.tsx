@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
@@ -47,12 +48,19 @@ const ACTIVE_PRESET: readonly SpaceProgress[] = SPACE_PROGRESS_VALUES.filter(
 );
 
 export default function SpacesClient() {
+  const router = useRouter();
   const [spaces, setSpaces] = useState<SpaceWithCounts[]>([]);
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [pendingDelete, setPendingDelete] = useState<SpaceWithCounts | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 导入完整工程包 ZIP 弹窗与状态
+  const [importZipOpen, setImportZipOpen] = useState(false);
+  const [importZipFile, setImportZipFile] = useState<File | null>(null);
+  const [importSpaceName, setImportSpaceName] = useState('');
+  const [importingZip, setImportingZip] = useState(false);
+  const [importZipError, setImportZipError] = useState<string | null>(null);
   // 全局查找：LIKE 匹配空间名 / 描述 / 序号 / 制作人员（走 API q 参数）
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -301,11 +309,56 @@ export default function SpacesClient() {
     });
   }
 
+  async function handleImportZip(e: React.FormEvent) {
+    e.preventDefault();
+    if (!importZipFile) {
+      setImportZipError('请先选择 ZIP 压缩包');
+      return;
+    }
+    setImportingZip(true);
+    setImportZipError(null);
+    try {
+      const form = new FormData();
+      form.append('file', importZipFile);
+      if (importSpaceName.trim()) {
+        form.append('name', importSpaceName.trim());
+      }
+      const res = await fetch('/api/spaces/import-zip', {
+        method: 'POST',
+        body: form,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setImportZipError(data.error ?? '导入失败');
+        return;
+      }
+      setImportZipOpen(false);
+      router.push(`/spaces/${data.spaceId}`);
+    } catch {
+      setImportZipError('网络异常，工程包导入失败');
+    } finally {
+      setImportingZip(false);
+    }
+  }
+
   return (
     <div ref={gridScope} className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <button type="button" className="btn-primary" onClick={() => setDraft({ ...EMPTY_DRAFT })}>
           新建空间
+        </button>
+        <button
+          type="button"
+          className="btn-ghost"
+          onClick={() => {
+            setImportZipOpen(true);
+            setImportZipFile(null);
+            setImportSpaceName('');
+            setImportZipError(null);
+          }}
+          title="上传包含原图与 翻译_0.txt 的工程包一键建空间"
+        >
+          📥 导入工程 ZIP
         </button>
         <span className="text-sm text-ink-500">共 {spaces.length} 个可见空间</span>
         <input
@@ -789,6 +842,73 @@ export default function SpacesClient() {
           {pendingDelete?.annotation_count ?? 0} 条标注，所有协作者都会失去访问权，
           <strong className="text-blush">此操作不可撤销</strong>。
         </p>
+      </Modal>
+
+      {/* 导入完整工程包 ZIP 弹窗 */}
+      <Modal
+        open={importZipOpen}
+        title="📥 导入 LabelPlus / 完整工程包 ZIP"
+        onClose={() => !importingZip && setImportZipOpen(false)}
+        footer={
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={importingZip}
+              onClick={() => setImportZipOpen(false)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={!importZipFile || importingZip}
+              onClick={(e) => void handleImportZip(e)}
+            >
+              {importingZip ? '正在解包并导入…' : '开始导入'}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          <p className="text-xs text-ink-300">
+            支持直接上传包含漫画原图和 <code className="text-sky">翻译_0.txt</code>（或 <code className="text-sky">annotations.json</code>）的工程压缩包，系统将全自动建空间并还原所有台词标号。
+          </p>
+
+          <div>
+            <label className="label">工程压缩包 (.zip) *</label>
+            <input
+              type="file"
+              accept=".zip,application/zip"
+              disabled={importingZip}
+              className="input file:mr-3 file:rounded file:border-0 file:bg-sky file:px-2.5 file:py-1 file:text-xs file:font-medium file:text-white hover:file:bg-sky/80"
+              onChange={(e) => {
+                const file = e.target.files?.[0] ?? null;
+                setImportZipFile(file);
+                if (file && !importSpaceName) {
+                  setImportSpaceName(file.name.replace(/\.zip$/i, ''));
+                }
+              }}
+            />
+          </div>
+
+          <div>
+            <label className="label">新建空间名称（选填，默认按压缩包文件名命名）</label>
+            <input
+              className="input text-xs"
+              placeholder="例如：第01话 生肉与初翻"
+              value={importSpaceName}
+              disabled={importingZip}
+              onChange={(e) => setImportSpaceName(e.target.value)}
+            />
+          </div>
+
+          <div className="rounded-lg bg-sky/10 p-3 text-[11px] leading-relaxed text-ink-400">
+            💡 提示：压缩包内的生肉图片将按文件名自然排序，标号将按对应文件名或序号精准还原，无需手动一张张上传与重新标号。
+          </div>
+
+          {importZipError && <p className="notice-error">{importZipError}</p>}
+        </div>
       </Modal>
     </div>
   );

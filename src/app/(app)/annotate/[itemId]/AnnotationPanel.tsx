@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect } from 'react';
 import EmptyState from '@/components/EmptyState';
 import { mergeBgColor, splitBgColor, type DraftAnnotation } from '@/lib/annotation';
 
@@ -8,6 +9,8 @@ const ALIGN_OPTIONS: Array<{ value: DraftAnnotation['align']; label: string }> =
   { value: 'center', label: '中' },
   { value: 'right', label: '右' },
 ];
+
+const COMIC_SYMBOLS = ['「', '」', '『', '』', '……', '♥', '♪', '★', '！？', '—', '～', '（', '）'];
 
 export default function AnnotationPanel({
   annotations,
@@ -36,6 +39,41 @@ export default function AnnotationPanel({
     onChange(annotations.map((item) => (item.key === key ? { ...item, ...updates } : item)));
   }
 
+  // 选中项变化时自动滚动并聚焦输入框
+  useEffect(() => {
+    if (!selectedKey) return;
+    const card = document.querySelector(`[data-annotation-key="${selectedKey}"]`) as HTMLElement | null;
+    if (card) {
+      card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      const textarea = card.querySelector('textarea[data-role="translation"]') as HTMLTextAreaElement | null;
+      if (textarea && document.activeElement !== textarea) {
+        textarea.focus();
+      }
+    }
+  }, [selectedKey]);
+
+  function insertSymbol(sym: string) {
+    if (!selectedKey || readOnly) return;
+    const card = document.querySelector(`[data-annotation-key="${selectedKey}"]`);
+    const textarea = card?.querySelector('textarea[data-role="translation"]') as HTMLTextAreaElement | null;
+    const currentAnnotation = annotations.find((a) => a.key === selectedKey);
+    if (!currentAnnotation) return;
+
+    if (textarea) {
+      const start = textarea.selectionStart ?? textarea.value.length;
+      const end = textarea.selectionEnd ?? textarea.value.length;
+      const val = textarea.value;
+      const nextVal = val.slice(0, start) + sym + val.slice(end);
+      patch(selectedKey, { text: nextVal, runs: null });
+      setTimeout(() => {
+        textarea.focus();
+        textarea.setSelectionRange(start + sym.length, start + sym.length);
+      }, 0);
+    } else {
+      patch(selectedKey, { text: currentAnnotation.text + sym, runs: null });
+    }
+  }
+
   if (annotations.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -61,6 +99,26 @@ export default function AnnotationPanel({
 
   return (
     <div className="space-y-3">
+      {/* 快捷漫画排版符号条 */}
+      {!readOnly && (
+        <div className="sticky top-0 z-10 -mx-1 mb-2 flex flex-wrap items-center gap-1 rounded-lg border border-ink-700/70 bg-cloud/95 p-1.5 backdrop-blur shadow-sm">
+          <span className="px-1 text-[11px] font-medium text-ink-400">快捷符号:</span>
+          {COMIC_SYMBOLS.map((sym) => (
+            <button
+              key={sym}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault(); // 防止失去输入框焦点
+                insertSymbol(sym);
+              }}
+              className="rounded px-1.5 py-0.5 text-xs font-medium text-ink-200 hover:bg-sky/20 hover:text-sky active:scale-95 transition-colors"
+              title={`插入 ${sym}`}
+            >
+              {sym}
+            </button>
+          ))}
+        </div>
+      )}
       {annotations.map((annotation, index) => {
         const active = annotation.key === selectedKey || (selectedKeys?.includes(annotation.key) ?? false);
         const bg = splitBgColor(annotation.bg_color);

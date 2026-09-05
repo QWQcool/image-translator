@@ -44,26 +44,34 @@ type ExportQueryRow = {
   asset_created_at: string;
 };
 
-const ILLEGAL_CHARS = /[\\/:*?"<>|\u0000-\u001f]/g;
+// 过滤非法字符与 Emoji/特殊符号，防止 Photoshop JSX 脚本解析崩溃
+const ILLEGAL_CHARS = /[\\/:*?"<>|\u0000-\u001f\uD800-\uDBFF\uDC00-\uDFFF\u2600-\u27BF\uE000-\uF8FF]/g;
 
 function sanitizeExportName(name: string): string {
-  const cleaned = name.replace(ILLEGAL_CHARS, '_').trim();
+  const cleaned = name.replace(ILLEGAL_CHARS, '_').replace(/_+/g, '_').trim();
   return cleaned || 'image';
 }
 
-function buildExportFilenames(rows: ExportRow[]): string[] {
+function buildExportFilenames(rows: ExportRow[], standardNumeric = true): string[] {
   const result: string[] = [];
   const counts = new Map<string, number>();
 
-  for (const { asset } of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const { asset } = rows[i];
     const raw = sanitizeExportName(asset.original_name || asset.filename);
-    const ext = path.extname(raw);
-    const base = ext ? raw.slice(0, -ext.length) : raw;
-    const seen = counts.get(raw) ?? 0;
-    counts.set(raw, seen + 1);
+    const ext = (path.extname(raw) || '.jpg').toLowerCase();
 
-    const finalName = seen === 0 ? raw : `${base}_${seen + 1}${ext}`;
-    result.push(finalName);
+    if (standardNumeric) {
+      // 标准三位纯数字序号：001.jpg, 002.png，确保跨平台及 PS-Script 兼容
+      const numStr = String(i + 1).padStart(3, '0');
+      result.push(`${numStr}${ext}`);
+    } else {
+      const base = ext ? raw.slice(0, -ext.length) : raw;
+      const seen = counts.get(raw) ?? 0;
+      counts.set(raw, seen + 1);
+      const finalName = seen === 0 ? raw : `${base}_${seen + 1}${ext}`;
+      result.push(finalName);
+    }
   }
 
   return result;
@@ -224,6 +232,11 @@ export async function GET(request: Request, { params }: Params) {
 
   const space = db.prepare('SELECT * FROM spaces WHERE id = ?').get(spaceId) as Space | undefined;
   if (!space) return new NextResponse('Not Found', { status: 404 });
+
+  // 制作人员自动填充：若空间「嵌字」为空，在导出时自动填入当前操作人
+  if (!space.typesetter) {
+    db.prepare('UPDATE spaces SET typesetter = ? WHERE id = ?').run(user.username, spaceId);
+  }
 
   // 显式列出别名：si.* 与 a.* 存在 id / title / created_at 同名列，
   // 直接 SELECT 会造成后者覆盖前者，必须逐列重命名。

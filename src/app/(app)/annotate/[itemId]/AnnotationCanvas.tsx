@@ -364,6 +364,30 @@ export default function AnnotationCanvas({
     if (!hit) {
       event.preventDefault();
       setContextMenu(null);
+      if (modeRef.current === 'label') {
+        const point = stageCoords(event);
+        const nx = clamp01(point.x / base.w);
+        const ny = clamp01(point.y / base.h);
+        const pin: DraftAnnotation = {
+          key: newKey(),
+          x: nx,
+          y: ny,
+          w: 0,
+          h: 0,
+          text: '',
+          font_size_ratio: 0.035,
+          color: '#FFFFFF',
+          bg_color: '#000000B3',
+          align: 'left',
+          font_weight: 700,
+          kind: 'pin',
+          group_id: 2, // 右键直接落下框外/旁白（第2组）标号
+          source_text: '',
+          comment: '',
+        };
+        onChange([...annotationsRef.current, pin]);
+        onSelect(pin.key);
+      }
       return;
     }
     event.preventDefault();

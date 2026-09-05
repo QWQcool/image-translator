@@ -36,9 +36,14 @@ export async function GET(_request: Request, { params }: Params) {
   const denied = accessError(getSpaceAccess(spaceId, user.id), 'view');
   if (denied) return denied;
 
-  const space = db.prepare('SELECT name FROM spaces WHERE id = ?').get(spaceId) as
-    | { name: string }
+  const space = db.prepare('SELECT name, typesetter FROM spaces WHERE id = ?').get(spaceId) as
+    | { name: string; typesetter: string }
     | undefined;
+
+  // 制作人员自动填充：导出成品压缩包时，若空间「嵌字」为空，自动填入当前操作人
+  if (space && !space.typesetter) {
+    db.prepare('UPDATE spaces SET typesetter = ? WHERE id = ?').run(user.username, spaceId);
+  }
 
   const rows = db
     .prepare(

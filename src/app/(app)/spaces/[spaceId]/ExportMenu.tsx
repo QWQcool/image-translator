@@ -5,17 +5,22 @@ import { useEffect, useRef, useState } from 'react';
 type ExportOption = { format: string; label: string; hint: string; href?: string };
 
 const OPTIONS: ExportOption[] = [
-  { format: 'zip', label: '导出 ZIP', hint: 'JSON + CSV 打包' },
-  { format: 'json', label: '导出 JSON', hint: '完整结构，含归一化与像素坐标' },
-  { format: 'csv', label: '导出 CSV', hint: '表格形式，可用 Excel 打开' },
+  {
+    format: 'psd-zip',
+    label: '🎨 导出分层 PSD 压缩包',
+    hint: '免装脚本，原生 TypeTool 文本图层（推荐）',
+    href: '/psd-zip',
+  },
+  { format: 'zip', label: '导出工程 ZIP', hint: '原图 + 翻译_0.txt + JSON/CSV' },
   { format: 'lp', label: '导出 翻译_0.txt', hint: 'LabelPlus / PS-Script 兼容' },
-  // 官方 txt 格式走独立 route
   {
     format: 'lp-txt',
     label: 'LabelPlus 文本（PS 脚本）',
     hint: '官方 txt 格式，按文件名匹配 PSD 图层',
     href: '/labelplus-txt',
   },
+  { format: 'csv', label: '导出 CSV', hint: '表格形式，可用 Excel 打开' },
+  { format: 'json', label: '导出 JSON', hint: '完整结构，含归一化与像素坐标' },
 ];
 
 export default function ExportMenu({
@@ -89,21 +94,34 @@ export default function ExportMenu({
       </button>
 
       {open && (
-        <div className="absolute right-0 z-30 mt-1 w-60 overflow-hidden rounded-lg border border-ink-700 bg-cloud shadow-card">
+        <div className="absolute right-0 z-30 mt-1 w-64 overflow-hidden rounded-lg border border-ink-700 bg-cloud shadow-card">
           {OPTIONS.map((option) => (
             <a
               key={option.format}
               href={`/api/spaces/${spaceId}${option.href ?? `/export?format=${option.format}`}`}
               onClick={() => setOpen(false)}
-              className="block px-3 py-2.5 text-sm text-ink-200 transition-colors hover:bg-paper"
+              className="block px-3 py-2 text-sm text-ink-200 transition-colors hover:bg-paper"
             >
               <div className="font-medium">{option.label}</div>
               <div className="mt-0.5 text-[11px] text-ink-500">{option.hint}</div>
             </a>
           ))}
+          <div className="my-1 border-t border-ink-700/60" />
+          <a
+            href="/scripts/LabelPlus_Ps_Script.jsx"
+            download="LabelPlus_Ps_Script.jsx"
+            onClick={() => setOpen(false)}
+            className="block px-3 py-2 text-sm text-sky transition-colors hover:bg-sky/10"
+          >
+            <div className="flex items-center gap-1.5 font-medium">
+              <span>📥 下载配套 PS 嵌字脚本 (.jsx)</span>
+            </div>
+            <div className="mt-0.5 text-[11px] text-ink-400">解压后拖入 PS 窗口一键自动排版上字</div>
+          </a>
+          <div className="my-1 border-t border-ink-700/60" />
           <button
             type="button"
-            className="block w-full px-3 py-2.5 text-left text-sm text-ink-200 transition-colors hover:bg-paper"
+            className="block w-full px-3 py-2 text-left text-sm text-ink-200 transition-colors hover:bg-paper"
             disabled={importing}
             onClick={() => fileRef.current?.click()}
           >

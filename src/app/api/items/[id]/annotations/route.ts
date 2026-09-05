@@ -207,6 +207,13 @@ export async function PUT(request: Request, { params }: Params) {
     for (const row of normalized) {
       insert.run({ ...row, item_id: itemId });
     }
+    // 制作人员自动填充：若空间「翻译」为空且本次保存了有效译文，自动填入当前用户昵称
+    const spaceRow = db.prepare('SELECT translator FROM spaces WHERE id = ?').get(owned.space_id) as
+      | { translator: string }
+      | undefined;
+    if (spaceRow && !spaceRow.translator && normalized.some((r) => r.text.trim().length > 0)) {
+      db.prepare(`UPDATE spaces SET translator = ? WHERE id = ?`).run(user.username, owned.space_id);
+    }
     touch.run(owned.space_id);
   })();
 

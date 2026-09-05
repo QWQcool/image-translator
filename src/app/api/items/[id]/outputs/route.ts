@@ -159,8 +159,8 @@ export async function POST(request: Request, { params }: Params) {
       .prepare(
         `INSERT INTO assets
            (owner_id, filename, thumb_filename, original_name, mime_type,
-            width, height, size_bytes, title, visibility)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'private')`,
+            width, height, size_bytes, title, visibility, sha256)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'private', ?)`,
       )
       .run(
         user.id,
@@ -172,11 +172,21 @@ export async function POST(request: Request, { params }: Params) {
         stored.height,
         stored.sizeBytes,
         title,
+        stored.sha256,
       );
     const assetId = Number(assetResult.lastInsertRowid);
     const outputResult = db
       .prepare('INSERT INTO outputs (item_id, asset_id, created_by) VALUES (?, ?, ?)')
       .run(itemId, assetId, user.id);
+
+    // 制作人员自动填充：若空间「嵌字」为空，保存成品图时自动填入当前用户昵称
+    const spaceRow = db.prepare('SELECT typesetter FROM spaces WHERE id = ?').get(item.space_id) as
+      | { typesetter: string }
+      | undefined;
+    if (spaceRow && !spaceRow.typesetter) {
+      db.prepare('UPDATE spaces SET typesetter = ? WHERE id = ?').run(user.username, item.space_id);
+    }
+
     return { assetId, outputId: Number(outputResult.lastInsertRowid) };
   })();
 

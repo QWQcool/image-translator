@@ -76,6 +76,7 @@ export async function POST(request: Request, { params }: Params) {
 
   const created: Array<{ itemId: number; assetId: number; title: string }> = [];
   const skipped: Array<{ name: string; reason: string }> = [];
+  const duplicates: Array<{ fileName: string; spaceName: string; itemTitle: string; spaceId: number }> = [];
   const errors: string[] = [];
 
   // 单张图片的「buffer→asset→item」创建路径：直传与 zip 解包共用，保证 order_index 接在空间末尾
@@ -83,14 +84,38 @@ export async function POST(request: Request, { params }: Params) {
     const stored = await imageLimiter.run(() => storeImage(buffer, mimeType));
     const title = originalName.replace(/\.[^.]+$/, '');
 
+    // 图源查重：若该图片已存在于其他空间，记录提示信息
+    if (stored.sha256) {
+      const dup = db
+        .prepare(
+          `SELECT s.id AS spaceId, s.name AS spaceName, si.title AS itemTitle
+             FROM assets a
+             JOIN space_items si ON si.asset_id = a.id
+             JOIN spaces s ON s.id = si.space_id
+            WHERE a.sha256 = ? AND a.deleted_at IS NULL AND s.id != ?
+            LIMIT 1`,
+        )
+        .get(stored.sha256, spaceId) as
+        | { spaceId: number; spaceName: string; itemTitle: string }
+        | undefined;
+      if (dup) {
+        duplicates.push({
+          fileName: originalName,
+          spaceName: dup.spaceName,
+          itemTitle: dup.itemTitle,
+          spaceId: dup.spaceId,
+        });
+      }
+    }
+
     // 素材与条目必须同事务落库，避免出现孤儿素材或半截条目
     const ids = db.transaction(() => {
       const assetResult = db
         .prepare(
           `INSERT INTO assets
              (owner_id, filename, thumb_filename, original_name, mime_type,
-              width, height, size_bytes, title, visibility)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'shared')`,
+              width, height, size_bytes, title, visibility, sha256)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'shared', ?)`,
         )
         .run(
           user.id,
@@ -102,6 +127,7 @@ export async function POST(request: Request, { params }: Params) {
           stored.height,
           stored.sizeBytes,
           title,
+          stored.sha256,
         );
       const assetId = Number(assetResult.lastInsertRowid);
       const itemResult = db
@@ -224,5 +250,5 @@ export async function POST(request: Request, { params }: Params) {
     .prepare('SELECT * FROM space_items WHERE space_id = ? ORDER BY sort_order, id')
     .all(spaceId) as SpaceItem[];
 
-  return NextResponse.json({ items, added: created.length, created, skipped, errors }, { status: 201 });
+  return NextResponse.json({ items, added: created.length, created, skipped, duplicates, errors }, { status: 201 });
 }

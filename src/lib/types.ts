@@ -32,6 +32,8 @@ export type Asset = {
   visibility: 'private' | 'shared';
   /** 软删除时间（非空 = 在回收站里），恢复时置回 NULL */
   deleted_at?: string | null;
+  /** 内容哈希，用于图源查重 */
+  sha256?: string | null;
   created_at: string;
   /** 联表查询时附带：素材上传者 */
   owner_username?: string;

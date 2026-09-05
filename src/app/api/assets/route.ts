@@ -106,8 +106,8 @@ export async function POST(request: Request) {
         .prepare(
           `INSERT INTO assets
              (owner_id, filename, thumb_filename, original_name, mime_type,
-              width, height, size_bytes, title, visibility)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              width, height, size_bytes, title, visibility, sha256)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           user.id,
@@ -120,6 +120,7 @@ export async function POST(request: Request) {
           stored.sizeBytes,
           file.name.replace(/\.[^.]+$/, ''),
           visibility,
+          stored.sha256,
         );
       created.push(
         db.prepare('SELECT * FROM assets WHERE id = ?').get(result.lastInsertRowid) as Asset,

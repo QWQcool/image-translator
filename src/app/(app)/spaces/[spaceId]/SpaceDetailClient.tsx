@@ -94,6 +94,15 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   // 非空 = 流水线已结束（成功/失败汇总展示中）
   const [mtDone, setMtDone] = useState<{ success: number; failed: number } | null>(null);
   const [mtShowFailures, setMtShowFailures] = useState(false);
+  // 图源查重提示（上传命中其他空间的图片时弹窗展示）
+  const [dupWarning, setDupWarning] = useState<
+    Array<{ fileName: string; spaceName: string; itemTitle: string; spaceId: number }> | null
+  >(null);
+  // 跨空间移动条目
+  const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const [targetSpaces, setTargetSpaces] = useState<Array<{ id: number; name: string }>>([]);
+  const [targetSpaceId, setTargetSpaceId] = useState<number | null>(null);
+  const [movingItems, setMovingItems] = useState(false);
 
   const canEdit = access?.canEdit ?? false;
   const searching = debouncedQuery.length > 0;
@@ -232,6 +241,13 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         const errors = data.errors as string[] | undefined;
         if (Array.isArray(errors) && errors.length > 0) {
           setError(errors.join('；'));
+        }
+        // 图源查重检测
+        const duplicates = data.duplicates as
+          | Array<{ fileName: string; spaceName: string; itemTitle: string; spaceId: number }>
+          | undefined;
+        if (Array.isArray(duplicates) && duplicates.length > 0) {
+          setDupWarning(duplicates);
         }
         await load(debouncedQuery);
       } catch (err) {
@@ -521,6 +537,52 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     });
   }
 
+  async function openMoveModal() {
+    setMoveModalOpen(true);
+    setTargetSpaceId(null);
+    try {
+      const res = await fetch('/api/spaces');
+      if (res.ok) {
+        const data = await res.json();
+        const otherSpaces = (data.spaces ?? []).filter((s: { id: number }) => s.id !== spaceId);
+        setTargetSpaces(otherSpaces);
+        if (otherSpaces.length > 0) {
+          setTargetSpaceId(otherSpaces[0].id);
+        }
+      }
+    } catch {}
+  }
+
+  async function handleMoveItems() {
+    if (!targetSpaceId || selection.size === 0) return;
+    setMovingItems(true);
+    try {
+      const res = await fetch(`/api/spaces/${spaceId}/items/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetSpaceId,
+          itemIds: Array.from(selection),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? '移动失败');
+        return;
+      }
+      setNotice(
+        `成功移动 ${data.movedCount} 个条目${data.skippedCount > 0 ? `，跳过 ${data.skippedCount} 个已存在的目标空间条目` : ''}`,
+      );
+      setSelection(new Set());
+      setMoveModalOpen(false);
+      await load(debouncedQuery);
+    } catch {
+      setError('网络异常，移动条目失败');
+    } finally {
+      setMovingItems(false);
+    }
+  }
+
   async function deleteSpace() {
     setPendingDeleteSpace(false);
     const res = await fetch(`/api/spaces/${spaceId}`, { method: 'DELETE' });
@@ -799,6 +861,24 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 </button>
                 {selectedItems.length > 0 ? (
                   <>
+                    <button
+                      type="button"
+                      className="btn-ghost text-sky"
+                      disabled={mtRunning}
+                      onClick={() => setBatchOpen(true)}
+                      title="对所选图片进行批量 AI 翻译"
+                    >
+                      🤖 批量 AI 处理（{selectedItems.length}）
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost text-ink-200"
+                      disabled={mtRunning}
+                      onClick={() => void openMoveModal()}
+                      title="将所选图片转移至其他空间"
+                    >
+                      📦 移动到...（{selectedItems.length}）
+                    </button>
                     <button
                       type="button"
                       className="btn-danger"
@@ -1139,7 +1219,11 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
 
       {batchOpen && canEdit && (
         <AiBatchModal
-          items={items.map((i) => ({ id: i.id, title: i.title }))}
+          items={
+            selection.size > 0
+              ? items.filter((i) => selection.has(i.id)).map((i) => ({ id: i.id, title: i.title }))
+              : items.map((i) => ({ id: i.id, title: i.title }))
+          }
           onClose={() => setBatchOpen(false)}
           onDone={() => void load(debouncedQuery)}
         />
@@ -1402,6 +1486,93 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
             {error && <p className="notice-error">{error}</p>}
           </div>
         )}
+      </Modal>
+
+      {/* 跨空间移动条目弹窗 */}
+      <Modal
+        open={moveModalOpen}
+        title="移动条目到其他空间"
+        onClose={() => setMoveModalOpen(false)}
+        footer={
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={movingItems}
+              onClick={() => setMoveModalOpen(false)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={!targetSpaceId || movingItems || targetSpaces.length === 0}
+              onClick={() => void handleMoveItems()}
+            >
+              {movingItems ? '移动中…' : '确认移动'}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <p className="text-ink-300">
+            已选择 <strong className="text-sky">{selection.size}</strong> 个条目，请选择要移动到的目标空间：
+          </p>
+          {targetSpaces.length === 0 ? (
+            <p className="rounded-lg bg-ink-800/40 p-3 text-xs text-ink-400">
+              当前暂无可移动的其他空间（请先创建其他空间）。
+            </p>
+          ) : (
+            <div>
+              <label className="label">目标空间</label>
+              <select
+                className="input"
+                value={targetSpaceId ?? ''}
+                onChange={(e) => setTargetSpaceId(Number(e.target.value))}
+              >
+                {targetSpaces.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <p className="text-[11px] text-ink-500">
+            提示：移动后条目及关联的所有标号将完整转移至目标空间。
+          </p>
+        </div>
+      </Modal>
+
+      {/* 图源查重告警弹窗 */}
+      <Modal
+        open={dupWarning !== null}
+        title="⚠️ 图源查重提醒"
+        onClose={() => setDupWarning(null)}
+        footer={
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => setDupWarning(null)}
+          >
+            我知道了
+          </button>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <p className="text-ink-300">
+            本次上传的图片中，检测到以下图片已在其他空间中存在，请核实是否属于重复开坑：
+          </p>
+          <ul className="max-h-60 space-y-2 overflow-y-auto rounded-lg border border-amber-500/20 bg-amber-500/5 p-3">
+            {dupWarning?.map((dup, i) => (
+              <li key={i} className="text-xs text-ink-200">
+                <span className="font-semibold text-amber-500">[{dup.fileName}]</span> 与空间
+                <strong className="text-sky">【{dup.spaceName}】</strong>中的
+                <strong className="text-ink-100">《{dup.itemTitle}》</strong>内容完全一致（SHA-256 相同）。
+              </li>
+            ))}
+          </ul>
+        </div>
       </Modal>
     </div>
   );
