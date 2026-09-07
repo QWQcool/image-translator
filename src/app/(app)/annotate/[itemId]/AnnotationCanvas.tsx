@@ -184,7 +184,7 @@ export default function AnnotationCanvas({
   );
 
   const dragRef = useRef<{
-    mode: 'none' | 'pan' | 'draw' | 'move' | 'resize' | 'marquee';
+    mode: 'none' | 'pan' | 'draw' | 'move' | 'resize' | 'marquee' | 'pinch';
     key?: string;
     handle?: Handle;
     start: { x: number; y: number };
@@ -193,6 +193,10 @@ export default function AnnotationCanvas({
     /**橡皮筋是否加选（Ctrl+Shift） */
     additive?: boolean;
   }>({ mode: 'none', start: { x: 0, y: 0 }, startPan: { x: 0, y: 0 } });
+
+  // 触屏手势：活动触点表 + 捏合基准（两指起始距离与当时缩放）
+  const touchPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchRef = useRef<{ dist: number; zoom: number } | null>(null);
 
   // 标注数据的最新引用，供高频指针事件读取而不重复绑定回调
   const annotationsRef = useRef(annotations);
@@ -510,6 +514,32 @@ export default function AnnotationCanvas({
     const wrapper = wrapperRef.current;
     if (!wrapper) return;
 
+    // 触屏：两指捏合缩放（任意模式优先级最高）；浏览模式单指拖动平移。
+    // 其它模式保留单指原行为（下标 / 画框 / 移动），不拦截。
+    if (event.pointerType === 'touch') {
+      touchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (touchPointersRef.current.size >= 2) {
+        const [a, b] = [...touchPointersRef.current.values()];
+        pinchRef.current = {
+          dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+          zoom: zoomRef.current,
+        };
+        dragRef.current = { mode: 'pinch', start: { x: 0, y: 0 }, startPan: pan };
+        wrapper.setPointerCapture(event.pointerId);
+        return;
+      }
+      if (modeRef.current === 'browse') {
+        dragRef.current = {
+          mode: 'pan',
+          start: { x: event.clientX, y: event.clientY },
+          startPan: pan,
+        };
+        wrapper.setPointerCapture(event.pointerId);
+        return;
+      }
+      // 其它模式的单指触点继续走原有逻辑（下标 / 画框 / 移动），触点表等 move/up 清理
+    }
+
     const panning = event.button === 1 || spaceDown || event.altKey;
     if (panning) {
       dragRef.current = {
@@ -628,6 +658,24 @@ export default function AnnotationCanvas({
       return;
     }
 
+    // 两指捏合缩放：以两指当前距离 / 起始距离推算缩放倍率
+    if (drag.mode === 'pinch') {
+      if (touchPointersRef.current.has(event.pointerId)) {
+        touchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      }
+      if (touchPointersRef.current.size >= 2 && pinchRef.current) {
+        const [a, b] = [...touchPointersRef.current.values()];
+        const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        setZoom(
+          Math.min(
+            MAX_ZOOM,
+            Math.max(MIN_ZOOM, pinchRef.current.zoom * (dist / pinchRef.current.dist)),
+          ),
+        );
+      }
+      return;
+    }
+
     if (drag.mode === 'marquee') {
       const current = stageCoords(event);
       setMarquee((m) => (m ? { ...m, x1: current.x, y1: current.y } : m));
@@ -720,6 +768,15 @@ export default function AnnotationCanvas({
 
   function onPointerUp(event: React.PointerEvent) {
     const drag = dragRef.current;
+    // 触点注销：捏合结束时（或剩余一指时）退出捏合状态
+    if (event.pointerType === 'touch') {
+      touchPointersRef.current.delete(event.pointerId);
+      if (touchPointersRef.current.size < 2) pinchRef.current = null;
+      if (drag.mode === 'pinch') {
+        dragRef.current = { mode: 'none', start: { x: 0, y: 0 }, startPan: { x: 0, y: 0 } };
+        return;
+      }
+    }
     if (drag.mode === 'marquee') {
       const p = stageCoords(event);
       const nx0 = clamp01(Math.min(drag.start.x, p.x) / base.w);

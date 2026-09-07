@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { NextResponse } from 'next/server';
 import {
   aiConfigured,
+  describeImage,
   detectTextBlocks,
   detectionConfigured,
   extractTextInBox,
@@ -223,6 +224,15 @@ export async function POST(request: Request, { params }: Params) {
         if (emptyPos < 0) return b;
         return { ...b, text: filled.get(emptyPos) ?? '' };
       });
+      // 两步链路补齐 6c 图像解析：检测端点只出框不出描述，用视觉模型补一段
+      // 内容描述存到 ai_context，保证与单步视觉 OCR 的翻译上下文一致。
+      // 描述失败不阻塞 OCR 主流程（description 保持 null）。
+      if (aiConfigured(aiConfig, 'ocr')) {
+        description = await describeImage(
+          { baseUrl: aiConfig.baseUrl, apiKey: aiConfig.apiKey, ocrModel: aiConfig.ocrModel },
+          image,
+        );
+      }
     }
   }
 
@@ -263,7 +273,7 @@ export async function POST(request: Request, { params }: Params) {
     .prepare(`SELECT * FROM annotations WHERE item_id = ? AND kind = 'pin'`)
     .all(itemId) as Annotation[];
 
-  const proposals = blocks
+  const allProposals = blocks
     .map((block: OcrBlock) => {
       const w = Math.min(1, Math.max(0.01, block.w || 0.08));
       const h = Math.min(1, Math.max(0.01, block.h || 0.04));
@@ -279,8 +289,11 @@ export async function POST(request: Request, { params }: Params) {
         confidence: block.confidence ?? null,
         skipped: nearExisting(cx, cy, pins),
       };
-    })
-    .filter((row) => !row.skipped);
+    });
+
+  // 与既有标号过近被跳过的块数：前端据此提示「跳过了 N 个重复块」
+  const skippedCount = allProposals.filter((row) => row.skipped).length;
+  const proposals = allProposals.filter((row) => !row.skipped);
 
   // AI 调用埋点：只有真正用了用户自己的视觉模型才记（sidecar 是本机确定性引擎）
   if (engine === 'ai') {
@@ -303,7 +316,7 @@ export async function POST(request: Request, { params }: Params) {
   }
 
   const aiContext = engine === 'ai' ? description : null;
-  return NextResponse.json({ proposals, sidecar: engine === 'sidecar', engine, twoStep, aiContext });
+  return NextResponse.json({ proposals, sidecar: engine === 'sidecar', engine, twoStep, aiContext, skippedCount });
 }
 
 function sidecarUrlHint(): string {

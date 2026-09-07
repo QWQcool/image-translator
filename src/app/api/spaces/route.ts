@@ -5,7 +5,7 @@ import { DEFAULT_LP_STYLES } from '@/lib/labelplus';
 import { logOp } from '@/lib/oplog';
 import { addMember } from '@/lib/permissions';
 import { isSpaceProgress } from '@/lib/progress';
-import { cleanTagsInput } from '@/lib/tags';
+import { cleanTagsInput, parseSpaceTags } from '@/lib/tags';
 import type { Space, SpaceVisibility, SpaceWithCounts } from '@/lib/types';
 
 /**
@@ -152,6 +152,8 @@ export async function GET(request: Request) {
 
   const spaces: SpaceWithCounts[] = rows.map((row) => ({
     ...row,
+    // tags 库内是 JSON 字符串，API 统一返回数组（与详情接口形状一致）
+    tags: parseSpaceTags(row.tags),
     // 权限扁平化：登录用户对所有空间都可编辑
     can_edit: true,
     is_owner: row.role === 'owner',
@@ -291,5 +293,11 @@ export async function POST(request: Request) {
   const space = db.prepare('SELECT * FROM spaces WHERE id = ?').get(spaceId) as Space;
 
   logOp(user.id, 'space_create', 'space', spaceId, space.name);
-  return NextResponse.json({ space }, { status: 201 });
+  return NextResponse.json(
+    {
+      // tags 库内是 JSON 字符串，API 统一返回数组
+      space: { ...space, tags: parseSpaceTags(space.tags) },
+    },
+    { status: 201 },
+  );
 }

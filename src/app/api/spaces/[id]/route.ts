@@ -6,7 +6,7 @@ import { normalizeGlossaryInput, normalizeStyles } from '@/lib/labelplus';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { PROGRESS_LABEL, isSpaceProgress, type SpaceProgress } from '@/lib/progress';
-import { cleanTagsInput } from '@/lib/tags';
+import { cleanTagsInput, parseSpaceTags } from '@/lib/tags';
 import type { Asset, Space, SpaceItem, SpaceStatus, SpaceVisibility } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -29,13 +29,19 @@ export async function GET(request: Request, { params }: Params) {
 
   const space = db.prepare('SELECT * FROM spaces WHERE id = ?').get(id) as Space | undefined;
   if (!space) return NextResponse.json({ error: '空间不存在' }, { status: 404 });
+  // tags 库内是 JSON 字符串，API 统一返回数组（与列表接口 distinctTags 形状一致）
+  const spaceOut = { ...space, tags: parseSpaceTags(space.tags) };
 
-  // 空间内搜索：LIKE 匹配条目标题 / 素材原始文件名
+  // 空间内搜索：LIKE 匹配条目标题 / 素材原始文件名 / 标注译文与原文（全文搜索）
   const keyword = (new URL(request.url).searchParams.get('q') ?? '').trim();
   const searchClause = keyword
-    ? 'AND (IFNULL(si.title, \'\') LIKE ? OR IFNULL(a.original_name, \'\') LIKE ?)'
+    ? `AND (IFNULL(si.title, '') LIKE ? OR IFNULL(a.original_name, '') LIKE ? OR EXISTS (
+         SELECT 1 FROM annotations an
+          WHERE an.item_id = si.id AND (an.text LIKE ? OR an.source_text LIKE ?)))`
     : '';
-  const searchArgs = keyword ? [`%${keyword}%`, `%${keyword}%`] : [];
+  const searchArgs = keyword
+    ? [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`]
+    : [];
 
   const items = db
     .prepare(
@@ -113,9 +119,35 @@ export async function GET(request: Request, { params }: Params) {
     .prepare('SELECT COUNT(*) AS n FROM space_members WHERE space_id = ?')
     .get(id) as { n: number };
 
+  // 关键词搜索时附带每条目命中的标注文本片段（最多 3 条），前端直接展示「为什么命中」
+  let matchedTexts: Map<number, string[]> | null = null;
+  if (keyword && mapped.length > 0) {
+    const like = `%${keyword}%`;
+    const rows = db
+      .prepare(
+        `SELECT item_id,
+                CASE WHEN text LIKE ? THEN text ELSE source_text END AS snippet
+           FROM annotations
+          WHERE item_id IN (SELECT id FROM space_items WHERE space_id = ?)
+            AND (text LIKE ? OR source_text LIKE ?)
+          ORDER BY order_index, id
+          LIMIT 300`,
+      )
+      .all(like, id, like, like) as Array<{ item_id: number; snippet: string }>;
+    matchedTexts = new Map();
+    for (const row of rows) {
+      const list = matchedTexts.get(row.item_id) ?? [];
+      if (list.length < 3 && row.snippet) list.push(row.snippet);
+      matchedTexts.set(row.item_id, list);
+    }
+  }
+
   return NextResponse.json({
-    space,
-    items: mapped,
+    space: spaceOut,
+    items: mapped.map((item) => ({
+      ...item,
+      matched_texts: (keyword && matchedTexts?.get(item.id)) || [],
+    })),
     access,
     memberCount: memberCount.n,
   });
@@ -379,8 +411,10 @@ export async function PATCH(request: Request, { params }: Params) {
     logOp(user.id, 'update', 'space', id, before.name, `修改空间${changed.join('、')}`);
   }
 
+  const updated = db.prepare('SELECT * FROM spaces WHERE id = ?').get(id) as Space;
   return NextResponse.json({
-    space: db.prepare('SELECT * FROM spaces WHERE id = ?').get(id) as Space,
+    // tags 库内是 JSON 字符串，API 统一返回数组
+    space: { ...updated, tags: parseSpaceTags(updated.tags) },
   });
 }
 

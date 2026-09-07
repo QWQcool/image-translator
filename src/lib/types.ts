@@ -58,8 +58,12 @@ export type Space = {
   progress_at: string;
   /** 空间序号（YYYYMMDD-NN，服务端自动生成）；历史空间为 null */
   space_no: string | null;
-  /** 标签（JSON 字符串数组），前端用 parseSpaceTags 解析 */
-  tags: string | null;
+  /**
+   * 标签数组。库内存储为 JSON 字符串列，服务端 API 统一 parse 成数组后返回
+   * （与列表接口 distinctTags 形状一致）；服务端内部代码直接查库时拿到的是
+   * 原始字符串，仅在返回给前端前 parseSpaceTags 一次。
+   */
+  tags: string[];
   /** 作者 */
   author?: string | null;
   /** 翻译 */
@@ -114,6 +118,8 @@ export type SpaceItem = {
   annotation_count?: number;
   /** AI 图像解析出的内容描述（人物/场景/剧情提示），AI 翻译时作为上下文 */
   ai_context?: string | null;
+  /** 关键词搜索时附带：该条目命中的标注文本片段（最多 3 条，非搜索请求为空数组） */
+  matched_texts?: string[];
 };
 
 export type AnnotationKind = 'box' | 'pin';

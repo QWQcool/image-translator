@@ -101,6 +101,7 @@ npm run dev                    # http://localhost:3000
 npm run admin -- list             # 查看全部用户与管理员状态
 npm run admin -- set 用户名       # 赋予管理员（之后该账号可在个人资料页发放邀请码）
 npm run admin -- unset 用户名     # 收回管理员
+npm run admin -- passwd 用户名 [新密码]   # 重置密码（忘记密码时用；不传新密码则随机生成并打印）
 ```
 
 - 新注册用户一律普通权限；管理员身份只通过上述命令授予与收回
@@ -276,17 +277,45 @@ SIDECAR_URL=http://127.0.0.1:8765  # 可选；本机识别进程（离线 OCR / 
 
 ### 2. 数据持久化
 
-`DATA_DIR` 指向的目录包含 `app.db`（SQLite）与 `images/`、`thumbs/` 两个图片目录。
+`DATA_DIR` 指向的目录包含 `app.db`（SQLite）与 `images/`、`thumbs/`、`previews/` 图片目录。
 **这个目录必须持久化**——容器化部署时挂一个 volume 到该路径，否则重启即丢失。
 
+### 3. 数据库定时备份
+
+内置在线备份脚本（better-sqlite3 backup API，服务运行中也可安全执行，产出一致性快照）：
+
 ```bash
-docker run -d -p 3000:3000 \
-  -e SESSION_SECRET=你的密钥 \
-  -v /srv/tximg-data:/app/data \
-  你的镜像
+npm run backup                     # 备份 app.db 到 data/backups/backup-<时间戳>/（默认保留 7 天）
+BACKUP_RETENTION_DAYS=14 npm run backup -- --with-images   # 同时复制 images/thumbs/previews
 ```
 
-### 3. 反向代理
+定时执行（Linux crontab）：
+
+```bash
+0 3 * * * cd /srv/tximg && node scripts/backup.mjs >> data/backup.log 2>&1
+```
+
+Windows 用任务计划程序指向 `node <目录>\scripts\backup.mjs` 即可。**异地容灾**：再配一条
+`rclone copy data/backups remote:tximg-backups` 之类的同步任务，把备份目录推到对象存储。
+
+### 4. Docker 部署
+
+项目自带 `Dockerfile`（多阶段构建，Linux 下启用 standalone 产物）：
+
+```bash
+docker build -t tuanyi-space .
+docker run -d -p 3000:3000 \
+  -e SESSION_SECRET=你的密钥 \
+  -v tuanyi-data:/app/data \
+  tuanyi-space
+```
+
+- 数据全部落在 `/app/data`，务必挂载 volume；首次启动自动建库迁移
+- 容器内指定管理员：`docker exec -it <容器> node scripts/admin.mjs set 用户名`
+- 容器内备份：`docker exec <容器> node scripts/backup.mjs`（备份落在 volume 内，
+  再配合 `docker cp` 或异地同步使用）
+
+### 5. 反向代理
 
 用 Nginx / Caddy 反代到 3000 端口并启用 HTTPS。注意不要缓冲导出接口的大响应。
 
@@ -302,11 +331,11 @@ location / {
 }
 ```
 
-### 4. HTTPS 是必需的
+### 6. HTTPS 是必需的
 
 登录 Cookie 在 `NODE_ENV=production` 下带 `Secure` 属性，**没有 HTTPS 将无法登录**。
 
-### 5. 多人使用的容量边界
+### 7. 多人使用的容量边界
 
 当前实现为单机架构（SQLite + 本地磁盘），适合个人与小团队（并发用户数 < 20、图片数万级）。
 若后续需要水平扩展，改造点已隔离：

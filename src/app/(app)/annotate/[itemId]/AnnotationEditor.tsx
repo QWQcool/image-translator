@@ -82,6 +82,9 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const [phrases, setPhrases] = useState<string[]>([]);
   const [phraseMenuOpen, setPhraseMenuOpen] = useState(false);
   const phraseCursor = useRef(0);
+  // 乐观并发基线：最近一次「加载 / 保存成功 / 协作者同步」时服务器返回的标注快照，
+  // 保存时随请求提交，服务端据此做三方合并（见 annotations PUT 路由）
+  const baseAnnotationsRef = useRef<DraftAnnotation[]>([]);
   const [ocrOpen, setOcrOpen] = useState(false);
   const [translateOpen, setTranslateOpen] = useState(false);
   // 查找 / 替换浮动条
@@ -186,6 +189,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       setTitle(detail.item?.title ?? '');
       setAccess(detail.access ?? null);
       setAnnotationsRaw((annotationData.annotations ?? []).map((row: DraftAnnotation) => hydrate(row)));
+      baseAnnotationsRef.current = annotationData.annotations ?? [];
       resetHistory();
       setDirty(false);
       setSelectedKey(null);
@@ -234,6 +238,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       if (!Array.isArray(rows)) return;
       // 协作者快照绕过历史栈并清空：本地撤销不能跳回同步前的旧状态
       setAnnotationsRaw((rows as DraftAnnotation[]).map((row) => hydrate(row)));
+      baseAnnotationsRef.current = rows as DraftAnnotation[];
       resetHistory();
       setDirty(false);
       setSyncNote('已同步协作者的标注更新');
@@ -251,7 +256,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       const res = await fetch(`/api/items/${itemId}/annotations`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ annotations: payload }),
+        body: JSON.stringify({ annotations: payload, baseAnnotations: baseAnnotationsRef.current }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -265,6 +270,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           key: annotationsRef.current[index]?.key ?? newKey(),
         })),
       );
+      baseAnnotationsRef.current = data.annotations ?? [];
       setDirty(false);
       setSavedAt(new Date().toLocaleTimeString('zh-CN'));
       // 广播给同房间的人：以服务端返回的规范状态为准
@@ -679,7 +685,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const pinMode = mode !== 'box';
 
   return (
-    <div className="flex h-[calc(100vh-7rem)] flex-col gap-3">
+    <div className="flex h-[calc(100dvh-9rem)] flex-col gap-3 md:h-[calc(100vh-7rem)]">
       <div className="flex flex-wrap items-center gap-3">
         <Link href={`/spaces/${item.space_id}`} className="text-sm text-ink-400 hover:text-sky-deep">
           ← {spaceName || '返回空间'}
@@ -805,7 +811,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
 
       {error && <p className="notice-error">{error}</p>}
 
-      <div className="flex min-h-0 flex-1 gap-5">
+      {/* 移动端上下堆叠（画布上、面板下），桌面端左右分栏 */}
+      <div className="flex min-h-0 flex-1 flex-col gap-3 md:flex-row md:gap-5">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="relative flex min-h-0 flex-1 flex-col">
             <AnnotationCanvas
@@ -923,7 +930,7 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           )}
         </div>
 
-        <aside className="flex w-[350px] shrink-0 flex-col rounded-xl border border-ink-700 bg-cloud/80 p-3">
+        <aside className="flex h-[45dvh] w-full shrink-0 flex-col rounded-xl border border-ink-700 bg-cloud/80 p-3 md:h-auto md:w-[350px]">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="text-sm font-medium text-ink-100">
               {pinMode ? '标号' : '标注'}{' '}

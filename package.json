@@ -1,12 +1,13 @@
 {
   "name": "twitter-image-translator",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "admin": "node scripts/admin.mjs",
+    "backup": "node scripts/backup.mjs",
     "typecheck": "tsc --noEmit",
     "e2e": "playwright test"
   },

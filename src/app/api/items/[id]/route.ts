@@ -112,7 +112,7 @@ export async function GET(_request: Request, { params }: Params) {
     progress: 'untranslated',
     progress_at: '',
     space_no: null,
-    tags: null,
+    tags: [],
     created_at: '',
     updated_at: '',
   };

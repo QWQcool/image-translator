@@ -34,13 +34,13 @@ export default function TopBar({
 
   return (
     <header ref={scope} className="sticky top-0 z-40 border-b border-sky/10 bg-cloud/80 shadow-glass backdrop-blur-md">
-      <div className="mx-auto flex h-14 max-w-[1500px] items-center gap-6 px-6">
-        <Link href="/spaces" className="flex items-center gap-2 text-ink-100">
+      <div className="mx-auto flex h-14 max-w-[1500px] items-center gap-3 px-3 sm:gap-6 sm:px-6">
+        <Link href="/spaces" className="flex shrink-0 items-center gap-2 text-ink-100">
           <HaloMark className="h-7 w-7 shrink-0" />
-          <span className="font-display text-lg tracking-wide">图译空间</span>
+          <span className="hidden font-display text-lg tracking-wide sm:inline">图译空间</span>
         </Link>
 
-        <nav className="flex items-center gap-1">
+        <nav className="flex items-center gap-1 overflow-x-auto">
           {NAV.map((item) => {
             const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
             return (

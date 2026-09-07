@@ -148,7 +148,7 @@ export async function PUT(request: Request, { params }: Params) {
   if (!item) return NextResponse.json({ error: '条目不存在' }, { status: 404 });
   const owned = item;
 
-  let body: { annotations?: IncomingAnnotation[] };
+  let body: { annotations?: IncomingAnnotation[]; baseAnnotations?: IncomingAnnotation[] };
   try {
     body = await request.json();
   } catch {
@@ -168,6 +168,7 @@ export async function PUT(request: Request, { params }: Params) {
     const runsNormalized = normalizeRunsInput(row.runs);
     const text = runsNormalized ? runsNormalized.text : String(row.text ?? '');
     return {
+      id: Number.isInteger(row.id) && Number(row.id) > 0 ? Number(row.id) : null,
       x,
       y,
       w: kind === 'pin' ? 0 : Math.max(0, Math.min(1 - x, clamp01(row.w))),
@@ -192,6 +193,41 @@ export async function PUT(request: Request, { params }: Params) {
     };
   });
 
+  /**
+   * 三方合并（乐观并发）：客户端提交 baseAnnotations（它加载时的标注快照）时，
+   * 逐字段比对「基线 → 服务器现状 → 客户端现状」，解决两人同时编辑同一张图时
+   * 「全量替换导致后保存者吃掉先保存者改动」的丢失更新问题：
+   * - 客户端改过的字段以客户端为准；没改的字段保留服务器值（协作者的改动不丢）
+   * - 双方都改过同一字段：保存者意图优先
+   * - 基线里没有的条目（协作者在客户端加载后新建的）若客户端没提交 → 保留
+   * - 服务器有、基线有、客户端没有 → 客户端主动删除 → 删除
+   * 不带 base（旧客户端 / 脚本调用）时保持原全量替换语义，行为完全不变。
+   */
+  const baseList = Array.isArray(body.baseAnnotations)
+    ? (body.baseAnnotations as Array<IncomingAnnotation>)
+    : null;
+  const MERGE_FIELDS = [
+    'x',
+    'y',
+    'w',
+    'h',
+    'text',
+    'runs',
+    'text_opacity',
+    'doubtful',
+    'font_size_ratio',
+    'color',
+    'bg_color',
+    'align',
+    'font_weight',
+    'kind',
+    'group_id',
+    'source_text',
+    'comment',
+  ] as const;
+  const sameVal = (a: unknown, b: unknown) =>
+    JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
   const clear = db.prepare('DELETE FROM annotations WHERE item_id = ?');
   const insert = db.prepare(
     `INSERT INTO annotations
@@ -200,13 +236,81 @@ export async function PUT(request: Request, { params }: Params) {
      VALUES (@item_id, @x, @y, @w, @h, @text, @runs, @text_opacity, @doubtful, @font_size_ratio, @color, @bg_color, @align, @font_weight,
         @order_index, @kind, @group_id, @source_text, @comment, @updated_by)`,
   );
+  const updateMerged = db.prepare(
+    `UPDATE annotations
+        SET x = @x, y = @y, w = @w, h = @h, text = @text, runs = @runs,
+            text_opacity = @text_opacity, doubtful = @doubtful, font_size_ratio = @font_size_ratio,
+            color = @color, bg_color = @bg_color, align = @align, font_weight = @font_weight,
+            order_index = @order_index, kind = @kind, group_id = @group_id,
+            source_text = @source_text, comment = @comment, updated_by = @updated_by
+      WHERE id = @id`,
+  );
+  const updateOrder = db.prepare('UPDATE annotations SET order_index = ? WHERE id = ?');
+  const deleteById = db.prepare('DELETE FROM annotations WHERE id = ? AND item_id = ?');
   const touch = db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`);
 
   db.transaction(() => {
-    clear.run(itemId);
-    for (const row of normalized) {
-      insert.run({ ...row, item_id: itemId });
+    if (baseList === null) {
+      // 原语义：全量替换
+      clear.run(itemId);
+      for (const row of normalized) {
+        const { id: _id, ...rest } = row;
+        insert.run({ ...rest, item_id: itemId });
+      }
+    } else {
+      const dbRows = db
+        .prepare('SELECT * FROM annotations WHERE item_id = ?')
+        .all(itemId) as Array<Record<string, unknown>>;
+      const dbById = new Map(dbRows.map((r) => [Number(r.id), r]));
+      const baseById = new Map(
+        baseList
+          .filter((r) => Number.isInteger(r.id) && Number(r.id) > 0)
+          .map((r) => [Number(r.id), r as unknown as Record<string, unknown>]),
+      );
+      const incomingIds = new Set(
+        normalized.map((r) => r.id).filter((v): v is number => typeof v === 'number'),
+      );
+
+      let order = 0;
+      for (const row of normalized) {
+        const dbRow = row.id != null ? dbById.get(row.id) : undefined;
+        const base = row.id != null ? baseById.get(row.id) : undefined;
+        if (row.id != null && dbRow && base) {
+          // 已有标注：字段级三方合并
+          const merged: Record<string, unknown> = {
+            id: row.id,
+            order_index: order,
+            updated_by: user.id,
+          };
+          let clientTouched = false;
+          for (const field of MERGE_FIELDS) {
+            const clientVal = (row as unknown as Record<string, unknown>)[field];
+            const changed = !sameVal(clientVal, base[field]);
+            if (changed) clientTouched = true;
+            merged[field] = changed ? clientVal : dbRow[field];
+          }
+          // 客户端对这条什么都没改：updated_by 保留原编辑者
+          if (!clientTouched) merged.updated_by = dbRow.updated_by;
+          updateMerged.run(merged as never);
+        } else if (row.id != null && dbRow && !base) {
+          // 协作者在客户端加载后新建、但客户端又提交了它：没有基线可比，保守保留服务器版本
+          updateOrder.run(order, row.id);
+        } else {
+          // 新标注：插入
+          const { id: _id, ...rest } = row;
+          insert.run({ ...rest, item_id: itemId, order_index: order });
+        }
+        order += 1;
+      }
+
+      // 删除判定：基线与服务器都有、但客户端没提交 → 客户端删的；
+      // 基线没有、客户端也没提交 → 协作者在客户端加载后新建的，保留
+      for (const id of dbById.keys()) {
+        if (incomingIds.has(id)) continue;
+        if (baseById.has(id)) deleteById.run(id, itemId);
+      }
     }
+
     // 制作人员自动填充：若空间「翻译」为空且本次保存了有效译文，自动填入当前用户昵称
     const spaceRow = db.prepare('SELECT translator FROM spaces WHERE id = ?').get(owned.space_id) as
       | { translator: string }

@@ -351,6 +351,68 @@ export async function extractTextInBox(
 }
 
 /**
+ * 图像内容描述（6c）：整图发给视觉对话模型，输出一句话剧情/场景描述。
+ * 单步视觉 OCR 在同一次调用里顺带产出 description；两步链路（检测出框 + 补提取）
+ * 的检测端点不产出描述，用本函数补齐，保证两种引擎的 ai_context 一致。
+ */
+export async function describeImage(
+  config: { baseUrl: string; apiKey: string; ocrModel: string },
+  image: Buffer,
+): Promise<string | null> {
+  try {
+    // 视觉模型对超大图不友好，统一压到长边 1600（与 visionOcr 相同）
+    const resized = await sharp(image)
+      .rotate()
+      .resize({ width: 1600, height: 1600, fit: 'inside' })
+      .png()
+      .toBuffer();
+    const meta = await sharp(resized).metadata();
+    const dataUrl = toDataUrl(resized, 'image/png');
+    const response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.ocrModel,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  `这是漫画/图片，尺寸 ${meta.width}x${meta.height}。` +
+                  '用一句中文（不超过 80 字）描述图片内容：对话人物、场景、剧情提示。\n' +
+                  '只输出 JSON 对象，不要任何其它文字：{"description":"图片内容描述"}。',
+              },
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          },
+        ],
+        temperature: 0,
+        max_tokens: 300,
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = data.choices?.[0]?.message?.content ?? '';
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const parsed = JSON.parse(match[0]) as { description?: unknown };
+    return typeof parsed.description === 'string' && parsed.description.trim()
+      ? parsed.description.trim().slice(0, 500)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * OpenAI 兼容的图像编辑（/v1/images/edits）：图片 + 蒙版 + 提示词 → 生成式填充。
  * 用于「AI 去字」。注意这是生成式模型，mask 外的像素可能被轻微重绘，
  * 调用方必须做漂移校验（见 inpaint 路由里的 drift 检查）。

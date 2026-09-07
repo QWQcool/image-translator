@@ -22,6 +22,45 @@ export default function ProfileClient() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // 修改密码表单状态
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordBusy, setPasswordBusy] = useState(false);
+
+  async function changePassword() {
+    if (!currentPassword || !newPassword) {
+      setNotice({ type: 'error', text: '请填写当前密码与新密码' });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setNotice({ type: 'error', text: '两次输入的新密码不一致' });
+      return;
+    }
+    setPasswordBusy(true);
+    setNotice(null);
+    try {
+      const res = await fetch('/api/auth/password', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setNotice({ type: 'error', text: data.error ?? '修改失败' });
+        return;
+      }
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setNotice({ type: 'ok', text: '密码已修改' });
+    } catch {
+      setNotice({ type: 'error', text: '修改过程中发生网络错误' });
+    } finally {
+      setPasswordBusy(false);
+    }
+  }
+
   useEffect(() => {
     void (async () => {
       try {
@@ -181,6 +220,55 @@ export default function ProfileClient() {
             {notice.text}
           </p>
         )}
+      </div>
+
+      <div className="card max-w-xl space-y-4 p-6">
+        <h2 className="text-sm font-medium text-ink-100">修改密码</h2>
+        <label className="block text-sm">
+          <span className="label">当前密码</span>
+          <input
+            className="input mt-1"
+            type="password"
+            autoComplete="current-password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+          />
+        </label>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="block text-sm">
+            <span className="label">新密码（至少 8 位）</span>
+            <input
+              className="input mt-1"
+              type="password"
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="label">确认新密码</span>
+            <input
+              className="input mt-1"
+              type="password"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+            />
+          </label>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={passwordBusy}
+            onClick={() => void changePassword()}
+          >
+            {passwordBusy ? '提交中…' : '修改密码'}
+          </button>
+          <span className="text-[11px] text-ink-500">
+            忘记密码请联系管理员重置（npm run admin -- passwd 用户名）
+          </span>
+        </div>
       </div>
 
       {/* 权限扁平化后唯一保留的特权：管理员发放注册邀请码 */}

@@ -91,6 +91,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     failed: number;
   } | null>(null);
   const [mtFailures, setMtFailures] = useState<Array<{ title: string; reason: string }>>([]);
+  // 机翻完成后是否自动把空间进度推进到了「已翻译」（联动七级进度）
+  const [mtAdvanced, setMtAdvanced] = useState(false);
   // 非空 = 流水线已结束（成功/失败汇总展示中）
   const [mtDone, setMtDone] = useState<{ success: number; failed: number } | null>(null);
   const [mtShowFailures, setMtShowFailures] = useState(false);
@@ -155,6 +157,48 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       return next.size === prev.size ? prev : next;
     });
   }, [items]);
+
+  // —— 图片网格虚拟滚动（>30 张时只渲染视口附近的卡片，避免大空间网格卡顿）——
+  const gridRef = useRef<HTMLDivElement>(null);
+  // 渲染窗口 [start, end)：条目索引闭开区间，附当前列数与实测行高
+  const [gridWindow, setGridWindow] = useState({ start: 0, end: 30, cols: 4, rowH: 0 });
+  const VIRTUAL_THRESHOLD = 30;
+  const virtual = view === 'items' && items.length > VIRTUAL_THRESHOLD;
+  const virtualItems = virtual ? items.slice(gridWindow.start, gridWindow.end) : items;
+  const indexOffset = virtual ? gridWindow.start : 0;
+  const totalRows = virtual ? Math.ceil(items.length / gridWindow.cols) : 0;
+
+  useEffect(() => {
+    if (!virtual) return;
+    const update = () => {
+      const el = gridRef.current;
+      if (!el) return;
+      // 列数与 Tailwind 断点对齐：grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5
+      const vw = window.innerWidth;
+      const cols = vw < 640 ? 2 : vw < 1024 ? 3 : vw < 1536 ? 4 : 5;
+      const gap = 16;
+      // 行高 = 实测第一张可见卡（aspect-4/3 缩略图 + 文本区，卡片等高）+ 行间距
+      const card = el.querySelector<HTMLElement>('[data-grid-card]');
+      const rowH = card ? card.offsetHeight + gap : Math.round((vw / cols) * 0.75) + 150;
+      const rect = el.getBoundingClientRect();
+      const startRow = Math.max(0, Math.floor(-rect.top / rowH) - 2);
+      const endRow = Math.ceil((window.innerHeight - rect.top) / rowH) + 2;
+      const start = startRow * cols;
+      const end = Math.min(items.length, endRow * cols);
+      setGridWindow((prev) =>
+        prev.start === start && prev.end === end && prev.cols === cols && prev.rowH === rowH
+          ? prev
+          : { start, end, cols, rowH },
+      );
+    };
+    update();
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('scroll', update);
+      window.removeEventListener('resize', update);
+    };
+  }, [virtual, items]);
 
   // 一键机翻预检：OCR（含检测服务/本机 sidecar）与对话模型都可用才亮按钮
   useEffect(() => {
@@ -321,6 +365,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     setMtScope('untranslated');
     setMtProgress(null);
     setMtFailures([]);
+    setMtAdvanced(false);
     setMtDone(null);
     setMtShowFailures(false);
     mtCancelled.current = false;
@@ -344,6 +389,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     setMtRunning(true);
     mtCancelled.current = false;
     setMtFailures([]);
+    setMtAdvanced(false);
     setMtDone(null);
     setMtProgress({ done: 0, total: targets.length, current: '', success: 0, failed: 0 });
 
@@ -425,6 +471,26 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
 
     setMtFailures(failures);
     setMtDone({ success, failed: failures.length });
+
+    // 进度联动：只要有页面翻译成功，且空间进度还停在「未翻译 / 翻译已占位」，
+    // 自动推进到「已翻译」（更后面的进度不倒退，由用户自行流转）
+    if (
+      success > 0 &&
+      space &&
+      (space.progress === 'untranslated' || space.progress === 'translated_placeholder')
+    ) {
+      try {
+        const res = await fetch(`/api/spaces/${spaceId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ progress: 'translated' }),
+        });
+        if (res.ok) setMtAdvanced(true);
+      } catch {
+        // 推进失败不打扰用户，进度仍可手动切换
+      }
+    }
+
     setMtRunning(false);
     // 标注数已变化，刷新列表（同时让「仅无标注」范围的下一次运行拿到新数据）
     await load(debouncedQuery);
@@ -839,7 +905,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           <div className="flex flex-wrap items-center gap-2">
             <input
               className="input w-48 py-1.5 text-xs"
-              placeholder="搜索图片名称…"
+              placeholder="搜索图片名 / 标注文本…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
@@ -1085,11 +1151,24 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           }
         />
       ) : (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
-          {items.map((item, index) => {
+        <div
+          ref={virtual ? gridRef : undefined}
+          className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5"
+        >
+          {virtual && gridWindow.start > 0 && (
+            <div
+              aria-hidden
+              style={{
+                gridColumn: '1 / -1',
+                height: (gridWindow.start / gridWindow.cols) * gridWindow.rowH,
+              }}
+            />
+          )}
+          {virtualItems.map((item, idx) => {
+            const index = indexOffset + idx;
             const selected = selection.has(item.id);
             return (
-              <div key={item.id} className="card group relative overflow-hidden">
+              <div key={item.id} data-grid-card className="card group relative overflow-hidden">
                 <Link
                   href={`/annotate/${item.id}`}
                   className="block"
@@ -1165,6 +1244,12 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                       : ''}
                   </p>
 
+                  {searching && (item.matched_texts ?? []).length > 0 && (
+                    <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-sky-deep">
+                      {item.matched_texts!.map((snippet) => `「${snippet.slice(0, 40)}」`).join(' ')}
+                    </p>
+                  )}
+
                   <div className="mt-2.5 flex gap-2">
                     <Link
                       href={`/annotate/${item.id}`}
@@ -1214,6 +1299,15 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               </div>
             );
           })}
+          {virtual && gridWindow.end < items.length && (
+            <div
+              aria-hidden
+              style={{
+                gridColumn: '1 / -1',
+                height: (totalRows - gridWindow.end / gridWindow.cols) * gridWindow.rowH,
+              }}
+            />
+          )}
         </div>
       )}
 
@@ -1426,6 +1520,11 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                 <p className="notice-ok">
                   完成：成功 {mtDone.success} 页 · 跳过/失败 {mtDone.failed} 页
                 </p>
+                {mtAdvanced && (
+                  <p className="text-xs text-sky-deep">
+                    空间进度已自动推进到「已翻译」（原进度在更后面时不会倒退）。
+                  </p>
+                )}
                 {mtFailures.length > 0 && (
                   <div>
                     <button

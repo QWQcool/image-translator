@@ -28,9 +28,15 @@ export function cleanTagsInput(raw: unknown): string[] {
   return result;
 }
 
-/** 解析库里存的 tags JSON 字符串；损坏数据静默回空数组 */
-export function parseSpaceTags(raw: string | null | undefined): string[] {
+/**
+ * 解析 tags：兼容两种输入形状——
+ * - 服务端 API 已统一返回数组（与列表接口 distinctTags 形状一致），直接透传清洗；
+ * - 历史代码/旧接口仍传 JSON 字符串（库内存储格式），走 JSON.parse 兜底。
+ * 损坏数据静默回空数组。
+ */
+export function parseSpaceTags(raw: string | string[] | null | undefined): string[] {
   if (!raw) return [];
+  if (Array.isArray(raw)) return cleanTagsInput(raw);
   try {
     return cleanTagsInput(JSON.parse(raw));
   } catch {
