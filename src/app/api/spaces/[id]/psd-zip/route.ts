@@ -7,24 +7,13 @@ import sharp from 'sharp';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
+import { buildPsdTextLayer } from '@/lib/psd-text';
 import { IMAGES_DIR } from '@/lib/storage';
 import type { Annotation, Asset, Space, SpaceItem } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
 
 const MAX_PSD_TOTAL_BYTES = 1024 * 1024 * 1024; // 1GB
-
-function parseHexColor(hex: string): { r: number; g: number; b: number } {
-  const clean = hex.replace('#', '');
-  if (clean.length >= 6) {
-    return {
-      r: parseInt(clean.slice(0, 2), 16) / 255 || 0,
-      g: parseInt(clean.slice(2, 4), 16) / 255 || 0,
-      b: parseInt(clean.slice(4, 6), 16) / 255 || 0,
-    };
-  }
-  return { r: 0, g: 0, b: 0 };
-}
 
 export async function GET(_request: Request, { params }: Params) {
   const user = await getCurrentUser();
@@ -125,19 +114,17 @@ export async function GET(_request: Request, { params }: Params) {
         // Photoshop 文本锚点一般在基线，向下偏移 1 个字号
         const posY = Math.round(an.y * height + fontSize);
 
-        const colorObj = parseHexColor(an.color || '#000000');
-
-        children.push({
-          name: textContent.replace(/[\r\n]+/g, ' ').slice(0, 16) || `台词 ${anIdx + 1}`,
-          text: {
+        // 共享模块构造 TypeTool 文本层（原字段一一对应：无旋转 → 恒等矩阵，行为与旧内联构造完全一致）
+        children.push(
+          buildPsdTextLayer({
+            name: textContent.replace(/[\r\n]+/g, ' ').slice(0, 16) || `台词 ${anIdx + 1}`,
             text: textContent,
-            transform: [1, 0, 0, 1, posX, posY],
-            style: {
-              fontSize,
-              fillColor: colorObj,
-            },
-          },
-        });
+            x: posX,
+            y: posY,
+            fontSize,
+            color: an.color || '#000000',
+          }),
+        );
       }
 
       // 生成原生 PSD 字节

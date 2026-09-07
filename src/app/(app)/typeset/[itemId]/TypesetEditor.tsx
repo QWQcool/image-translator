@@ -21,6 +21,7 @@ import {
 import { useCollabRoom, type CollabOp } from '@/lib/use-collab-room';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
 import { writePsd, type Layer as PsdLayer, type Psd } from 'ag-psd';
+import { buildPsdTextLayer } from '@/lib/psd-text';
 import {
   groupVerticalRuns,
   hasHalfWidthChars,
@@ -1847,9 +1848,90 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
 
 
   /**
+   * 把文字层转成 ag-psd 原生 TypeTool 文本图层（PS 打开可直接编辑文字，无需逐层栅格化）。
+   * 无法映射的特效返回 null 走栅格兜底（混合输出）：
+   * - 渐变填充 / 阴影：PSD 文本样式无单层表达；
+   * - 竖排 + 纵中横排：段内字符转正无法用 PS 直排文本表达。
+   * 映射口径：字号（×整体缩放）/ 填充色 / 假粗体 / 行距 / 字距 / 描边色（宽度非公开字段不映射）/
+   * 横竖排（orientation）/ 对齐（justification，与层锚点语义一一对应）/ 旋转（transform 矩阵 + 绕层中心补偿）。
+   * 限宽/字距的横排断行结果写死进文本（PS 端逐行静态换行，文字仍可编辑）。
+   */
+  function buildTypesetPsdTextLayer(layer: TypesetTextLayer): PsdLayer | null {
+    if (layer.fillGradient != null || layer.shadowColor != null) return null;
+    if (layer.vertical && layer.tcyEnabled !== false && hasHalfWidthChars(layer.text)) return null;
+    const scl = layer.scale ?? 1;
+    const bbox = layerBBox(layer);
+    const fontSizePx = Math.max(4, layer.fontSize * scl);
+    // layerBBox 不含 scale：绕中心缩放补偿（中心不变，与渲染 transform 同口径）
+    const cx = bbox.left + bbox.w / 2;
+    const cy = bbox.top + bbox.h / 2;
+    const bw = Math.max(fontSizePx, bbox.w * scl);
+    const bh = Math.max(fontSizePx, bbox.h * scl);
+    const left = cx - bw / 2;
+    const top = cy - bh / 2;
+
+    const hLayout = !layer.vertical ? layoutHorizontal(layer) : null;
+    const text = hLayout
+      ? hLayout.map((cells) => cells.map((cell) => cell.ch).join('')).join('\n')
+      : layer.text;
+    const lineCount = hLayout ? hLayout.length : Math.max(1, layer.text.split('\n').length);
+
+    // 文本原点：
+    // - 横排 point text = 对齐锚点（layer.x 的左缘/中心/右缘语义与 PS 对齐锚点一一对应）× 首行基线；
+    //   首行基线 ≈ 首行中心（块顶 + 半行高）+ 0.35 字号（CJK 基线近似，PS 端可微调）
+    // - 竖排直排文字 = 首列基线 x（列组右缘内缩半字号）× 文本顶部（近似）
+    let x: number;
+    let y: number;
+    if (layer.vertical) {
+      x = left + bw - fontSizePx / 2;
+      y = top + fontSizePx * 0.8;
+    } else {
+      x = layer.x * imageWidth;
+      y = top + bh / (2 * lineCount) + fontSizePx * 0.35;
+    }
+    // 旋转中心补偿：PSD transform 的原点取「绕层中心旋转后」的位置（与渲染 transform 同口径）
+    const rotDeg = layer.rotation ?? 0;
+    if (rotDeg !== 0) {
+      const rad = (rotDeg * Math.PI) / 180;
+      const dx = x - cx;
+      const dy = y - cy;
+      x = cx + dx * Math.cos(rad) - dy * Math.sin(rad);
+      y = cy + dx * Math.sin(rad) + dy * Math.cos(rad);
+    }
+
+    // 描边：新描边（strokeColor）优先，回落旧 px 描边；描边宽度非 PSD 可移植字段，仅映射颜色
+    const strokeColor = layer.strokeColor ?? (layer.strokeWidth > 0 ? layer.stroke : null);
+
+    // 字体：CSS font-family 栈取第一个名字（自定义字体为带引号名）；PS 缺字自动替换，不影响可编辑性
+    let fontName: string | undefined;
+    if (layer.fontFamily) {
+      const first = layer.fontFamily.split(',')[0]?.trim().replace(/^"|"$/g, '');
+      if (first) fontName = first;
+    }
+
+    return buildPsdTextLayer({
+      name: layer.text.replace(/\n/g, ' ').trim().slice(0, 20) || '文字层',
+      text,
+      fontSize: fontSizePx,
+      color: layer.color,
+      bold: layer.fontWeight >= 600,
+      leadingPx: fontSizePx * layer.lineHeight,
+      tracking: (layer.letterSpacing ?? 0) * 1000,
+      strokeColor,
+      vertical: layer.vertical,
+      rotationDeg: rotDeg,
+      align: layer.vertical ? undefined : layer.align,
+      x,
+      y,
+      fontName,
+    });
+  }
+
+  /**
    * 导出 PSD（ag-psd，RLE 压缩）：图层组装 = 底层原图 → 涂改层（整幅透明像素图层）
-   * → 每个可见文字层一个栅格化像素图层（第一版不做 TypeTool 文字图层，规避旧版 PS
-   * 打开文字层兼容风险；图层名 = 文字内容前 20 字符；逐层离屏绘制后及时释放）。
+   * → 可见文字层：能映射的转 ag-psd 原生 TypeTool 文本图层（PS 打开直接可编辑），
+   *   含渐变/阴影/纵中横排的层保持栅格像素图层兜底（混合输出）；
+   * 图层名 = 文字内容前 20 字符；逐层离屏绘制后及时释放。
    */
   async function exportPsd() {
     const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
@@ -1874,9 +1956,15 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       paintCopy.height = imageHeight;
       paintCopy.getContext('2d')?.drawImage(paint, 0, 0);
       children.push({ name: '涂改层', canvas: paintCopy });
-      // 文字层：逐层栅格化（隐藏层不导出；复用 renderPngBlob 同款逐层绘制，观感一致）
+      // 文字层：优先转原生 TypeTool（PS 打开直接可编辑文字）；
+      // 含渐变/阴影/纵中横排的层无法映射，保持栅格像素图层兜底（混合输出）
       for (const layer of textLayers) {
         if (layer.visible === false) continue;
+        const textLayer = buildTypesetPsdTextLayer(layer);
+        if (textLayer) {
+          children.push(textLayer);
+          continue;
+        }
         const c = document.createElement('canvas');
         c.width = imageWidth;
         c.height = imageHeight;
@@ -1890,14 +1978,18 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       }
       // 合成图（composite）：PS 打开 PSD 的首屏渲染源。ag-psd 不会从子图层自动合成，
       // 不设置 psd.canvas 时写入的是不透明纯黑图（PS 首屏全黑、像导出失败）——必须手绘。
+      // TypeTool 文本层没有像素 canvas，合成时用 drawTextLayerOnCtx 画出（与预览/栅格兜底同口径，
+      // 仅用于非 PS 软件预览；PS 内文字层由文本引擎实时渲染）。
       const composite = document.createElement('canvas');
       composite.width = imageWidth;
       composite.height = imageHeight;
       const cctx2 = composite.getContext('2d');
       if (cctx2) {
-        for (const child of children) {
-          const layerCanvas = (child as { canvas?: HTMLCanvasElement }).canvas;
-          if (layerCanvas) cctx2.drawImage(layerCanvas, 0, 0);
+        cctx2.drawImage(bg, 0, 0);
+        cctx2.drawImage(paintCopy, 0, 0);
+        for (const layer of textLayers) {
+          if (layer.visible === false) continue;
+          drawTextLayerOnCtx(cctx2, layer);
         }
       }
       const psd: Psd = { width: imageWidth, height: imageHeight, canvas: composite, children };
