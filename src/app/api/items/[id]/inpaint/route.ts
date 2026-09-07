@@ -8,7 +8,7 @@ import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { IMAGE_DIRS } from '@/lib/storage';
 import { aiConfigured, imageEditWithMask, resolveAiConfig } from '@/lib/ai';
-import { maskPng, teleaFallback, type NormBox } from '@/lib/inpaint';
+import { maskPng, normalizeMaskPng, parseMaskDataUrl, teleaFallback, teleaFallbackMask, type NormBox } from '@/lib/inpaint';
 import { sidecarHealth, sidecarInpaint } from '@/lib/sidecar';
 
 type Params = { params: Promise<{ id: string }> };
@@ -32,13 +32,17 @@ async function outsideMaskDrift(
     const scale = { width: W, height: H, fit: 'fill' as const };
     const a = await sharp(original).rotate().resize(scale).raw().toBuffer();
     const b = await sharp(result).resize(scale).raw().toBuffer();
-    const m = await sharp(mask).resize(scale).raw().toBuffer();
+    const mm = await sharp(mask).resize(scale).raw().toBuffer({ resolveWithObject: true });
+    // 蒙版可能是单通道（maskPng/normalizeMaskPng 输出）也可能是多通道，按实际通道数采样，
+    // 不能假定 3 通道——旧代码固定按 3 通道读单通道蒙版会错位，导致 AI 结果被过度拒收
+    const m = mm.data;
+    const mCh = mm.info.channels;
     const channels = 3;
     let sum = 0;
     let count = 0;
     for (let i = 0; i < W * H; i += 1) {
       // mask 是黑色（透明）= 不去字区域；白色 = 去字区域。非白才算 mask 外
-      const mg = m[i * channels] ?? 0;
+      const mg = m[i * mCh] ?? 0;
       if (mg > 128) continue;
       const dr = Math.abs(a[i * channels] - b[i * channels]);
       const dg = Math.abs(a[i * channels + 1] - b[i * channels + 1]);
@@ -74,25 +78,20 @@ export async function POST(request: Request, { params }: Params) {
   const denied = accessError(item ? getSpaceAccess(item.space_id, user.id) : null, 'edit');
   if (denied || !item) return denied ?? NextResponse.json({ error: '条目不存在' }, { status: 404 });
 
-  let body: { boxes?: NormBox[] };
+  let body: { boxes?: NormBox[]; mask?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: '请求体格式错误' }, { status: 400 });
   }
 
+  // 蒙版优先：请求体带 mask（PNG dataURL，客户端涂改层笔迹/选区光栅化）时忽略 boxes。
+  // 解析失败按「无蒙版」处理，走旧 boxes 链路（向后兼容，不因脏输入整单报错）。
+  const maskRaw = typeof body.mask === 'string' ? parseMaskDataUrl(body.mask) : null;
+
   let boxes = (body.boxes ?? []).filter(
     (b) => Number.isFinite(b.x) && Number.isFinite(b.y) && Number.isFinite(b.w) && Number.isFinite(b.h),
   );
-  if (boxes.length === 0) {
-    const pins = db
-      .prepare(`SELECT x, y FROM annotations WHERE item_id = ? AND kind = 'pin'`)
-      .all(itemId) as Array<{ x: number; y: number }>;
-    boxes = pins.map((pin) => ({ x: pin.x - 0.06, y: pin.y - 0.03, w: 0.12, h: 0.06 }));
-  }
-  if (boxes.length === 0) {
-    return NextResponse.json({ error: '没有可去字的区域' }, { status: 400 });
-  }
 
   const filePath = path.join(IMAGE_DIRS.IMAGES_DIR, item.filename);
   const original = await fs.readFile(filePath);
@@ -100,9 +99,30 @@ export async function POST(request: Request, { params }: Params) {
   const width = meta.width ?? item.width ?? 0;
   const height = meta.height ?? item.height ?? 0;
 
+  // 蒙版对齐原图尺寸并二值化；全空蒙版按用户误操作提示，不静默回退标号框
+  let mask: Buffer | null = null;
+  if (maskRaw) {
+    const norm = await normalizeMaskPng(maskRaw, width, height).catch(() => null);
+    if (!norm) return NextResponse.json({ error: '蒙版解析失败' }, { status: 400 });
+    if (!norm.hasArea) return NextResponse.json({ error: '蒙版区域为空' }, { status: 400 });
+    mask = norm.png;
+  }
+
+  if (!mask && boxes.length === 0) {
+    const pins = db
+      .prepare(`SELECT x, y FROM annotations WHERE item_id = ? AND kind = 'pin'`)
+      .all(itemId) as Array<{ x: number; y: number }>;
+    boxes = pins.map((pin) => ({ x: pin.x - 0.06, y: pin.y - 0.03, w: 0.12, h: 0.06 }));
+  }
+  if (!mask && boxes.length === 0) {
+    return NextResponse.json({ error: '没有可去字的区域' }, { status: 400 });
+  }
+
   let paint: Buffer;
   let engine: 'lama' | 'telea' | 'ai' = 'telea';
-  const mask = await maskPng(width, height, boxes);
+  const finalMask = mask ?? (await maskPng(width, height, boxes));
+  // 降级去字：蒙版输入走洋葱剥皮扩散（任意形状），boxes 输入保持原矩形边界色填充
+  const teleaPaint = () => (mask ? teleaFallbackMask(original, mask) : teleaFallback(original, boxes));
 
   // 引擎优先级：sidecar LaMa（本地、确定性最好）> AI 生成式（当前用户自己的 token）> telea（零依赖兜底）
   let aiPaint: Buffer | null = null;
@@ -114,7 +134,7 @@ export async function POST(request: Request, { params }: Params) {
       aiPaint = await imageEditWithMask(
         aiConfig,
         padded,
-        mask,
+        finalMask,
         'Remove the text inside the masked area and fill it with the surrounding background (screentone/lineart). Keep everything outside the mask exactly unchanged.',
         size,
       );
@@ -122,19 +142,19 @@ export async function POST(request: Request, { params }: Params) {
   }
 
   if (await sidecarHealth()) {
-    const lama = await sidecarInpaint(original, mask);
+    const lama = await sidecarInpaint(original, finalMask);
     if (lama) {
       paint = lama;
       engine = 'lama';
     } else {
-      paint = await teleaFallback(original, boxes);
+      paint = await teleaPaint();
     }
   } else if (aiPaint) {
     // 漂移校验：生成式编辑可能把 mask 外的线稿也改了。
     // 只比较 mask 外区域，平均差异超过阈值就拒收，回退到 telea。
-    const drifted = await outsideMaskDrift(original, aiPaint, mask, width, height);
+    const drifted = await outsideMaskDrift(original, aiPaint, finalMask, width, height);
     if (drifted) {
-      paint = await teleaFallback(original, boxes);
+      paint = await teleaPaint();
     } else {
       // AI 返回的尺寸可能和原图不一致，缩放回原尺寸
       paint = await sharp(aiPaint)
@@ -144,12 +164,19 @@ export async function POST(request: Request, { params }: Params) {
       engine = 'ai';
     }
   } else {
-    paint = await teleaFallback(original, boxes);
+    paint = await teleaPaint();
   }
 
   // AI 调用埋点：只有 AI 生成式引擎真正生效才记（漂移拒收/本地引擎不刷日志）
   if (engine === 'ai') {
-    logOp(user.id, 'ai_inpaint', 'ai', itemId, itemDisplayName(itemId), `AI 去字（${boxes.length} 个区域）`);
+    logOp(
+      user.id,
+      'ai_inpaint',
+      'ai',
+      itemId,
+      itemDisplayName(itemId),
+      `AI 去字（${mask ? '自定义蒙版' : `${boxes.length} 个区域`}）`,
+    );
   }
 
   return new NextResponse(new Uint8Array(paint), {

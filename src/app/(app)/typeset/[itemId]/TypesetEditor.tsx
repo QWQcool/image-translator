@@ -28,11 +28,19 @@ const TOOLS: Array<{ id: Tool; label: string }> = [
   { id: 'brush', label: '画笔' },
   { id: 'eraser', label: '橡皮' },
   { id: 'eyedropper', label: '吸管' },
-  { id: 'rect', label: '选区填充' },
-  { id: 'lasso', label: '套索填充' },
+  { id: 'rect', label: '矩形选区' },
+  { id: 'lasso', label: '套索选区' },
   { id: 'clone', label: '图章' },
   { id: 'text', label: '文字' },
 ];
+
+/**
+ * 持久选区：rect/lasso 工具拖出的形状（松手后保留在画布上，虚线框预览），
+ * 供「填充选区」（旧行为：松手即填充）与「选区去字」（光栅化成蒙版）消费，Esc 清除。
+ */
+type Selection =
+  | { kind: 'rect'; x: number; y: number; w: number; h: number }
+  | { kind: 'lasso'; points: { x: number; y: number }[] };
 
 /** 颜色串追加透明度（仅支持 #RRGGBB 形态，软边径向渐变用；其余形态回退不透明） */
 function withAlpha(hex: string, alpha: number): string {
@@ -140,6 +148,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const [dirty, setDirty] = useState(false);
   const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [hasPaint, setHasPaint] = useState(false);
+  /** 当前持久选区（矩形/套索松手后落在这里，Esc 或消费动作清除） */
+  const [selShape, setSelShape] = useState<Selection | null>(null);
   /** 分组样式预设：按 pin.group_id 套用；空表时落回硬编码默认值 */
   const [styles, setStyles] = useState<Record<string, LpStyle>>({});
   /** LabelPlus 分组表（样式面板按此展示） */
@@ -301,6 +311,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.code === 'Space') setSpaceDown(true);
+      // Esc 取消持久选区（不影响其它快捷键，选区不是可撤销状态）
+      if (e.key === 'Escape') setSelShape(null);
       const typing =
         e.target instanceof HTMLElement &&
         (e.target.tagName === 'INPUT' ||
@@ -754,7 +766,6 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     }
     if (!drawing.current) return;
     drawing.current = false;
-    const ctx = paintCtx();
 
     // 笔画收尾：把整条矢量轨迹广播出去
     const stroke = liveStroke.current;
@@ -784,26 +795,19 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       }
     }
 
-    if (tool === 'rect' && rect && ctx && rect.w > 2 && rect.h > 2) {
-      ctx.fillStyle = color;
-      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-      setDirty(true);
-      broadcastPaint({ type: 'rect', x: rect.x, y: rect.y, w: rect.w, h: rect.h, color });
+    // 矩形/套索：松手不再直接填充（旧行为），改为落成持久选区，
+    // 由「填充选区」（旧行为等价按钮）或「选区去字」（蒙版去字）消费
+    if (tool === 'rect' && rect && rect.w > 2 && rect.h > 2) {
+      setSelShape({ kind: 'rect', x: rect.x, y: rect.y, w: rect.w, h: rect.h });
     }
-    if (tool === 'lasso' && ctx && lassoPts.current.length > 2) {
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.moveTo(lassoPts.current[0].x, lassoPts.current[0].y);
-      lassoPts.current.forEach((p) => ctx.lineTo(p.x, p.y));
-      ctx.closePath();
-      ctx.fill();
-      setDirty(true);
-      broadcastPaint({ type: 'lasso', points: [...lassoPts.current], color });
+    if (tool === 'lasso' && lassoPts.current.length > 2) {
+      setSelShape({ kind: 'lasso', points: [...lassoPts.current] });
     }
     setRect(null);
     lassoPts.current = [];
     lastPt.current = null;
-    if (['brush', 'eraser', 'rect', 'lasso', 'clone'].includes(tool)) {
+    // 选区本身不进撤销栈（不是像素/图层状态）；填充动作在自己的入口里落历史
+    if (['brush', 'eraser', 'clone'].includes(tool)) {
       await pushHistory(textLayersRef.current, selectedTextRef.current);
     }
   }
@@ -834,12 +838,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   undoRef.current = undo;
   redoRef.current = redo;
 
-  async function autoInpaint() {
+  /** 调去字 API 并把结果画进涂改层：maskDataUrl 存在时按蒙版去字，否则回退标号框（旧行为） */
+  async function requestInpaint(maskDataUrl?: string) {
     setError(null);
     const res = await fetch(`/api/items/${itemId}/inpaint`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ boxes: [] }),
+      body: JSON.stringify(maskDataUrl ? { mask: maskDataUrl } : { boxes: [] }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ error: '去字失败' }));
@@ -854,6 +859,90 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
     bmp.close();
     setDirty(true);
+    await pushHistory(textLayersRef.current, selectedTextRef.current);
+  }
+
+  /** 涂改层是否有笔迹（任一像素 alpha>0）。只在点击去字时扫一次，不在绘制热路径上 */
+  function paintHasStrokes(): boolean {
+    const canvas = paintRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return false;
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] > 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 把画布转成去字蒙版 dataURL：涂改层是「笔迹画在透明底上」的语义，
+   * 服务端按 alpha>阈值 判定去字区域，所以直接整幅拷贝即可（笔迹颜色无所谓）。
+   */
+  function canvasToMaskDataUrl(src: HTMLCanvasElement): string {
+    const mask = document.createElement('canvas');
+    mask.width = imageWidth;
+    mask.height = imageHeight;
+    mask.getContext('2d')?.drawImage(src, 0, 0, mask.width, mask.height);
+    return mask.toDataURL('image/png');
+  }
+
+  /** 把选区光栅化成蒙版画布：选区内白色（去字）、外透明（保留） */
+  function selectionToMaskCanvas(shape: Selection): HTMLCanvasElement | null {
+    const mask = document.createElement('canvas');
+    mask.width = imageWidth;
+    mask.height = imageHeight;
+    const mctx = mask.getContext('2d');
+    if (!mctx) return null;
+    mctx.fillStyle = '#FFFFFF';
+    if (shape.kind === 'rect') {
+      mctx.fillRect(shape.x, shape.y, shape.w, shape.h);
+    } else if (shape.points.length > 2) {
+      mctx.beginPath();
+      mctx.moveTo(shape.points[0].x, shape.points[0].y);
+      shape.points.forEach((p) => mctx.lineTo(p.x, p.y));
+      mctx.closePath();
+      mctx.fill();
+    }
+    return mask;
+  }
+
+  /** 自动去字：涂改层有笔迹时用笔迹当蒙版（笔迹=去字区域），否则回退标号固定框 */
+  async function autoInpaint() {
+    if (!canEdit) return;
+    const canvas = paintRef.current;
+    const maskDataUrl = canvas && paintHasStrokes() ? canvasToMaskDataUrl(canvas) : undefined;
+    await requestInpaint(maskDataUrl);
+  }
+
+  /** 选区去字：把当前选区光栅化成蒙版发请求，成功后清除选区 */
+  async function inpaintSelection() {
+    if (!canEdit || !selShape) return;
+    const maskCanvas = selectionToMaskCanvas(selShape);
+    if (!maskCanvas) return;
+    setSelShape(null);
+    await requestInpaint(maskCanvas.toDataURL('image/png'));
+  }
+
+  /** 填充选区：rect/lasso 松手即填的旧行为改为按钮触发（选区可先用于去字或填充二选一） */
+  async function fillSelection() {
+    if (!canEdit || !selShape) return;
+    const ctx = paintCtx();
+    if (!ctx) return;
+    if (selShape.kind === 'rect') {
+      ctx.fillStyle = color;
+      ctx.fillRect(selShape.x, selShape.y, selShape.w, selShape.h);
+      broadcastPaint({ type: 'rect', x: selShape.x, y: selShape.y, w: selShape.w, h: selShape.h, color });
+    } else {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(selShape.points[0].x, selShape.points[0].y);
+      selShape.points.forEach((p) => ctx.lineTo(p.x, p.y));
+      ctx.closePath();
+      ctx.fill();
+      broadcastPaint({ type: 'lasso', points: selShape.points, color });
+    }
+    setDirty(true);
+    setSelShape(null);
     await pushHistory(textLayersRef.current, selectedTextRef.current);
   }
 
@@ -1602,6 +1691,24 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           <button type="button" className="btn-ghost text-xs" onClick={() => void autoInpaint()}>
             自动去字
           </button>
+          <button
+            type="button"
+            className="btn-ghost text-xs"
+            disabled={!selShape}
+            title={selShape ? '把当前选区光栅化成蒙版去字（选区内清除，AI/本地引擎补背景）' : '先用「矩形选区 / 套索选区」框出要去的文字区域'}
+            onClick={() => void inpaintSelection()}
+          >
+            选区去字
+          </button>
+          <button
+            type="button"
+            className="btn-ghost text-xs"
+            disabled={!selShape}
+            title={selShape ? '用当前颜色填充选区' : '先用「矩形选区 / 套索选区」框出区域'}
+            onClick={() => void fillSelection()}
+          >
+            填充选区
+          </button>
           <button type="button" className="btn-ghost text-xs" onClick={() => void undo()}>
             撤销
           </button>
@@ -1772,6 +1879,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           </label>
           <p className="text-[11px] text-ink-400">
             原图层已锁定。橡皮只擦涂改层。图章(S)：Alt+点击取源，拖动复制背景；软边对画笔/橡皮生效。
+            矩形/套索拖出选区后，用顶部「填充选区」上色或「选区去字」去字（Esc 取消选区）。
           </p>
         </div>
 
@@ -2102,6 +2210,29 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                   className="pointer-events-none absolute border border-halo bg-halo/20"
                   style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
                 />
+              )}
+              {/* 持久选区预览：拖拽中的 rect/lasso 走上面的临时预览，松手后用这里的虚线框常驻显示 */}
+              {selShape?.kind === 'rect' && (
+                <div
+                  className="pointer-events-none absolute border border-dashed border-halo"
+                  style={{ left: selShape.x, top: selShape.y, width: selShape.w, height: selShape.h }}
+                />
+              )}
+              {selShape?.kind === 'lasso' && selShape.points.length > 2 && (
+                <svg
+                  className="pointer-events-none absolute inset-0"
+                  width={imageWidth}
+                  height={imageHeight}
+                  aria-hidden
+                >
+                  <polygon
+                    points={selShape.points.map((p) => `${p.x},${p.y}`).join(' ')}
+                    fill="rgba(255,255,255,0.12)"
+                    stroke="#7DD3FC"
+                    strokeWidth={1.5}
+                    strokeDasharray="6 4"
+                  />
+                </svg>
               )}
               {showGuides && (
                 <div className="pointer-events-none absolute inset-0 z-20">
