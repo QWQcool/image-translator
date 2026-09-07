@@ -30,7 +30,7 @@ import {
   type VerticalRun,
 } from '@/lib/typeset-layer';
 
-type Tool = 'pan' | 'brush' | 'eraser' | 'eyedropper' | 'rect' | 'lasso' | 'clone' | 'text';
+type Tool = 'pan' | 'brush' | 'eraser' | 'eyedropper' | 'rect' | 'lasso' | 'clone' | 'text' | 'liquify';
 
 const TOOLS: Array<{ id: Tool; label: string }> = [
   { id: 'pan', label: '平移' },
@@ -40,6 +40,7 @@ const TOOLS: Array<{ id: Tool; label: string }> = [
   { id: 'rect', label: '矩形选区' },
   { id: 'lasso', label: '套索选区' },
   { id: 'clone', label: '图章' },
+  { id: 'liquify', label: '液化' },
   { id: 'text', label: '文字' },
 ];
 
@@ -99,7 +100,18 @@ type PaintOp =
       from: { x: number; y: number };
     }
   | { type: 'rect'; x: number; y: number; w: number; h: number; color: string }
-  | { type: 'lasso'; points: { x: number; y: number }[]; color: string };
+  | { type: 'lasso'; points: { x: number; y: number }[]; color: string }
+  | {
+      type: 'liquify';
+      /** 笔画首尾点（规格字段，直线重放兜底用）；points 存在时远端按完整路径重放 */
+      x0: number;
+      y0: number;
+      x1: number;
+      y1: number;
+      radius: number;
+      strength: number;
+      points?: { x: number; y: number }[];
+    };
 
 /** 文字连续输入时不要每敲一个字就记一步，停手 700ms 再落一步 */
 const HISTORY_COALESCE_MS = 700;
@@ -271,6 +283,17 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     soft?: boolean;
     points: { x: number; y: number }[];
     from?: { x: number; y: number };
+  } | null>(null);
+
+  /**
+   * 进行中的一笔液化：source 是「背景(带 LUT) + 涂改层」的合成快照画布，
+   * 作为向前变形的采样源并随每步同步形变，保证连续拖动累积（PS 向前变形同款）。
+   */
+  const liquify = useRef<{
+    source: HTMLCanvasElement;
+    points: { x: number; y: number }[];
+    radius: number;
+    strength: number;
   } | null>(null);
 
   const load = useCallback(async () => {
@@ -558,6 +581,104 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
   }
 
+  // ---- 液化（向前变形）：自研环形位移重采样，不引入新依赖 ----
+
+  /** 液化采样源：背景（带 LUT，与预览所见一致）+ 涂改层的合成快照。img 未就绪时返回 null */
+  function buildLiquifySource(): HTMLCanvasElement | null {
+    const img = wrapperRef.current?.querySelector('img') as HTMLImageElement | null;
+    const paint = paintRef.current;
+    if (!img || !paint || !img.complete) return null;
+    const src = document.createElement('canvas');
+    src.width = imageWidth;
+    src.height = imageHeight;
+    const sctx = src.getContext('2d');
+    if (!sctx) return null;
+    sctx.drawImage(img, 0, 0, imageWidth, imageHeight);
+    applyBackgroundAdjust(sctx, imageWidth, imageHeight);
+    sctx.drawImage(paint, 0, 0);
+    return src;
+  }
+
+  /**
+   * 单步向前变形：以 to 为中心、radius 为影响域，把 source 的内容沿位移方向
+   * 「环形位移重采样」画进 target——从外到内画 LIQUIFY_RINGS 个同心环带，
+   * 环带位移比例从边缘 0 线性衰减到中心 1（阶梯近似径向软边，环带内层覆盖外层）。
+   * 非破坏：原图数据不动，形变结果落在涂改层（等同「高级图章」）。
+   */
+  const LIQUIFY_RINGS = 8;
+  function liquifyStep(
+    target: CanvasRenderingContext2D,
+    source: HTMLCanvasElement,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    radius: number,
+    strength: number,
+  ) {
+    const dx = (to.x - from.x) * strength;
+    const dy = (to.y - from.y) * strength;
+    const r = radius / 2;
+    if (r < 2 || (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01)) return;
+    for (let i = LIQUIFY_RINGS; i >= 1; i -= 1) {
+      const outer = (i / LIQUIFY_RINGS) * r;
+      const inner = ((i - 1) / LIQUIFY_RINGS) * r;
+      // 环带位移比例 = 径向衰减（环带中点：边缘≈0、中心≈1）
+      const f = 1 - (i - 0.5) / LIQUIFY_RINGS;
+      target.save();
+      target.beginPath();
+      target.arc(to.x, to.y, outer, 0, Math.PI * 2);
+      if (inner > 0) target.arc(to.x, to.y, inner, 0, Math.PI * 2, true); // 反向绕行 = 环形 clip
+      target.clip();
+      target.drawImage(source, dx * f, dy * f);
+      target.restore();
+    }
+  }
+
+  /**
+   * 沿 from→to 按固定步长（radius/4）插值应用液化，本地拖动与远端重放共用这同一份逻辑，
+   * 保证两端逐位一致。每步把形变同步写回合成源（自引用 drawImage 规范要求先快照，
+   * 各浏览器均如此实现），后续步采样到累积形变——连续拖动才能推出平滑形变。
+   */
+  function applyLiquifyAlong(
+    target: CanvasRenderingContext2D,
+    source: HTMLCanvasElement,
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    radius: number,
+    strength: number,
+  ) {
+    const sourceCtx = source.getContext('2d');
+    if (!sourceCtx) return;
+    const dist = Math.hypot(to.x - from.x, to.y - from.y);
+    const steps = Math.max(1, Math.round(dist / Math.max(1, radius / 4)));
+    let prev = from;
+    for (let s = 1; s <= steps; s += 1) {
+      const t = s / steps;
+      const cur = { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
+      liquifyStep(target, source, prev, cur, radius, strength);
+      liquifyStep(sourceCtx, source, prev, cur, radius, strength);
+      prev = cur;
+    }
+  }
+
+  /** 远端液化重放：重建合成源后沿完整路径（缺省退化为起终点直线）重放同一套步进逻辑 */
+  function replayLiquifyOp(op: Extract<PaintOp, { type: 'liquify' }>) {
+    const ctx = paintCtx();
+    if (!ctx) return;
+    const source = buildLiquifySource();
+    if (!source) return;
+    const pts =
+      op.points && op.points.length >= 2
+        ? op.points
+        : [
+            { x: op.x0, y: op.y0 },
+            { x: op.x1, y: op.y1 },
+          ];
+    for (let i = 1; i < pts.length; i += 1) {
+      applyLiquifyAlong(ctx, source, pts[i - 1], pts[i], op.radius, op.strength);
+    }
+    setDirty(true);
+  }
+
   function onPointerDown(event: React.PointerEvent) {
     if (!canEdit) return;
     const wrapper = wrapperRef.current;
@@ -619,6 +740,16 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         soft: softBrushRef.current,
         points: [pt],
       };
+    }
+    if (tool === 'liquify') {
+      const source = buildLiquifySource();
+      if (!source) {
+        // 背景图未就绪：本次按下不生效（不进入拖动状态）
+        drawing.current = false;
+        return;
+      }
+      // 笔刷大小 = 影响域直径，不透明度滑条 = 液化强度（与笔刷控件复用）
+      liquify.current = { source, points: [pt], radius: sizeRef.current, strength: opacityRef.current / 100 };
     }
     if (tool === 'rect') setRect({ x: pt.x, y: pt.y, w: 0, h: 0 });
     if (tool === 'lasso') lassoPts.current = [pt];
@@ -697,6 +828,17 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       setDirty(true);
       liveStroke.current?.points.push(pt);
     }
+    if (tool === 'liquify' && liquify.current) {
+      const liq = liquify.current;
+      const prev = lastPt.current;
+      if (prev) {
+        // 实时全分辨率应用（环形位移重采样本身够快，无需降采样预览）
+        applyLiquifyAlong(ctx, liq.source, prev, pt, liq.radius, liq.strength);
+        liq.points.push(pt);
+        setDirty(true);
+      }
+      lastPt.current = pt;
+    }
   }
 
   /** 把一笔操作广播给房间（矢量形式，观众本地重放） */
@@ -773,6 +915,10 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       ctx.closePath();
       ctx.fill();
       setDirty(true);
+      return;
+    }
+    if (op.type === 'liquify') {
+      replayLiquifyOp(op);
     }
   }
 
@@ -836,6 +982,24 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       }
     }
 
+    // 液化收尾：广播完整路径（带规格要求的起终点字段；points 供观众端按曲线重放）
+    const liq = liquify.current;
+    liquify.current = null;
+    if (liq && liq.points.length >= 2) {
+      const first = liq.points[0];
+      const last = liq.points[liq.points.length - 1];
+      broadcastPaint({
+        type: 'liquify',
+        x0: first.x,
+        y0: first.y,
+        x1: last.x,
+        y1: last.y,
+        radius: liq.radius,
+        strength: liq.strength,
+        points: liq.points,
+      });
+    }
+
     // 矩形/套索：松手不再直接填充（旧行为），改为落成持久选区，
     // 由「填充选区」（旧行为等价按钮）或「选区去字」（蒙版去字）消费
     if (tool === 'rect' && rect && rect.w > 2 && rect.h > 2) {
@@ -848,7 +1012,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     lassoPts.current = [];
     lastPt.current = null;
     // 选区本身不进撤销栈（不是像素/图层状态）；填充动作在自己的入口里落历史
-    if (['brush', 'eraser', 'clone'].includes(tool)) {
+    if (['brush', 'eraser', 'clone', 'liquify'].includes(tool)) {
       await pushHistory(textLayersRef.current, selectedTextRef.current);
     }
   }
@@ -1950,6 +2114,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           </label>
           <p className="text-[11px] text-ink-400">
             原图层已锁定。橡皮只擦涂改层。图章(S)：Alt+点击取源，拖动复制背景；软边对画笔/橡皮生效。
+            液化：拖动把背景内容沿拖动方向推挤（结果画进涂改层，非破坏；大小=影响域，不透明度=强度）。
             矩形/套索拖出选区后，用顶部「填充选区」上色或「选区去字」去字（Esc 取消选区）。
           </p>
         </div>
