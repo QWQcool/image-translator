@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DATA_DIR } from './db';
+import type { TypesetAdjust } from './typeset-adjust';
 
 export type TypesetTextLayer = {
   id: string;
@@ -54,6 +55,8 @@ export type TypesetMeta = {
   width: number;
   height: number;
   textLayers: TypesetTextLayer[];
+  /** 背景调整（色阶/亮度对比度，非破坏）；缺省/全默认 = 无调整，老 meta 零迁移 */
+  adjust?: TypesetAdjust;
   updatedAt: string;
 };
 

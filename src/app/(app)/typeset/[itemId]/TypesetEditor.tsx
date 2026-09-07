@@ -2,13 +2,22 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import EmptyState from '@/components/EmptyState';
 import { isPin } from '@/lib/annotation';
 import type { LpStyle } from '@/lib/labelplus';
 import { DEFAULT_LP_STYLES, normalizeStyles, parseGroups, parseStyles } from '@/lib/labelplus';
 import { originalUrl } from '@/lib/media';
+import {
+  DEFAULT_ADJUST,
+  applyLutToImageData,
+  computeAdjustLut,
+  isDefaultAdjust,
+  lutToTableValues,
+  normalizeAdjust,
+  type TypesetAdjust,
+} from '@/lib/typeset-adjust';
 import { useCollabRoom, type CollabOp } from '@/lib/use-collab-room';
 import type { Asset, SpaceAccess, SpaceItem } from '@/lib/types';
 import { writePsd, type Layer as PsdLayer, type Psd } from 'ag-psd';
@@ -96,6 +105,21 @@ type PaintOp =
 const HISTORY_COALESCE_MS = 700;
 const HISTORY_LIMIT = 50;
 
+/** 背景调整滑条配置（与 typeset-adjust.ts 的参数范围一一对应） */
+const ADJUST_SLIDERS: Array<{
+  key: keyof TypesetAdjust;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+}> = [
+  { key: 'brightness', label: '亮度', min: 0.5, max: 1.5, step: 0.01 },
+  { key: 'contrast', label: '对比度', min: 0.5, max: 1.5, step: 0.01 },
+  { key: 'blackPoint', label: '黑场', min: 0, max: 0.3, step: 0.005 },
+  { key: 'whitePoint', label: '白场', min: 0.7, max: 1, step: 0.005 },
+  { key: 'gamma', label: 'Gamma', min: 0.5, max: 2, step: 0.01 },
+];
+
 export default function TypesetEditor({ itemId }: { itemId: number }) {
   const router = useRouter();
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -150,6 +174,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const [hasPaint, setHasPaint] = useState(false);
   /** 当前持久选区（矩形/套索松手后落在这里，Esc 或消费动作清除） */
   const [selShape, setSelShape] = useState<Selection | null>(null);
+  /** 背景调整（非破坏，仅存草稿 meta + 导出时应用 LUT；全默认零像素差异） */
+  const [adjust, setAdjust] = useState<TypesetAdjust>(DEFAULT_ADJUST);
   /** 分组样式预设：按 pin.group_id 套用；空表时落回硬编码默认值 */
   const [styles, setStyles] = useState<Record<string, LpStyle>>({});
   /** LabelPlus 分组表（样式面板按此展示） */
@@ -233,6 +259,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   opacityRef.current = opacity;
   const softBrushRef = useRef(softBrush);
   softBrushRef.current = softBrush;
+  const adjustRef = useRef(adjust);
+  adjustRef.current = adjust;
 
   /** 正在进行的笔画，落笔时打包成一条矢量操作广播给房间 */
   const liveStroke = useRef<{
@@ -263,6 +291,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       setSpaceName(detail.space?.name ?? '');
       setAccess(detail.access ?? null);
       setTextLayers(normalizeTextLayers(draft.meta?.textLayers ?? []));
+      setAdjust(normalizeAdjust(draft.meta?.adjust));
       setHasPaint(Boolean(draft.hasPaint));
       // 分组表与分组样式：样式缺省时空表，生成时落回硬编码默认值
       setLpGroups(parseGroups(detail.labelplus?.groups));
@@ -675,13 +704,23 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     void collab.sendOp('paint', op);
   }
 
-  /** 文字层快照广播（全量，层数少，几十 KB 以内） */
+  /** 文字层快照广播（全量，层数少，几十 KB 以内）；顺带带上调到最新的背景调整，保证观众端预览一致 */
   const broadcastText = useCallback(
     (layers: TypesetTextLayer[]) => {
-      void collab.sendOp('text', { layers });
+      void collab.sendOp('text', { layers, adjust: adjustRef.current });
     },
     [collab],
   );
+
+  /** 背景调整广播防抖：滑条连续拖动只在停手后发一次（adjust 不进撤销栈） */
+  const adjustBroadcastTimer = useRef<number | null>(null);
+  function scheduleAdjustBroadcast() {
+    if (adjustBroadcastTimer.current !== null) window.clearTimeout(adjustBroadcastTimer.current);
+    adjustBroadcastTimer.current = window.setTimeout(() => {
+      adjustBroadcastTimer.current = null;
+      void collab.sendOp('text', { layers: textLayersRef.current, adjust: adjustRef.current });
+    }, 500);
+  }
 
   /** 重放远端的一笔涂改：和本地画笔共用 stampWith，效果完全一致 */
   function replayPaintOp(op: PaintOp) {
@@ -744,11 +783,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       return;
     }
     if (op.kind === 'text') {
-      const layers = (op.payload as { layers?: unknown } | null)?.layers;
-      if (Array.isArray(layers)) {
-        setTextLayers(normalizeTextLayers(layers));
+      const payload = op.payload as { layers?: unknown; adjust?: unknown } | null;
+      if (Array.isArray(payload?.layers)) {
+        setTextLayers(normalizeTextLayers(payload!.layers));
         setDirty(true);
       }
+      // 远端背景调整：normalizeAdjust 防御清洗（旧对端不带 adjust 字段则不动本端）
+      if (payload?.adjust !== undefined) setAdjust(normalizeAdjust(payload.adjust));
     }
   });
 
@@ -820,7 +861,10 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         paintRef.current!.toBlob(resolve, 'image/png'),
       );
       const form = new FormData();
-      form.append('meta', JSON.stringify({ textLayers, width: imageWidth, height: imageHeight }));
+      form.append(
+        'meta',
+        JSON.stringify({ textLayers, adjust, width: imageWidth, height: imageHeight }),
+      );
       if (blob) form.append('paint', blob, 'paint.png');
       const res = await fetch(`/api/items/${itemId}/typeset`, { method: 'PUT', body: form });
       if (!res.ok) {
@@ -1269,6 +1313,27 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     );
   }
 
+  // ---- 背景调整：预览（SVG 精确 LUT）与导出（canvas 查表）共用 computeAdjustLut 这一条曲线 ----
+  const adjustLut = useMemo(() => computeAdjustLut(adjust), [adjust]);
+  const adjustTableValues = useMemo(() => lutToTableValues(adjustLut), [adjustLut]);
+  const adjustActive = !isDefaultAdjust(adjust);
+
+  /** 导出前对已绘好背景的画布应用 LUT：只调背景层，涂改层/文字层在调用之后才画（不受影响） */
+  function applyBackgroundAdjust(ctx: CanvasRenderingContext2D, w: number, h: number) {
+    if (!adjustActive) return;
+    const image = ctx.getImageData(0, 0, w, h);
+    applyLutToImageData(image.data, adjustLut);
+    ctx.putImageData(image, 0, 0);
+  }
+
+  /** 更新背景调整单项：标脏 + 停手后广播。不进撤销栈（全局视图参数，非像素/图层状态） */
+  function patchAdjust(patch: Partial<TypesetAdjust>) {
+    const next = normalizeAdjust({ ...adjustRef.current, ...patch });
+    setAdjust(next);
+    setDirty(true);
+    scheduleAdjustBroadcast();
+  }
+
   /**
    * 把单个文字层绘制到指定 2d 上下文（renderPngBlob 与 PSD 导出栅格化共用同一份绘制逻辑，
    * 保证导出 PNG 与 PSD 里的文字层像素完全一致）。调用方自行 save/restore 包裹。
@@ -1478,6 +1543,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     ctx.drawImage(img, 0, 0, imageWidth, imageHeight);
+    // 背景层先调完 LUT 再叠涂改层/文字层（非破坏：LUT 只影响合成输出的背景像素）
+    applyBackgroundAdjust(ctx, imageWidth, imageHeight);
     ctx.drawImage(paint, 0, 0);
     for (const layer of textLayers) {
       if (layer.visible === false) continue;
@@ -1499,11 +1566,15 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     await ensureExportFontsReady();
     const children: PsdLayer[] = [];
     try {
-      // 底层：原图
+      // 底层：原图（带背景调整 LUT，与 PNG 导出同一条曲线；涂改层/文字层不调）
       const bg = document.createElement('canvas');
       bg.width = imageWidth;
       bg.height = imageHeight;
-      bg.getContext('2d')?.drawImage(img, 0, 0, imageWidth, imageHeight);
+      const bgCtx = bg.getContext('2d');
+      if (bgCtx) {
+        bgCtx.drawImage(img, 0, 0, imageWidth, imageHeight);
+        applyBackgroundAdjust(bgCtx, imageWidth, imageHeight);
+      }
       children.push({ name: '背景原图', canvas: bg });
       // 涂改层：整幅透明像素图层（画布可能为空，导出空图层保持结构完整）
       const paintCopy = document.createElement('canvas');
@@ -1954,6 +2025,19 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
             ref={viewportRef}
             className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-sky/20 bg-ink-950"
           >
+            {/* 背景调整预览滤镜：feComponentTransfer type=table 256 项 = 导出 canvas LUT 的精确复现（GPU 加速，
+                拖滑条不掉帧）。必须 sRGB 插值（默认 linearRGB 会改变曲线），与 applyBackgroundAdjust 同一条曲线 */}
+            <svg width="0" height="0" className="absolute" aria-hidden>
+              <defs>
+                <filter id="typeset-adjust-lut" colorInterpolationFilters="sRGB">
+                  <feComponentTransfer>
+                    <feFuncR type="table" tableValues={adjustTableValues} />
+                    <feFuncG type="table" tableValues={adjustTableValues} />
+                    <feFuncB type="table" tableValues={adjustTableValues} />
+                  </feComponentTransfer>
+                </filter>
+              </defs>
+            </svg>
             <div
               ref={wrapperRef}
               className="absolute left-0 top-0"
@@ -1976,6 +2060,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 draggable={false}
                 onLoad={() => fitToViewport()}
                 className="pointer-events-none absolute inset-0 h-full w-full select-none"
+                style={adjustActive ? { filter: 'url(#typeset-adjust-lut)' } : undefined}
               />
               <canvas
                 ref={paintRef}
@@ -2283,6 +2368,42 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
             <li className="rounded bg-paper px-2 py-1">背景（原图，锁定）</li>
             <li className="rounded bg-paper px-2 py-1">涂改 {dirty ? '· 未保存' : ''}</li>
           </ul>
+
+          {/* 背景调整：非破坏（只存草稿 meta + 导出时对背景层应用 LUT，不碰原图/涂改/文字层数据） */}
+          <details className="mt-2 rounded bg-paper px-2 py-1 text-[11px] text-ink-500" open={adjustActive}>
+            <summary className="cursor-pointer select-none font-medium">背景调整{adjustActive ? ' · 已启用' : ''}</summary>
+            <div className="mt-2 space-y-2">
+              {ADJUST_SLIDERS.map(({ key, label, min, max, step }) => (
+                <label key={key} className="block">
+                  {label} {adjust[key].toFixed(2)}
+                  <input
+                    type="range"
+                    min={min}
+                    max={max}
+                    step={step}
+                    value={adjust[key]}
+                    disabled={!canEdit}
+                    onChange={(e) => patchAdjust({ [key]: Number(e.target.value) })}
+                    className="mt-1 w-full accent-sky"
+                  />
+                </label>
+              ))}
+              <button
+                type="button"
+                className="btn-ghost w-full py-0.5 text-[10px]"
+                disabled={!adjustActive || !canEdit}
+                onClick={() => {
+                  setAdjust(DEFAULT_ADJUST);
+                  setDirty(true);
+                  scheduleAdjustBroadcast();
+                }}
+              >
+                恢复默认
+              </button>
+              <p className="text-[10px] text-ink-400">仅影响背景与导出结果，不改动原图与文字颜色。</p>
+            </div>
+          </details>
+
           <div className="mt-2">
             <div className="flex items-center justify-between text-[11px] text-ink-500">
               <span>文字层 · {textLayers.length}</span>

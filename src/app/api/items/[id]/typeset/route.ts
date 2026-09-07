@@ -5,6 +5,7 @@ import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { saveGuard } from '@/lib/room';
 import { readTypesetMeta, readTypesetPaint, writeTypeset, normalizeTextLayers } from '@/lib/typeset';
+import { normalizeAdjust } from '@/lib/typeset-adjust';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -68,12 +69,20 @@ export async function PUT(request: Request, { params }: Params) {
   let textLayers: ReturnType<typeof normalizeTextLayers> = [];
   let width = 0;
   let height = 0;
+  let adjust: ReturnType<typeof normalizeAdjust>;
   try {
-    const parsed = JSON.parse(rawMeta) as { textLayers?: unknown; width?: number; height?: number };
+    const parsed = JSON.parse(rawMeta) as {
+      textLayers?: unknown;
+      width?: number;
+      height?: number;
+      adjust?: unknown;
+    };
     // 文字层统一清洗：既有字段透传，特效字段 clamp / 非法颜色回 null（老数据零迁移）
     textLayers = normalizeTextLayers(parsed.textLayers);
     width = Number(parsed.width) || 0;
     height = Number(parsed.height) || 0;
+    // 背景调整逐字段 clamp，非法值回落默认（老客户端不带 adjust = 全默认，行为不变）
+    adjust = normalizeAdjust(parsed.adjust);
   } catch {
     return NextResponse.json({ error: 'meta 格式错误' }, { status: 400 });
   }
@@ -89,7 +98,7 @@ export async function PUT(request: Request, { params }: Params) {
 
   await writeTypeset(
     itemId,
-    { version: 1, width, height, textLayers, updatedAt: new Date().toISOString() },
+    { version: 1, width, height, textLayers, adjust, updatedAt: new Date().toISOString() },
     paint,
   );
   logOp(user.id, 'update', 'item', itemId, itemDisplayName(itemId), '嵌字草稿保存');
