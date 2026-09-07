@@ -116,7 +116,24 @@ type PaintOp =
 
 /** 文字连续输入时不要每敲一个字就记一步，停手 700ms 再落一步 */
 const HISTORY_COALESCE_MS = 700;
-const HISTORY_LIMIT = 50;
+
+/**
+ * 撤销栈深度按图片长边动态收缩：每步快照都是整幅涂改层 PNG Blob，
+ * 大图深栈会占数百 MB 内存（4000×6000 图单步 PNG 可达数十 MB）。
+ * 长边 ≤2000px 维持 100 步；2000~4000px 50 步；>4000px 30 步。
+ *
+ * 「大图涂改层降采样编辑 + 导出全分辨率重放」评估结论：不做。
+ * 原因：草稿存储是 meta.json（矢量文字层）+ paint.png（涂改层位图），
+ * 并没有矢量 strokes 持久化（协作 PaintOp 只广播不落盘）——
+ * 重放方案必须先引入 strokes 存储格式与兼容迁移，或接受编辑期位图缩放的精度损失
+ * （与「涂改层即所见」语义冲突），改造风险大于收益，按「不硬做」决策仅保留动态栈深。
+ */
+function historyLimitFor(width: number, height: number): number {
+  const longEdge = Math.max(width, height);
+  if (longEdge <= 2000) return 100;
+  if (longEdge <= 4000) return 50;
+  return 30;
+}
 
 /** 背景调整滑条配置（与 typeset-adjust.ts 的参数范围一一对应） */
 const ADJUST_SLIDERS: Array<{
@@ -447,7 +464,10 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     const snapshot: Snapshot = { paint, layers, selected };
     historyRef.current = historyRef.current.slice(0, histIndex.current + 1);
     historyRef.current.push(snapshot);
-    if (historyRef.current.length > HISTORY_LIMIT) historyRef.current.shift();
+    // 栈深按图片尺寸动态收缩（while 防御：极端情况下一次裁掉多步）
+    while (historyRef.current.length > historyLimitFor(imageWidth, imageHeight)) {
+      historyRef.current.shift();
+    }
     histIndex.current = historyRef.current.length - 1;
   }
 
