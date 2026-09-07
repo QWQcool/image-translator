@@ -132,6 +132,21 @@ const ADJUST_SLIDERS: Array<{
   { key: 'gamma', label: 'Gamma', min: 0.5, max: 2, step: 0.01 },
 ];
 
+/** 文字层 8 向变换手柄（角/上下 = 等比缩放，左右 = 限宽；竖排层隐藏左右） */
+const TEXT_HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
+type TextHandle = (typeof TEXT_HANDLES)[number];
+
+const CURSOR_BY_TEXT_HANDLE: Record<TextHandle, string> = {
+  nw: 'nwse-resize',
+  n: 'ns-resize',
+  ne: 'nesw-resize',
+  e: 'ew-resize',
+  se: 'nwse-resize',
+  s: 'ns-resize',
+  sw: 'nesw-resize',
+  w: 'ew-resize',
+};
+
 export default function TypesetEditor({ itemId }: { itemId: number }) {
   const router = useRouter();
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -155,6 +170,18 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     startY: number;
     origX: number;
     origY: number;
+  } | null>(null);
+  /** 变换手柄拖拽中：等比缩放（角/上下）/ 限宽（左右）/ 旋转，全部绕层包围盒中心 */
+  const handleDrag = useRef<{
+    id: string;
+    kind: 'scale' | 'width' | 'rotate';
+    startLocal: { x: number; y: number };
+    centerLocal: { x: number; y: number };
+    startDist: number;
+    startScale: number;
+    startWidthPx: number;
+    startAngle: number;
+    startRotation: number;
   } | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -188,6 +215,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const [selShape, setSelShape] = useState<Selection | null>(null);
   /** 背景调整（非破坏，仅存草稿 meta + 导出时应用 LUT；全默认零像素差异） */
   const [adjust, setAdjust] = useState<TypesetAdjust>(DEFAULT_ADJUST);
+  /** 双击就地编辑：进行中的层 id 与文本草稿（null = 未在编辑） */
+  const [editingText, setEditingText] = useState<{ id: string; value: string } | null>(null);
   /** 分组样式预设：按 pin.group_id 套用；空表时落回硬编码默认值 */
   const [styles, setStyles] = useState<Record<string, LpStyle>>({});
   /** LabelPlus 分组表（样式面板按此展示） */
@@ -784,6 +813,11 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       setDirty(true);
       return;
     }
+    // 变换手柄拖拽：缩放/限宽/旋转实时预览
+    if (handleDrag.current) {
+      moveHandleDrag(event);
+      return;
+    }
     if (!drawing.current) return;
     if (spaceDown || tool === 'pan') {
       const last = lastPt.current;
@@ -948,6 +982,17 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       setTextLayers(next);
       setDirty(true);
       await pushHistory(next, id);
+      broadcastText(next);
+      return;
+    }
+    // 变换手柄松手：落一步历史 + 广播（拖拽中只做了本地预览）
+    if (handleDrag.current) {
+      const drag = handleDrag.current;
+      handleDrag.current = null;
+      const next = textLayersRef.current;
+      setTextLayers(next);
+      setDirty(true);
+      await pushHistory(next, drag.id);
       broadcastText(next);
       return;
     }
@@ -1435,6 +1480,89 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     setTextLayers(next);
     setDirty(true);
     void pushHistory(next, selectedTextRef.current);
+    broadcastText(next);
+  }
+
+  /**
+   * 开始拖拽变换手柄（仅文字工具 + 可编辑时渲染）：
+   * 角/上下手柄 = 等比缩放（拖拽点到中心距离比例驱动，不改 fontSize），左右手柄 = 限宽，
+   * 旋转手柄 = 绕包围盒中心旋转。拖拽中实时 setTextLayers 预览，松手在 onPointerUp 落历史 + 广播。
+   * 距离/角度全部用画布坐标系计算（wrapper 均匀缩放，比值与屏幕系等价）。
+   */
+  function startHandleDrag(
+    event: React.PointerEvent,
+    layer: TypesetTextLayer,
+    kind: 'scale' | 'width' | 'rotate',
+  ) {
+    if (!canEdit) return;
+    event.stopPropagation();
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+    try {
+      wrapper.setPointerCapture(event.pointerId);
+    } catch {
+      // 浏览器不支持捕获时仍可在窗口内拖拽
+    }
+    const bbox = layerBBox(layer);
+    const centerLocal = { x: bbox.left + bbox.w / 2, y: bbox.top + bbox.h / 2 };
+    const startLocal = toLocal(event);
+    handleDrag.current = {
+      id: layer.id,
+      kind,
+      startLocal,
+      centerLocal,
+      startDist: Math.max(1, Math.hypot(startLocal.x - centerLocal.x, startLocal.y - centerLocal.y)),
+      startScale: layer.scale ?? 1,
+      startWidthPx: Math.max(imageWidth * 0.05, bbox.w * (layer.scale ?? 1)),
+      startAngle: (Math.atan2(startLocal.y - centerLocal.y, startLocal.x - centerLocal.x) * 180) / Math.PI,
+      startRotation: layer.rotation ?? 0,
+    };
+  }
+
+  /** 拖拽手柄时更新对应字段（实时预览，不入历史） */
+  function moveHandleDrag(event: React.PointerEvent) {
+    const drag = handleDrag.current;
+    if (!drag) return;
+    const p = toLocal(event);
+    if (drag.kind === 'scale') {
+      // 等比缩放：拖拽距离 / 初始距离 的比例乘到 scale（非破坏，不改 fontSize）
+      const dist = Math.hypot(p.x - drag.centerLocal.x, p.y - drag.centerLocal.y);
+      const scale = Math.min(4, Math.max(0.2, drag.startScale * (dist / drag.startDist)));
+      setTextLayers((prev) => prev.map((l) => (l.id === drag.id ? { ...l, scale } : l)));
+    } else if (drag.kind === 'width') {
+      // 限宽：绕中心向两侧扩展（视觉宽 = 初始 + 2×拖拽量），clamp 到 5%~100% 画布宽
+      const wPx = Math.max(imageWidth * 0.05, drag.startWidthPx + 2 * (p.x - drag.startLocal.x));
+      const width = Math.min(1, Math.max(0.05, wPx / imageWidth));
+      setTextLayers((prev) => prev.map((l) => (l.id === drag.id ? { ...l, width } : l)));
+    } else {
+      // 旋转：指点绕中心的角度增量加到初始角度，规范到 [-180, 180)
+      const angle = (Math.atan2(p.y - drag.centerLocal.y, p.x - drag.centerLocal.x) * 180) / Math.PI;
+      const rotation = ((drag.startRotation + angle - drag.startAngle + 180) % 360 + 360) % 360 - 180;
+      setTextLayers((prev) => prev.map((l) => (l.id === drag.id ? { ...l, rotation } : l)));
+    }
+    setDirty(true);
+  }
+
+  /** 双击文字层：就地编辑（画布上浮起 textarea，水平定位近似包围盒，不随旋转） */
+  function openTextEdit(layer: TypesetTextLayer) {
+    return (event: React.MouseEvent) => {
+      if (!canEdit) return;
+      event.stopPropagation();
+      setEditingText({ id: layer.id, value: layer.text });
+    };
+  }
+
+  /** 提交就地编辑：写回 layer.text，落历史 + 广播（内容未变则静默关闭） */
+  function commitTextEdit() {
+    const edit = editingText;
+    if (!edit) return;
+    setEditingText(null);
+    const layer = textLayersRef.current.find((l) => l.id === edit.id);
+    if (!layer || layer.text === edit.value) return;
+    const next = textLayersRef.current.map((l) => (l.id === edit.id ? { ...l, text: edit.value } : l));
+    setTextLayers(next);
+    setDirty(true);
+    void pushHistory(next, edit.id);
     broadcastText(next);
   }
 
@@ -2327,6 +2455,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                           layer.align === 'left' ? 'flex-start' : layer.align === 'right' ? 'flex-end' : 'center',
                       }}
                       onPointerDown={onLayerPointerDown}
+                      onDoubleClick={openTextEdit(layer)}
                     >
                       {hLayout.map((cells, i) => (
                         <div key={i} style={{ display: 'flex', whiteSpace: 'pre' }}>
@@ -2381,6 +2510,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                         className={`absolute ${selectedCls}`}
                         style={{ ...commonStyle, transform: `translate(-50%, -50%)${transformSuffix}` }}
                         onPointerDown={onLayerPointerDown}
+                        onDoubleClick={openTextEdit(layer)}
                       >
                         <div style={{ position: 'relative', width: containerW, height: containerH }}>
                           {columns.map((runs, col) => (
@@ -2450,11 +2580,147 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                       writingMode: layer.vertical ? 'vertical-rl' : 'horizontal-tb',
                     }}
                     onPointerDown={onLayerPointerDown}
+                    onDoubleClick={openTextEdit(layer)}
                   >
                     {layer.text}
                   </div>
                 );
               })}
+              {/* 主选中文字层的画布变换手柄：8 向（角/上下 = 等比缩放、左右 = 限宽；竖排层隐藏左右）
+                  + 顶部旋转柄（绕包围盒中心）。overlay 按视觉包围盒（bbox×scale）定位并随 rotation 旋转；
+                  手柄尺寸乘 1/zoom 保持视觉恒定（与标注编辑器同风格）。
+                  仅文字工具 + 可编辑时显示，避免挡其它工具的操作。 */}
+              {tool === 'text' && canEdit && selected && (() => {
+                const bbox = layerBBox(selected);
+                const scl = selected.scale ?? 1;
+                const w = Math.max(24, bbox.w * scl);
+                const h = Math.max(14, bbox.h * scl);
+                const left = bbox.left + bbox.w / 2 - w / 2;
+                const top = bbox.top + bbox.h / 2 - h / 2;
+                const inverse = 1 / zoom;
+                const hs = 10 * inverse;
+                const rotGap = 26 * inverse;
+                const positions: Record<TextHandle, { left: number; top: number }> = {
+                  nw: { left: 0, top: 0 },
+                  n: { left: w / 2, top: 0 },
+                  ne: { left: w, top: 0 },
+                  e: { left: w, top: h / 2 },
+                  se: { left: w, top: h },
+                  s: { left: w / 2, top: h },
+                  sw: { left: 0, top: h },
+                  w: { left: 0, top: h / 2 },
+                };
+                const activeHandles: TextHandle[] = selected.vertical
+                  ? TEXT_HANDLES.filter((hd) => hd !== 'e' && hd !== 'w')
+                  : [...TEXT_HANDLES];
+                return (
+                  <div
+                    className="pointer-events-none absolute"
+                    style={{
+                      left,
+                      top,
+                      width: w,
+                      height: h,
+                      transform: `rotate(${selected.rotation ?? 0}deg)`,
+                      transformOrigin: '50% 50%',
+                    }}
+                  >
+                    {/* 旋转连接线 + 旋转柄（顶部中点上方延伸，样式与标注编辑器手柄同色系） */}
+                    <div
+                      className="absolute bg-white/60"
+                      style={{ left: w / 2 - inverse, top: -rotGap, width: 2 * inverse, height: rotGap }}
+                    />
+                    <div
+                      className="pointer-events-auto absolute rounded-full border border-white bg-brand-400"
+                      style={{
+                        left: w / 2,
+                        top: -rotGap,
+                        width: hs,
+                        height: hs,
+                        marginLeft: -hs / 2,
+                        marginTop: -hs / 2,
+                        cursor: 'grab',
+                        touchAction: 'none',
+                      }}
+                      onPointerDown={(e) => startHandleDrag(e, selected, 'rotate')}
+                      title="拖拽旋转"
+                    />
+                    {activeHandles.map((handle) => (
+                      <div
+                        key={handle}
+                        className="pointer-events-auto absolute rounded-[2px] border border-white bg-brand-400"
+                        style={{
+                          left: positions[handle].left,
+                          top: positions[handle].top,
+                          width: hs,
+                          height: hs,
+                          marginLeft: -hs / 2,
+                          marginTop: -hs / 2,
+                          cursor: CURSOR_BY_TEXT_HANDLE[handle],
+                          touchAction: 'none',
+                        }}
+                        onPointerDown={(e) =>
+                          startHandleDrag(
+                            e,
+                            selected,
+                            handle === 'e' || handle === 'w' ? 'width' : 'scale',
+                          )
+                        }
+                        title={
+                          handle === 'e' || handle === 'w'
+                            ? '拖拽调整限宽'
+                            : '拖拽等比缩放'
+                        }
+                      />
+                    ))}
+                  </div>
+                );
+              })()}
+              {/* 双击就地编辑：textarea 水平定位在层包围盒上（不随旋转，规格允许），字体/颜色/行高/对齐跟随层 */}
+              {editingText &&
+                (() => {
+                  const layer = textLayers.find((l) => l.id === editingText.id);
+                  if (!layer) return null;
+                  const bbox = layerBBox(layer);
+                  const scl = layer.scale ?? 1;
+                  const w = Math.max(80, bbox.w * scl);
+                  const h = Math.max(layer.fontSize * scl * 1.6, bbox.h * scl);
+                  const left = bbox.left + bbox.w / 2 - w / 2;
+                  const top = bbox.top + bbox.h / 2 - h / 2;
+                  return (
+                    <textarea
+                      autoFocus
+                      className="absolute z-30 rounded border border-halo bg-cloud/95 p-1 shadow-card outline-none"
+                      style={{
+                        left,
+                        top,
+                        width: w,
+                        height: h,
+                        fontSize: layer.fontSize * scl,
+                        fontWeight: layer.fontWeight,
+                        lineHeight: layer.lineHeight,
+                        color: layer.color,
+                        textAlign: layer.align,
+                        fontFamily: `${layer.fontFamily ? `${layer.fontFamily}, ` : ''}"Noto Sans SC", sans-serif`,
+                        resize: 'none',
+                      }}
+                      value={editingText.value}
+                      onChange={(e) => setEditingText({ id: editingText.id, value: e.target.value })}
+                      onKeyDown={(e) => {
+                        // Enter 提交（Shift+Enter 换行）；Esc 取消
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          commitTextEdit();
+                        } else if (e.key === 'Escape') {
+                          setEditingText(null);
+                        }
+                      }}
+                      onBlur={() => commitTextEdit()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                    />
+                  );
+                })()}
               {rect && (
                 <div
                   className="pointer-events-none absolute border border-halo bg-halo/20"
