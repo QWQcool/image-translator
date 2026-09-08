@@ -6,6 +6,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import EmptyState from '@/components/EmptyState';
 import { isPin } from '@/lib/annotation';
+import {
+  createPointSmoother,
+  hardnessToInnerRatio,
+  lerpPoint,
+  planStrokeFlow,
+  resolveStrokeHardness,
+  stampSpacing,
+  type BrushPoint,
+  type StrokeFlowPlan,
+} from '@/lib/brush-engine';
 import type { LpStyle } from '@/lib/labelplus';
 import { DEFAULT_LP_STYLES, normalizeStyles, parseGroups, parseStyles } from '@/lib/labelplus';
 import { originalUrl } from '@/lib/media';
@@ -89,13 +99,21 @@ type PaintOp =
       color: string;
       size: number;
       opacity: number;
+      /** 旧「软边」字段：仅旧对端广播的笔画会带，重放时映射成等价硬度（true→50） */
       soft?: boolean;
+      /** 硬度 0~100（100=硬边）；缺省回落 soft 映射，保证旧笔画重放逐像素一致 */
+      hardness?: number;
+      /** 流量 1~100：缺省/100 = 旧行为逐章叠加；<100 走两段式（离屏层堆积→整体合成） */
+      flow?: number;
+      /** 章间距百分比 1~500：缺省 25 = 旧硬编码 size/4 */
+      spacing?: number;
       points: { x: number; y: number }[];
     }
   | {
       type: 'clone';
       size: number;
       opacity: number;
+      /** 旧字段保留兼容；图章渲染恒硬边正圆，soft 不参与渲染 */
       soft?: boolean;
       points: { x: number; y: number }[];
       from: { x: number; y: number };
@@ -217,7 +235,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   /** 多选集合：Shift+点击追加；主选中（属性面板绑定对象）= selectedText */
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   /** 软边笔刷：径向渐变透明度（对画笔/橡皮生效；图章因 clip 采样保持硬边） */
-  const [softBrush, setSoftBrush] = useState(false);
+  /** 笔刷手感参数（个人偏好存 localStorage，不进草稿/层数据）：硬度/流量/间距/平滑 */
+  const [hardness, setHardness] = useState(100);
+  const [flow, setFlow] = useState(100);
+  const [spacing, setSpacing] = useState(25);
+  const [smoothing, setSmoothing] = useState(0);
+  /** 「更多设置」折叠开关（间距/平滑低频参数，收起降低面板密度） */
+  const [showMoreBrush, setShowMoreBrush] = useState(false);
   /** 参考线开关（仅预览辅助，不进层数据、不导出；localStorage 记忆） */
   const [showGuides, setShowGuides] = useState(false);
   /** 删除文字层前的二次确认 */
@@ -316,8 +340,14 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   sizeRef.current = size;
   const opacityRef = useRef(opacity);
   opacityRef.current = opacity;
-  const softBrushRef = useRef(softBrush);
-  softBrushRef.current = softBrush;
+  const hardnessRef = useRef(hardness);
+  hardnessRef.current = hardness;
+  const flowRef = useRef(flow);
+  flowRef.current = flow;
+  const spacingRef = useRef(spacing);
+  spacingRef.current = spacing;
+  const smoothingRef = useRef(smoothing);
+  smoothingRef.current = smoothing;
   const adjustRef = useRef(adjust);
   adjustRef.current = adjust;
 
@@ -327,10 +357,25 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     color: string;
     size: number;
     opacity: number;
-    soft?: boolean;
+    /** 落笔瞬间快照的笔画参数，随 PaintOp 广播（远端重放不读本端滑条） */
+    hardness: number;
+    flow: number;
+    spacing: number;
     points: { x: number; y: number }[];
     from?: { x: number; y: number };
   } | null>(null);
+
+  /**
+   * 当前笔画的流量两段式方案（flow<100 时非 null）：笔章先进离屏层堆积，
+   * 松手整体合成进涂改层；默认/flow=100 为 null = 直画旧行为。
+   */
+  const strokeFlow = useRef<(StrokeFlowPlan & { erase: boolean }) | null>(null);
+  /** 流量两段式离屏层（与涂改层同尺寸，笔画间复用同一块，落笔时清空） */
+  const flowLayerRef = useRef<HTMLCanvasElement | null>(null);
+  /** 两段式拖动中的实时预览基线：笔画起点的涂改层快照 */
+  const flowSnapshotRef = useRef<HTMLCanvasElement | null>(null);
+  /** 当前笔画的输入点平滑器（EMA，落笔时按平滑滑条重建；关闭时输出=输入） */
+  const strokeSmoother = useRef<((pt: BrushPoint) => BrushPoint) | null>(null);
 
   /**
    * 进行中的一笔液化：source 是「背景(带 LUT) + 涂改层」的合成快照画布，
@@ -402,6 +447,28 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   useEffect(() => {
     if (localStorage.getItem('typeset-guides') === '1') setShowGuides(true);
   }, []);
+
+  // 笔刷手感参数记忆：个人偏好存 localStorage（不进草稿）；旧「软边」开关从未持久化，无遗留键可清
+  useEffect(() => {
+    const num = (key: string, fallback: number, min: number, max: number) => {
+      const raw = localStorage.getItem(key);
+      if (raw == null) return fallback;
+      const v = Number(raw);
+      return Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback;
+    };
+    setHardness(num('typeset-brush-hardness', 100, 0, 100));
+    setFlow(num('typeset-brush-flow', 100, 1, 100));
+    setSpacing(num('typeset-brush-spacing', 25, 1, 500));
+    setSmoothing(num('typeset-brush-smoothing', 0, 0, 95));
+  }, []);
+
+  // 手感参数变更即写回 localStorage（滑条拖动频率低，直接整组写无压力）
+  useEffect(() => {
+    localStorage.setItem('typeset-brush-hardness', String(hardness));
+    localStorage.setItem('typeset-brush-flow', String(flow));
+    localStorage.setItem('typeset-brush-spacing', String(spacing));
+    localStorage.setItem('typeset-brush-smoothing', String(smoothing));
+  }, [hardness, flow, spacing, smoothing]);
 
   const saveRef = useRef<() => Promise<void>>(async () => {});
   const undoRef = useRef<() => Promise<void>>(async () => {});
@@ -561,7 +628,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   /**
    * 参数化的盖章：本地绘制与「矢量笔画重放」共用这一份逻辑，
    * 保证别人在远端看到的效果和操作者本地完全一致。
-   * cloneFrom 存在时是仿制图章：从源位置取像素盖到 (x,y)。
+   * cloneFrom 存在时是仿制图章：从源位置取像素盖到 (x,y)（图章保持硬边正圆，本次不扩展）。
    */
   function stampWith(
     ctx: CanvasRenderingContext2D,
@@ -573,12 +640,17 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       size?: number;
       opacity?: number;
       soft?: boolean;
+      /** 硬度 0~100（100=硬边）；缺省回落 soft 映射（旧数据兼容） */
+      hardness?: number;
+      /** 直接指定笔章 alpha（流量两段式用）；缺省由 opacity 换算 */
+      alpha?: number;
       cloneFrom?: { x: number; y: number };
     },
   ) {
     const erase = opts.erase ?? false;
     const r = (opts.size ?? sizeRef.current) / 2;
-    const alpha = Math.min(1, Math.max(0.05, (opts.opacity ?? 100) / 100));
+    // alpha：两段式显式给定，否则按不透明度换算（与旧行为同一钳制）
+    const alpha = opts.alpha ?? Math.min(1, Math.max(0.05, (opts.opacity ?? 100) / 100));
     ctx.save();
     ctx.globalAlpha = alpha;
     if (!erase && opts.cloneFrom) {
@@ -591,16 +663,20 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     } else {
       ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
       const col = opts.color ?? colorRef.current;
-      // 重放协作笔画时以 op 自带 soft 为准（缺省硬边），
-      // 不回落本端软边开关——否则旧对端的硬边笔画会被本端重放成软边
-      if (opts.soft ?? false) {
-        // 软边：径向渐变透明度（50% 半径内全强度，向边缘渐隐）；橡皮用 destination-out 同理渐隐
-        const g = ctx.createRadialGradient(x, y, r * 0.5, x, y, r);
+      // 重放协作笔画时以 op 自带 hardness/soft 为准（缺省硬边），
+      // 不回落本端硬度滑条——否则旧对端的笔画会被本端重放出不同的边
+      const hardness = opts.cloneFrom ? 100 : resolveStrokeHardness(opts.hardness, opts.soft);
+      const inner = hardnessToInnerRatio(hardness);
+      if (inner >= 1) {
+        // 硬边：纯色圆（与旧 soft:false 逐像素一致）
+        ctx.fillStyle = col;
+      } else {
+        // 硬度渐变：内圈（r×inner）全强度向边缘渐隐；inner=0.5 时与旧 soft:true 的
+        // createRadialGradient(x,y,r*0.5,x,y,r) 逐像素一致；橡皮 destination-out 同理渐隐
+        const g = ctx.createRadialGradient(x, y, r * inner, x, y, r);
         g.addColorStop(0, withAlpha(col, 1));
         g.addColorStop(1, withAlpha(col, 0));
         ctx.fillStyle = g;
-      } else {
-        ctx.fillStyle = col;
       }
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -609,8 +685,129 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     ctx.restore();
   }
 
-  function stamp(ctx: CanvasRenderingContext2D, x: number, y: number, erase: boolean) {
-    stampWith(ctx, x, y, { erase, color: colorRef.current, size: sizeRef.current, opacity: opacityRef.current });
+  /**
+   * 沿 prev→cur 按间距插值盖章：本地拖动与远端重放共用同一份循环，保证两端一致。
+   * 章数 = 距离/间距 向下取整（至少 1 章，旧行为）；间距 = stampSpacing（缺省 25% = 旧 size/4）。
+   */
+  function stampAlong(
+    target: CanvasRenderingContext2D,
+    prev: { x: number; y: number },
+    cur: { x: number; y: number },
+    opts: {
+      erase?: boolean;
+      color?: string;
+      size: number;
+      opacity?: number;
+      hardness?: number;
+      spacing?: number;
+      alpha?: number;
+      cloneFrom?: { x: number; y: number };
+    },
+  ) {
+    const dist = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+    const steps = Math.max(1, Math.floor(dist / stampSpacing(opts.size, opts.spacing)));
+    for (let s = 1; s <= steps; s += 1) {
+      const t = s / steps;
+      const p = lerpPoint(prev, cur, t);
+      stampWith(target, p.x, p.y, opts);
+    }
+  }
+
+  /** 取（或创建）与涂改层同尺寸的离屏层；笔画间复用同一块，落笔时由调用方清空 */
+  function getFlowLayer(): HTMLCanvasElement {
+    let layer = flowLayerRef.current;
+    if (!layer) {
+      layer = document.createElement('canvas');
+      flowLayerRef.current = layer;
+    }
+    if (layer.width !== imageWidth || layer.height !== imageHeight) {
+      layer.width = imageWidth;
+      layer.height = imageHeight;
+    }
+    return layer;
+  }
+
+  /** 两段式落笔准备：清空离屏层 + 给涂改层拍起点快照（拖动中「恢复快照+叠加离屏层」做实时预览） */
+  function beginFlowStroke(plan: StrokeFlowPlan, erase: boolean) {
+    const layer = getFlowLayer();
+    layer.getContext('2d')?.clearRect(0, 0, layer.width, layer.height);
+    let snap = flowSnapshotRef.current;
+    if (!snap) {
+      snap = document.createElement('canvas');
+      flowSnapshotRef.current = snap;
+    }
+    if (snap.width !== imageWidth || snap.height !== imageHeight) {
+      snap.width = imageWidth;
+      snap.height = imageHeight;
+    }
+    const sctx = snap.getContext('2d');
+    const paint = paintRef.current;
+    if (sctx && paint) {
+      sctx.clearRect(0, 0, snap.width, snap.height);
+      sctx.drawImage(paint, 0, 0);
+    }
+    strokeFlow.current = { ...plan, erase };
+  }
+
+  /** 笔画收尾：把离屏层按方案整体合成进涂改层（画笔 source-over / 橡皮 destination-out） */
+  function commitFlowStroke() {
+    const plan = strokeFlow.current;
+    const layer = flowLayerRef.current;
+    const ctx = paintCtx();
+    strokeFlow.current = null;
+    if (!plan || !layer || !ctx) return;
+    ctx.save();
+    ctx.globalAlpha = plan.compositeAlpha;
+    ctx.globalCompositeOperation = plan.erase ? 'destination-out' : 'source-over';
+    ctx.drawImage(layer, 0, 0);
+    ctx.restore();
+  }
+
+  /**
+   * 两段式拖动中的实时预览：恢复起点快照再叠加离屏层当前进度（不污染涂改层真实数据）。
+   * 叠加离屏层必须与 commitFlowStroke 同参（compositeAlpha + erase 方向）——
+   * 橡皮按 destination-out 预览「擦掉」而非叠黑章，画笔按不透明度合成避免预览偏浓，
+   * 保证拖动中所见 = 松手后所得。
+   */
+  function refreshFlowPreview() {
+    const ctx = paintCtx();
+    const snap = flowSnapshotRef.current;
+    const layer = flowLayerRef.current;
+    const plan = strokeFlow.current;
+    if (!ctx || !snap || !layer || !plan) return;
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.drawImage(snap, 0, 0);
+    ctx.save();
+    ctx.globalAlpha = plan.compositeAlpha;
+    ctx.globalCompositeOperation = plan.erase ? 'destination-out' : 'source-over';
+    ctx.drawImage(layer, 0, 0);
+    ctx.restore();
+  }
+
+  /**
+   * 当前笔画单章落墨：流量两段式时画进离屏层（以 flow alpha，一律 source-over 累积——
+   * 画笔累积墨量、橡皮累积「擦除覆盖量」，合成阶段才决定方向）；
+   * 否则直画涂改层（旧行为：不透明度 alpha 逐章叠加）。
+   */
+  function stampStrokeAt(ctx: CanvasRenderingContext2D, x: number, y: number, erase: boolean) {
+    const plan = strokeFlow.current;
+    if (plan) {
+      stampWith(ctx, x, y, {
+        erase: false,
+        color: erase ? '#000000' : colorRef.current,
+        size: sizeRef.current,
+        hardness: hardnessRef.current,
+        alpha: plan.stampAlpha,
+      });
+      return;
+    }
+    stampWith(ctx, x, y, {
+      erase,
+      color: colorRef.current,
+      size: sizeRef.current,
+      opacity: opacityRef.current,
+      hardness: hardnessRef.current,
+    });
   }
 
   async function sampleColor(x: number, y: number): Promise<string> {
@@ -780,15 +977,24 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     wrapper.setPointerCapture(event.pointerId);
 
     if (tool === 'brush' || tool === 'eraser') {
-      stamp(ctx, pt.x, pt.y, tool === 'eraser');
+      const erase = tool === 'eraser';
+      // 流量方案：flow<100 走两段式（离屏层逐章堆积，松手整体合成）；缺省/100 直画（旧行为）
+      const plan = planStrokeFlow(flowRef.current, opacityRef.current);
+      if (plan.twoStage) beginFlowStroke(plan, erase);
+      // 平滑稳定器：落笔重建（强度 0 时输出=输入）；平滑后的点直接进 points，广播即重放
+      strokeSmoother.current = createPointSmoother(smoothingRef.current);
+      const spt = strokeSmoother.current(pt);
+      stampStrokeAt(ctx, spt.x, spt.y, erase);
       setDirty(true);
       liveStroke.current = {
         tool,
         color: colorRef.current,
         size: sizeRef.current,
         opacity: opacityRef.current,
-        soft: softBrushRef.current,
-        points: [pt],
+        hardness: hardnessRef.current,
+        flow: flowRef.current,
+        spacing: spacingRef.current,
+        points: [spt],
       };
     }
     if (tool === 'liquify') {
@@ -810,7 +1016,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         color: colorRef.current,
         size: sizeRef.current,
         opacity: opacityRef.current,
-        soft: softBrushRef.current,
+        hardness: 100,
+        flow: 100,
+        spacing: 25,
         points: [pt],
         from: { ...cloneOrigin.current },
       };
@@ -852,18 +1060,38 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     const ctx = paintCtx();
     if (!ctx) return;
     if (tool === 'brush' || tool === 'eraser') {
+      const erase = tool === 'eraser';
+      // 输入点先过 EMA 平滑（稳定器关闭时 = 原点）；平滑后的点同时用于盖章与广播
+      const spt = strokeSmoother.current ? strokeSmoother.current(pt) : pt;
       const prev = lastPt.current;
+      const plan = strokeFlow.current;
       if (prev) {
-        const dist = Math.hypot(pt.x - prev.x, pt.y - prev.y);
-        const steps = Math.max(1, Math.floor(dist / (size / 4)));
-        for (let i = 1; i <= steps; i += 1) {
-          const t = i / steps;
-          stamp(ctx, prev.x + (pt.x - prev.x) * t, prev.y + (pt.y - prev.y) * t, tool === 'eraser');
+        // 两段式：章进离屏层（source-over 累积），否则直画涂改层（旧行为）
+        const target = plan ? getFlowLayer().getContext('2d') : ctx;
+        if (target) {
+          stampAlong(target, prev, spt, plan
+            ? {
+                erase: false,
+                color: erase ? '#000000' : colorRef.current,
+                size: sizeRef.current,
+                hardness: hardnessRef.current,
+                spacing: spacingRef.current,
+                alpha: plan.stampAlpha,
+              }
+            : {
+                erase,
+                color: colorRef.current,
+                size: sizeRef.current,
+                opacity: opacityRef.current,
+                hardness: hardnessRef.current,
+                spacing: spacingRef.current,
+              });
         }
       }
-      lastPt.current = pt;
+      lastPt.current = spt;
       setDirty(true);
-      liveStroke.current?.points.push(pt);
+      liveStroke.current?.points.push(spt);
+      if (plan) refreshFlowPreview();
     }
     if (tool === 'rect' && lastPt.current) {
       setRect({
@@ -919,7 +1147,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     }, 500);
   }
 
-  /** 重放远端的一笔涂改：和本地画笔共用 stampWith，效果完全一致 */
+  /** 重放远端的一笔涂改：和本地画笔共用 stampWith/stampAlong，效果完全一致 */
   function replayPaintOp(op: PaintOp) {
     const ctx = paintCtx();
     if (!ctx) return;
@@ -928,30 +1156,58 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       if (pts.length === 0) return;
       const erase = op.type === 'stroke' && op.tool === 'eraser';
       const cloneFrom = op.type === 'clone' ? op.from : undefined;
+      // 硬度：新字段优先，旧数据回落 soft 映射（true→50 / 缺省→100），保证旧笔画重放逐像素一致
+      const hardness = resolveStrokeHardness(op.type === 'stroke' ? op.hardness : undefined, op.soft);
+      const spacing = op.type === 'stroke' ? op.spacing : undefined;
+      const plan = op.type === 'stroke' ? planStrokeFlow(op.flow, op.opacity) : null;
+      if (op.type === 'stroke' && plan?.twoStage) {
+        // 两段式重放（与本地绘制同一套逻辑）：笔章以 flow alpha 进临时离屏层逐章堆积，
+        // 最后整体以不透明度合成进涂改层（橡皮 destination-out）
+        const layer = document.createElement('canvas');
+        layer.width = imageWidth;
+        layer.height = imageHeight;
+        const lctx = layer.getContext('2d');
+        if (lctx) {
+          const segOpts = {
+            erase: false, // 离屏层一律 source-over 累积（画笔=墨量、橡皮=擦除覆盖量），合成阶段决定方向
+            color: erase ? '#000000' : op.color,
+            size: op.size,
+            hardness,
+            spacing,
+            alpha: plan.stampAlpha,
+          };
+          stampWith(lctx, pts[0].x, pts[0].y, segOpts);
+          for (let i = 1; i < pts.length; i += 1) {
+            stampAlong(lctx, pts[i - 1], pts[i], segOpts);
+          }
+          ctx.save();
+          ctx.globalAlpha = plan.compositeAlpha;
+          ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+          ctx.drawImage(layer, 0, 0);
+          ctx.restore();
+          setDirty(true);
+        }
+        return;
+      }
+      // 直画重放（旧行为路径：flow 缺省或 100，逐章以不透明度叠加）
       stampWith(ctx, pts[0].x, pts[0].y, {
         erase,
         color: op.type === 'stroke' ? op.color : undefined,
         size: op.size,
         opacity: op.opacity,
-        soft: op.soft,
+        hardness,
         cloneFrom,
       });
       for (let i = 1; i < pts.length; i += 1) {
-        const prev = pts[i - 1];
-        const cur = pts[i];
-        const dist = Math.hypot(cur.x - prev.x, cur.y - prev.y);
-        const steps = Math.max(1, Math.floor(dist / (op.size / 4)));
-        for (let s = 1; s <= steps; s += 1) {
-          const t = s / steps;
-          stampWith(ctx, prev.x + (cur.x - prev.x) * t, prev.y + (cur.y - prev.y) * t, {
-            erase,
-            color: op.type === 'stroke' ? op.color : undefined,
-            size: op.size,
-            opacity: op.opacity,
-            soft: op.soft,
-            cloneFrom,
-          });
-        }
+        stampAlong(ctx, pts[i - 1], pts[i], {
+          erase,
+          color: op.type === 'stroke' ? op.color : undefined,
+          size: op.size,
+          opacity: op.opacity,
+          hardness,
+          spacing,
+          cloneFrom,
+        });
       }
       setDirty(true);
       return;
@@ -1020,29 +1276,34 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     if (!drawing.current) return;
     drawing.current = false;
 
-    // 笔画收尾：把整条矢量轨迹广播出去
+    // 笔画收尾：流量两段式先把离屏层整体合成进涂改层，再把整条矢量轨迹广播出去
+    if (strokeFlow.current) commitFlowStroke();
+    strokeSmoother.current = null;
     const stroke = liveStroke.current;
     liveStroke.current = null;
     if (stroke && stroke.points.length > 0) {
       if (stroke.tool === 'clone') {
         if (stroke.from) {
+          // 图章：保持旧行为硬边正圆，不带新参数
           broadcastPaint({
             type: 'clone',
             size: stroke.size,
             opacity: stroke.opacity,
-            soft: stroke.soft,
             points: stroke.points,
             from: stroke.from,
           });
         }
       } else {
+        // 实际值随 op 广播（远端按 op 重放，不读本端滑条）
         broadcastPaint({
           type: 'stroke',
           tool: stroke.tool,
           color: stroke.color,
           size: stroke.size,
           opacity: stroke.opacity,
-          soft: stroke.soft,
+          hardness: stroke.hardness,
+          flow: stroke.flow,
+          spacing: stroke.spacing,
           points: stroke.points,
         });
       }
@@ -2322,6 +2583,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
             颜色
             <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="mt-1 h-8 w-full" />
           </label>
+          <p className="text-[11px] font-medium text-ink-400">常规</p>
           <label className="text-[11px] text-ink-500">
             大小 {size}px
             <input
@@ -2344,16 +2606,64 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
               className="mt-1 w-full accent-sky"
             />
           </label>
+          <label className="text-[11px] text-ink-500">
+            流量 {flow}%
+            <input
+              type="range"
+              min={1}
+              max={100}
+              value={flow}
+              onChange={(e) => setFlow(Number(e.target.value))}
+              className="mt-1 w-full accent-sky"
+            />
+          </label>
+          <label className="text-[11px] text-ink-500">
+            硬度 {hardness}%
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={hardness}
+              onChange={(e) => setHardness(Number(e.target.value))}
+              className="mt-1 w-full accent-sky"
+            />
+          </label>
           <label className="flex items-center gap-1 text-[11px] text-ink-500">
             <input
               type="checkbox"
-              checked={softBrush}
-              onChange={(e) => setSoftBrush(e.target.checked)}
+              checked={showMoreBrush}
+              onChange={(e) => setShowMoreBrush(e.target.checked)}
             />
-            软边笔刷
+            更多设置
           </label>
+          {showMoreBrush && (
+            <>
+              <label className="text-[11px] text-ink-500">
+                间距 {spacing}%
+                <input
+                  type="range"
+                  min={1}
+                  max={500}
+                  value={spacing}
+                  onChange={(e) => setSpacing(Number(e.target.value))}
+                  className="mt-1 w-full accent-sky"
+                />
+              </label>
+              <label className="text-[11px] text-ink-500">
+                平滑 {smoothing}%
+                <input
+                  type="range"
+                  min={0}
+                  max={95}
+                  value={smoothing}
+                  onChange={(e) => setSmoothing(Number(e.target.value))}
+                  className="mt-1 w-full accent-sky"
+                />
+              </label>
+            </>
+          )}
           <p className="text-[11px] text-ink-400">
-            原图层已锁定。橡皮只擦涂改层。图章(S)：Alt+点击取源，拖动复制背景；软边对画笔/橡皮生效。
+            原图层已锁定。橡皮只擦涂改层。图章(S)：Alt+点击取源，拖动复制背景；硬度/流量/间距/平滑对画笔/橡皮生效，图章保持硬边。
             液化：拖动把背景内容沿拖动方向推挤（结果画进涂改层，非破坏；大小=影响域，不透明度=强度）。
             矩形/套索拖出选区后，用顶部「填充选区」上色或「选区去字」去字（Esc 取消选区）。
           </p>
