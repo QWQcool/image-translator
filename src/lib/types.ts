@@ -123,6 +123,12 @@ export type SpaceItem = {
   assignee_username?: string | null;
   /** 关键词搜索时附带：该条目命中的标注文本片段（最多 3 条，非搜索请求为空数组） */
   matched_texts?: string[];
+  /** 工作状态字段（只增不改，联表查询时附带）：pin 标号数（box 框不计入） */
+  pins_count?: number;
+  /** 工作状态字段：pin 标号中已填译文（text 非空）的数量 */
+  pins_with_text?: number;
+  /** 工作状态字段：该页是否已有嵌字成品（EXISTS outputs） */
+  has_output?: 0 | 1;
 };
 
 export type AnnotationKind = 'box' | 'pin';

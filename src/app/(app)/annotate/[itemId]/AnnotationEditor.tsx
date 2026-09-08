@@ -328,6 +328,39 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
     [router, save],
   );
 
+  // 「下一未译 / 下一嵌字」轻提示（找不到符合页时不跳转，短暂显示后自动消失）
+  const [nextNote, setNextNote] = useState<string | null>(null);
+  const nextNoteTimer = useRef<number | null>(null);
+
+  /**
+   * 跳到下一个符合工作状态的页：以当前页为 after 调 next-unfinished（页序向后找，
+   * 找不到绕回开头）。没有符合的页 → 轻提示不跳转；跳转走 goItem（脏状态先保存）。
+   */
+  const goNextUnfinished = useCallback(
+    async (type: 'untranslated' | 'untypeset') => {
+      const spaceId = item?.space_id;
+      if (!spaceId) return;
+      try {
+        const res = await fetch(
+          `/api/spaces/${spaceId}/next-unfinished?after=${itemId}&type=${type}`,
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as { itemId: number | null };
+        if (data.itemId) {
+          await goItem(data.itemId);
+          return;
+        }
+        setNextNote(type === 'untranslated' ? '后面没有未译的页了' : '后面没有待嵌字的页了');
+        if (nextNoteTimer.current) window.clearTimeout(nextNoteTimer.current);
+        nextNoteTimer.current = window.setTimeout(() => setNextNote(null), 3000);
+      } catch {
+        // 静默：跳转失败不打断编辑
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [item?.space_id, itemId, goItem],
+  );
+
   const pins = useMemo(() => annotations.filter(isPin), [annotations]);
 
   // histVersion 只作为重渲染信号：栈内容在 ref 里，禁用态在渲染时读取
@@ -785,6 +818,24 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
           >
             查找
           </button>
+          {/* 逐页推进入口：按页序从当前页向后找下一个未完成页（绕回开头），脏状态先保存 */}
+          <button
+            type="button"
+            className="btn-ghost px-2 py-1 text-xs"
+            onClick={() => void goNextUnfinished('untranslated')}
+            title="跳到下一个未翻译的页（当前页之后，绕回开头）"
+          >
+            下一未译
+          </button>
+          <button
+            type="button"
+            className="btn-ghost px-2 py-1 text-xs"
+            onClick={() => void goNextUnfinished('untypeset')}
+            title="跳到下一个待嵌字的页"
+          >
+            下一嵌字
+          </button>
+          {nextNote && <span className="text-xs text-ink-500">{nextNote}</span>}
         </div>
 
         <span className="ml-auto flex items-center gap-2">

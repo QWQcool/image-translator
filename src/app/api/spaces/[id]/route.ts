@@ -49,10 +49,35 @@ export async function GET(request: Request, { params }: Params) {
   const assigneeClause = assigneeOnly ? 'AND si.assignee_id = ?' : '';
   const assigneeArgs = assigneeOnly ? [user.id] : [];
 
+  // 工作状态子查询片段：pins 口径只数 kind='pin' 的标号（box 框不算），与统计接口一致；
+  // 三段在 SELECT 与 ?work= 筛选两处复用，保证口径唯一
+  const PINS_SQL = `(SELECT COUNT(*) FROM annotations anp WHERE anp.item_id = si.id AND anp.kind = 'pin')`;
+  const PINS_WITH_TEXT_SQL = `(SELECT COUNT(*) FROM annotations ant WHERE ant.item_id = si.id AND ant.kind = 'pin' AND IFNULL(ant.text, '') != '')`;
+  const HAS_OUTPUT_SQL = `EXISTS (SELECT 1 FROM outputs o WHERE o.item_id = si.id)`;
+
+  // ?work= 页级工作状态筛选（白名单）：非法取值静默忽略（视为不过滤），
+  // 与 GET 类查询参数的宽容风格一致，避免第三方书签/旧链接带脏值直接 400
+  const WORK_FILTERS = ['unmarked', 'untranslated', 'untypeset', 'typeset'] as const;
+  const workParam = url.searchParams.get('work') ?? '';
+  const work = (WORK_FILTERS as readonly string[]).includes(workParam)
+    ? (workParam as (typeof WORK_FILTERS)[number])
+    : null;
+  // 逐值生成 WHERE 片段；untranslated = 有标号但译文未填满（含部分翻译的页）
+  const workClauseMap: Record<string, string> = {
+    unmarked: `AND ${PINS_SQL} = 0`,
+    untranslated: `AND ${PINS_SQL} > 0 AND ${PINS_WITH_TEXT_SQL} < ${PINS_SQL}`,
+    untypeset: `AND NOT ${HAS_OUTPUT_SQL}`,
+    typeset: `AND ${HAS_OUTPUT_SQL}`,
+  };
+  const workClause = work ? `${workClauseMap[work]} ` : '';
+
   const items = db
     .prepare(
       `SELECT si.*,
               (SELECT COUNT(*) FROM annotations an WHERE an.item_id = si.id) AS annotation_count,
+              ${PINS_SQL}          AS pins_count,
+              ${PINS_WITH_TEXT_SQL} AS pins_with_text,
+              ${HAS_OUTPUT_SQL}     AS has_output,
               au.username    AS assignee_username,
               a.id            AS a_id,
               a.owner_id      AS a_owner_id,
@@ -72,12 +97,15 @@ export async function GET(request: Request, { params }: Params) {
          FROM space_items si
          JOIN assets a ON a.id = si.asset_id
          LEFT JOIN users au ON au.id = si.assignee_id
-        WHERE si.space_id = ? ${assigneeClause} ${searchClause}
+        WHERE si.space_id = ? ${workClause}${assigneeClause} ${searchClause}
         ORDER BY si.sort_order, si.id`,
     )
     .all(id, ...assigneeArgs, ...searchArgs) as Array<
     SpaceItem & {
       annotation_count: number;
+      pins_count: number;
+      pins_with_text: number;
+      has_output: 0 | 1;
       assignee_username: string | null;
       a_id: number;
       a_owner_id: number;
@@ -105,6 +133,9 @@ export async function GET(request: Request, { params }: Params) {
     sort_order: row.sort_order,
     created_at: row.created_at,
     annotation_count: row.annotation_count,
+    pins_count: row.pins_count,
+    pins_with_text: row.pins_with_text,
+    has_output: row.has_output,
     assignee_id: (row.assignee_id as number | null) ?? null,
     assignee_username: row.assignee_username ?? null,
     asset: {

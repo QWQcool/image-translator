@@ -177,9 +177,27 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [me, setMe] = useState<{ id: number } | null>(null);
   // 只看我认领的（服务端 ?assignee=me 过滤，与搜索并存）
   const [onlyMine, setOnlyMine] = useState(false);
+  // 页级工作状态筛选（服务端 ?work= 过滤，白名单值见 API）：'' = 全部
+  const [work, setWork] = useState<'' | 'unmarked' | 'untranslated' | 'untypeset' | 'typeset'>('');
+  // 「继续」按钮目标页：null = 全空间没有符合的页（按钮禁用）
+  const [nextTargets, setNextTargets] = useState<{ untranslated: number | null; untypeset: number | null }>({
+    untranslated: null,
+    untypeset: null,
+  });
+  // 「继续」目标随数据刷新的触发器（load 完成后 +1，避免依赖 items 引用身份过度重取）
+  const [nextRefresh, setNextRefresh] = useState(0);
+  // 按文件名重排确认弹窗与执行中标记
+  const [reorderNameOpen, setReorderNameOpen] = useState(false);
+  const [reordering, setReordering] = useState(false);
+  // —— 网格拖拽排序（HTML5 drag & drop，仅全部视图可用）——
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [dragOverId, setDragOverId] = useState<number | null>(null);
 
   const canEdit = access?.canEdit ?? false;
   const searching = debouncedQuery.length > 0;
+  // 任一筛选生效（搜索/认领/工作状态）= 非全部视图：全空间级排序操作统一禁用，
+  // 避免对筛选后的子集重排导致 sort_order 语义混乱（子集重写会牵动全表顺序）
+  const filtersActive = searching || onlyMine || work !== '';
   // 站点配置：进度项 label 与 enabled（切换菜单只列启用项，徽标 label 用配置名）
   const { progressItems } = useSiteConfig();
 
@@ -190,6 +208,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         const params = new URLSearchParams();
         if (q) params.set('q', q);
         if (onlyMine) params.set('assignee', 'me');
+        if (work) params.set('work', work);
         const suffix = params.toString() ? `?${params.toString()}` : '';
         const res = await fetch(`/api/spaces/${spaceId}${suffix}`);
         if (res.status === 404 || res.status === 403) {
@@ -209,9 +228,11 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         }
       } finally {
         setLoading(false);
+        // 数据刷新后重算「继续」目标（编辑器改完译文回来 / 机翻完成后都走 load）
+        setNextRefresh((v) => v + 1);
       }
     },
-    [spaceId, router, onlyMine],
+    [spaceId, router, onlyMine, work],
   );
 
   useEffect(() => {
@@ -237,6 +258,37 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     const timer = setTimeout(() => setDebouncedQuery(query.trim()), 250);
     return () => clearTimeout(timer);
   }, [query]);
+
+  // 「继续」按钮目标：不带 after 调 next-unfinished = 从第一页找第一个未完成页。
+  // 结果为 null 时按钮禁用（title 提示全部完成）；随 nextRefresh（load 完成后）重算
+  useEffect(() => {
+    if (!canEdit) return;
+    if (items.length === 0) {
+      setNextTargets({ untranslated: null, untypeset: null });
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const fetchTarget = async (type: 'untranslated' | 'untypeset') => {
+        try {
+          const res = await fetch(`/api/spaces/${spaceId}/next-unfinished?type=${type}`);
+          if (!res.ok) return null;
+          return ((await res.json()).itemId as number | null) ?? null;
+        } catch {
+          return null;
+        }
+      };
+      const [untranslated, untypeset] = await Promise.all([
+        fetchTarget('untranslated'),
+        fetchTarget('untypeset'),
+      ]);
+      if (cancelled) return;
+      setNextTargets({ untranslated, untypeset });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [canEdit, spaceId, nextRefresh, items.length]);
 
   useEffect(() => {
     void load(debouncedQuery);
@@ -738,6 +790,57 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     }
   }
 
+  /**
+   * 拖拽落点：把被拖卡片移到目标卡片之前，本地重排后把完整顺序发给服务端
+   * （复用 items/reorder 全量重写接口——服务端零改动，最小方案）。
+   * 虚拟滚动（>30 张）下只渲染可见窗口的卡片，因此只能拖到当前可见窗口内的
+   * 卡片位置；想拖到远处的页请先滚动到目标附近再拖。
+   */
+  async function handleDrop(targetId: number) {
+    const sourceId = dragId;
+    setDragId(null);
+    setDragOverId(null);
+    if (sourceId === null || sourceId === targetId) return;
+    const from = items.findIndex((i) => i.id === sourceId);
+    const to = items.findIndex((i) => i.id === targetId);
+    if (from < 0 || to < 0) return;
+    const next = [...items];
+    const [moved] = next.splice(from, 1);
+    // 移除后再按目标的最新下标插入，避免删除位在目标位之前时的下标偏移
+    const insertAt = next.findIndex((i) => i.id === targetId);
+    next.splice(insertAt, 0, moved);
+    setItems(next);
+    const res = await fetch(`/api/spaces/${spaceId}/items/reorder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order: next.map((i) => i.id) }),
+    });
+    if (!res.ok) {
+      setError('拖拽排序失败');
+      await load(debouncedQuery);
+    }
+  }
+
+  /** 按文件名一键重排：全空间操作，覆盖手动排序（筛选态下按钮已禁用） */
+  async function reorderByFilename() {
+    setReorderNameOpen(false);
+    setReordering(true);
+    try {
+      const res = await fetch(`/api/spaces/${spaceId}/items/reorder-filename`, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error ?? '按文件名重排失败');
+        return;
+      }
+      setError(null);
+      await load(debouncedQuery);
+    } catch {
+      setError('网络异常，按文件名重排失败');
+    } finally {
+      setReordering(false);
+    }
+  }
+
   /** 彻底删除（单个或批量）：条目 + 标注 + 不再被引用的素材文件 */
   async function removeItems(itemIds: number[]) {
     if (itemIds.length === 0) return;
@@ -1107,6 +1210,19 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               />
               只看我认领的
             </label>
+            {/* 页级筛选：工作状态（服务端 ?work= 过滤，与搜索/认领组合生效） */}
+            <select
+              className="input w-24 py-1.5 text-xs"
+              value={work}
+              title="按工作状态筛选"
+              onChange={(e) => setWork(e.target.value as typeof work)}
+            >
+              <option value="">全部状态</option>
+              <option value="unmarked">未标号</option>
+              <option value="untranslated">待翻译</option>
+              <option value="untypeset">待嵌字</option>
+              <option value="typeset">已嵌字</option>
+            </select>
             {canEdit && (
               <>
                 <button
@@ -1200,6 +1316,55 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               <Link href={`/spaces/${spaceId}/reader`} className="btn-ghost">
                 阅读
               </Link>
+            )}
+            {/* 「继续」直达：从第一个未完成页直接进编辑器；全部完成时禁用 */}
+            {canEdit && items.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  disabled={!nextTargets.untranslated || mtRunning}
+                  title={
+                    nextTargets.untranslated
+                      ? '跳到第一个待翻译的页'
+                      : '没有待翻译的页，全部完成'
+                  }
+                  onClick={() => {
+                    if (nextTargets.untranslated) router.push(`/annotate/${nextTargets.untranslated}`);
+                  }}
+                >
+                  继续翻译
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  disabled={!nextTargets.untypeset || mtRunning}
+                  title={
+                    nextTargets.untypeset ? '跳到第一个待嵌字的页' : '没有待嵌字的页，全部完成'
+                  }
+                  onClick={() => {
+                    if (nextTargets.untypeset) router.push(`/typeset/${nextTargets.untypeset}`);
+                  }}
+                >
+                  继续嵌字
+                </button>
+              </>
+            )}
+            {/* 按文件名一键重排：全空间操作，任一筛选生效时禁用（重排语义只对全部视图成立） */}
+            {canEdit && items.length > 1 && (
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={reordering || filtersActive || mtRunning}
+                title={
+                  filtersActive
+                    ? '排序操作需在全部视图进行（清空搜索与筛选后再用）'
+                    : '按素材文件名自然排序（1、2、10），会覆盖手动排序'
+                }
+                onClick={() => setReorderNameOpen(true)}
+              >
+                {reordering ? '重排中…' : '按文件名重排'}
+              </button>
             )}
             {/* 存疑清单：带数量徽标（来自进度统计，随数据刷新） */}
             {items.length > 0 && (
@@ -1388,8 +1553,38 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           {virtualItems.map((item, idx) => {
             const index = indexOffset + idx;
             const selected = selection.has(item.id);
+            // 拖拽排序只在全部视图（无筛选）且可编辑时启用；虚拟滚动下只能拖到
+            // 当前可见窗口内的卡片（窗口外 DOM 未渲染，先滚动到目标附近再拖）
+            const canSort = canEdit && !filtersActive;
             return (
-              <div key={item.id} data-grid-card className="card group relative overflow-hidden">
+              <div
+                key={item.id}
+                data-grid-card
+                className={`card group relative overflow-hidden ${
+                  canSort && dragOverId === item.id && dragId !== null ? 'ring-2 ring-sky' : ''
+                }`}
+                draggable={canSort}
+                onDragStart={() => setDragId(item.id)}
+                onDragEnd={() => {
+                  setDragId(null);
+                  setDragOverId(null);
+                }}
+                onDragOver={(event) => {
+                  if (canSort && dragId !== null && dragId !== item.id) {
+                    event.preventDefault();
+                    setDragOverId(item.id);
+                  }
+                }}
+                onDragLeave={() => setDragOverId((prev) => (prev === item.id ? null : prev))}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  void handleDrop(item.id);
+                }}
+              >
+                {/* 拖拽插入位置指示线：表示「插到这张卡片之前」 */}
+                {canSort && dragOverId === item.id && dragId !== null && (
+                  <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-1 bg-sky" />
+                )}
                 <Link
                   href={`/annotate/${item.id}`}
                   className="block"
@@ -1402,6 +1597,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                       src={thumbUrl(item.asset?.thumb_filename ?? null, item.asset?.filename ?? '')}
                       alt={item.title ?? ''}
                       loading="lazy"
+                      // 禁用图片原生拖拽：否则拖拽手势从 img 发起，卡片级 drag&drop 不稳定
+                      draggable={false}
                       className={`h-full w-full object-cover transition-transform ${
                         canEdit ? 'group-hover:scale-[1.03]' : ''
                       }`}
@@ -1501,7 +1698,8 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
 
                   {canEdit && (
                     <div className="mt-2 flex gap-2">
-                      {!searching && (
+                      {/* ↑↓ 与拖拽同为排序操作：任一筛选生效时一并隐藏（全空间级语义） */}
+                      {!filtersActive && (
                         <>
                           <button
                             type="button"
@@ -1618,6 +1816,31 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           将彻底删除「{pendingDeleteItem?.title || '未命名'}」及其
           {pendingDeleteItem?.annotation_count ?? 0} 条标注与磁盘文件，
           <strong className="text-blush">此操作不可撤销</strong>。
+        </p>
+      </Modal>
+
+      {/* 按文件名重排确认：明确提示会覆盖手动排序（全空间级、不可撤销的顺序变更） */}
+      <Modal
+        open={reorderNameOpen}
+        title="按文件名重排"
+        onClose={() => setReorderNameOpen(false)}
+        footer={
+          <>
+            <button type="button" className="btn-ghost" onClick={() => setReorderNameOpen(false)}>
+              取消
+            </button>
+            <button type="button" className="btn-primary" onClick={() => void reorderByFilename()}>
+              确认重排
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-ink-200">
+          将按素材文件名对全部 {items.length} 张图片自然排序（数字按数值比较，1、2、10 不会
+          错排成 1、10、2），<strong className="text-blush">现有手动排序会被覆盖</strong>。
+        </p>
+        <p className="mt-2 text-[11px] text-ink-500">
+          无文件名的图片按标题参与排序；都没有时保持在当前顺序的末尾。
         </p>
       </Modal>
 
