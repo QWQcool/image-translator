@@ -100,7 +100,9 @@ export function applyLutToImageData(data: Uint8ClampedArray, lut: Uint8Array): v
  * LUT → SVG feComponentTransfer 的 tableValues 串（256 项空格分隔）。
  * type="table" 对相邻表值做线性插值，256 项时与逐像素查表逐位一致；
  * 使用方必须把 filter 设为 colorInterpolationFilters="sRGB"（默认 linearRGB 会改变曲线）。
+ * ⚠️ SVG tableValues 必须是 0~1 浮点——直接拼 0~255 整数会让插值溢出（任何非黑
+ * 像素被钳到 1），预览整体变白（v0.2.5 实测 bug）。
  */
 export function lutToTableValues(lut: Uint8Array): string {
-  return Array.from(lut).join(' ');
+  return Array.from(lut, (v) => (v / 255).toFixed(6)).join(' ');
 }
