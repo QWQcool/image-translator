@@ -17,6 +17,64 @@ import AiBatchModal from './AiBatchModal';
 import ExportMenu from './ExportMenu';
 import { ROLE_LABEL } from './MembersPanel';
 
+/** 空间进度统计（GET /api/spaces/[id]/stats） */
+type SpaceStats = {
+  pages: number;
+  pins: number;
+  pinsWithText: number;
+  pinsDoubtful: number;
+  pagesWithTranslation: number;
+  pagesWithoutPins: number;
+  truncated: boolean;
+};
+
+/** 存疑清单条目（GET /api/spaces/[id]/issues） */
+type IssueEntry = {
+  itemId: number;
+  itemTitle: string | null;
+  annotationId: number;
+  orderIndex: number;
+  sourceText: string;
+  text: string;
+};
+
+/** 全空间终检结果（GET /api/spaces/[id]/final-check） */
+type FinalCheckResult = {
+  groups: {
+    emptyText: Array<{
+      itemId: number;
+      itemTitle: string | null;
+      annotationId: number;
+      orderIndex: number;
+      sourceText: string;
+    }>;
+    doubtful: Array<{
+      itemId: number;
+      itemTitle: string | null;
+      annotationId: number;
+      orderIndex: number;
+      text: string;
+      sourceText: string;
+    }>;
+    punctuation: Array<{
+      itemId: number;
+      itemTitle: string | null;
+      annotationId: number;
+      orderIndex: number;
+      text: string;
+      issues: Array<{ rule: string; message: string; snippet: string }>;
+    }>;
+  };
+  pagesTruncated: boolean;
+  checkedPages: number;
+};
+
+/** 摘要截断：换行压成 ⏎，超长加省略号（清单/终检行内单行展示用） */
+function clip(text: string, max: number): string {
+  const flat = text.replace(/\n/g, '⏎');
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
 export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const router = useRouter();
   const [space, setSpace] = useState<Space | null>(null);
@@ -105,6 +163,15 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [targetSpaces, setTargetSpaces] = useState<Array<{ id: number; name: string }>>([]);
   const [targetSpaceId, setTargetSpaceId] = useState<number | null>(null);
   const [movingItems, setMovingItems] = useState(false);
+  // —— 协作可见性：进度统计 / 存疑清单 / 全空间终检 ——
+  const [stats, setStats] = useState<SpaceStats | null>(null);
+  const [issuesOpen, setIssuesOpen] = useState(false);
+  const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issues, setIssues] = useState<IssueEntry[]>([]);
+  const [issuesTruncated, setIssuesTruncated] = useState(false);
+  const [finalOpen, setFinalOpen] = useState(false);
+  const [finalLoading, setFinalLoading] = useState(false);
+  const [finalResult, setFinalResult] = useState<FinalCheckResult | null>(null);
 
   const canEdit = access?.canEdit ?? false;
   const searching = debouncedQuery.length > 0;
@@ -125,6 +192,13 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         setSpace(data.space ?? null);
         setAccess(data.access ?? null);
         setItems(Array.isArray(data.items) ? data.items : []);
+        // 进度统计随条目一起刷新；失败不阻塞主视图（chips 缺席即可）
+        try {
+          const statsRes = await fetch(`/api/spaces/${spaceId}/stats`);
+          if (statsRes.ok) setStats((await statsRes.json()) as SpaceStats);
+        } catch {
+          // 统计加载失败静默
+        }
       } finally {
         setLoading(false);
       }
@@ -325,6 +399,51 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       if (data.space) setSpace(data.space);
     } catch {
       setError('网络异常，切换进度失败');
+    }
+  }
+
+  /** 打开存疑清单：拉取全空间存疑标号（页序 + 标号序） */
+  async function openIssues() {
+    setIssuesOpen(true);
+    setIssuesLoading(true);
+    try {
+      const res = await fetch(`/api/spaces/${spaceId}/issues`);
+      const data = await res.json();
+      setIssues(Array.isArray(data.issues) ? data.issues : []);
+      setIssuesTruncated(Boolean(data.truncated));
+    } catch {
+      setIssues([]);
+    } finally {
+      setIssuesLoading(false);
+    }
+  }
+
+  /** 跳转到标注编辑器并用 ?focus= 定位到具体标注（同时关闭清单/终检弹窗） */
+  function goAnnotation(itemId: number, annotationId: number) {
+    setIssuesOpen(false);
+    setFinalOpen(false);
+    router.push(`/annotate/${itemId}?focus=${annotationId}`);
+  }
+
+  /** 运行全空间终检：空译文 / 存疑未清 / 标点硬伤 三组汇总 */
+  async function runFinalCheck() {
+    setFinalOpen(true);
+    setFinalLoading(true);
+    setFinalResult(null);
+    try {
+      const res = await fetch(`/api/spaces/${spaceId}/final-check`);
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error ?? '终检失败');
+        setFinalOpen(false);
+        return;
+      }
+      setFinalResult((await res.json()) as FinalCheckResult);
+    } catch {
+      setError('网络异常，终检失败');
+      setFinalOpen(false);
+    } finally {
+      setFinalLoading(false);
     }
   }
 
@@ -835,6 +954,32 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                   </>
                 )}
               </div>
+              {/* 进度统计 chips：轻量数据概览（存疑 chip 可点，直达清单） */}
+              {stats && (
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                  <span className="rounded bg-ink-800 px-1.5 py-0.5 text-ink-300" title="空间页数">
+                    页 {stats.pages}
+                  </span>
+                  <span className="rounded bg-ink-800 px-1.5 py-0.5 text-ink-300" title="标号总数">
+                    标号 {stats.pins}
+                  </span>
+                  <span className="rounded bg-ink-800 px-1.5 py-0.5 text-ink-300" title="已填译文的标号数">
+                    已填译文 {stats.pinsWithText}
+                  </span>
+                  <button
+                    type="button"
+                    className={`rounded px-1.5 py-0.5 transition-colors ${
+                      stats.pinsDoubtful > 0
+                        ? 'bg-amber-500/20 font-medium text-amber-600 hover:bg-amber-500/30'
+                        : 'bg-ink-800 text-ink-400'
+                    }`}
+                    title="查看存疑清单"
+                    onClick={() => void openIssues()}
+                  >
+                    存疑 {stats.pinsDoubtful}
+                  </button>
+                </div>
+              )}
               {canManage && (
                 <button
                   type="button"
@@ -1002,6 +1147,29 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               <Link href={`/spaces/${spaceId}/reader`} className="btn-ghost">
                 阅读
               </Link>
+            )}
+            {/* 存疑清单：带数量徽标（来自进度统计，随数据刷新） */}
+            {items.length > 0 && (
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => void openIssues()}
+                title="汇总全空间的存疑标号，点击行跳转对应标注"
+              >
+                存疑清单{(stats?.pinsDoubtful ?? 0) > 0 ? `（${stats?.pinsDoubtful}）` : ''}
+              </button>
+            )}
+            {/* 全空间终检：空译文 / 存疑未清 / 标点硬伤 分组报告 */}
+            {items.length > 0 && (
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={finalLoading}
+                onClick={() => void runFinalCheck()}
+                title="按空译文 / 存疑 / 标点规则检查全空间，交稿前跑一遍"
+              >
+                终检
+              </button>
             )}
             <ExportMenu spaceId={spaceId} disabled={items.length === 0} />
             {canManage && (
@@ -1673,6 +1841,198 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
           </ul>
         </div>
       </Modal>
+
+      {/* 存疑清单弹窗：每行（页名 + 标号 + 原文/译文摘要）点击跳转对应标注 */}
+      <Modal
+        open={issuesOpen}
+        title={`存疑清单${issues.length > 0 ? `（${issues.length}）` : ''}`}
+        onClose={() => setIssuesOpen(false)}
+        width="max-w-2xl"
+      >
+        {issuesLoading ? (
+          <p className="py-8 text-center text-sm text-ink-500">加载中…</p>
+        ) : issues.length === 0 ? (
+          <p className="text-sm text-emerald-600">没有存疑标号，全部干净。</p>
+        ) : (
+          <div className="max-h-[60vh] space-y-2 overflow-y-auto">
+            {issues.map((row) => (
+              <button
+                key={row.annotationId}
+                type="button"
+                className="block w-full rounded-lg border border-ink-700 p-2.5 text-left transition-colors hover:border-sky"
+                onClick={() => goAnnotation(row.itemId, row.annotationId)}
+                title="跳转到标注编辑器"
+              >
+                <span className="text-xs font-medium text-sky-deep">
+                  {row.itemTitle || '未命名页'} · 标号 {row.orderIndex + 1}
+                </span>
+                <p className="mt-1 truncate text-[11px] text-ink-400">
+                  原文：{clip(row.sourceText, 60) || '（空）'}
+                </p>
+                <p className="truncate text-[11px] text-ink-200">
+                  译文：{clip(row.text, 60) || '（空）'}
+                </p>
+              </button>
+            ))}
+            {issuesTruncated && (
+              <p className="text-[11px] text-ink-500">
+                清单已达上限 500 条，请先处理一部分再刷新。
+              </p>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* 全空间终检弹窗：空译文 / 存疑未清 / 标点硬伤 分组展示，每行可跳转 */}
+      <Modal
+        open={finalOpen}
+        title="全空间终检"
+        onClose={() => setFinalOpen(false)}
+        width="max-w-2xl"
+      >
+        {finalLoading ? (
+          <p className="py-8 text-center text-sm text-ink-500">检查中…</p>
+        ) : !finalResult ? (
+          <p className="text-sm text-ink-400">没有检查结果。</p>
+        ) : finalResult.groups.emptyText.length === 0 &&
+          finalResult.groups.doubtful.length === 0 &&
+          finalResult.groups.punctuation.length === 0 ? (
+          <div>
+            <p className="text-sm font-medium text-emerald-600">全部通过，没有发现问题。</p>
+            <p className="mt-1 text-[11px] text-ink-500">
+              已检查 {finalResult.checkedPages} 页的全部标号译文。
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {finalResult.pagesTruncated && (
+              <p className="text-[11px] text-ink-500">
+                空间超过 500 页，本次仅检查了按页序排列的前 500 页。
+              </p>
+            )}
+            {finalResult.groups.emptyText.length > 0 && (
+              <FinalGroup
+                title="空译文（标号还没有译文）"
+                count={finalResult.groups.emptyText.length}
+              >
+                {finalResult.groups.emptyText.map((row) => (
+                  <FinalRow
+                    key={row.annotationId}
+                    itemId={row.itemId}
+                    itemTitle={row.itemTitle}
+                    annotationId={row.annotationId}
+                    orderIndex={row.orderIndex}
+                    summary={`原文：${clip(row.sourceText, 60) || '（空）'}`}
+                    onJump={goAnnotation}
+                  />
+                ))}
+              </FinalGroup>
+            )}
+            {finalResult.groups.doubtful.length > 0 && (
+              <FinalGroup title="存疑未清" count={finalResult.groups.doubtful.length}>
+                {finalResult.groups.doubtful.map((row) => (
+                  <FinalRow
+                    key={row.annotationId}
+                    itemId={row.itemId}
+                    itemTitle={row.itemTitle}
+                    annotationId={row.annotationId}
+                    orderIndex={row.orderIndex}
+                    summary={`译文：${clip(row.text, 60) || '（空）'}`}
+                    onJump={goAnnotation}
+                  />
+                ))}
+              </FinalGroup>
+            )}
+            {finalResult.groups.punctuation.length > 0 && (
+              <FinalGroup title="标点硬伤（可自动修）" count={finalResult.groups.punctuation.length}>
+                {finalResult.groups.punctuation.map((row) => (
+                  <FinalRow
+                    key={row.annotationId}
+                    itemId={row.itemId}
+                    itemTitle={row.itemTitle}
+                    annotationId={row.annotationId}
+                    orderIndex={row.orderIndex}
+                    issues={row.issues}
+                    onJump={goAnnotation}
+                  />
+                ))}
+                <p className="text-[11px] text-ink-500">
+                  仅列出可自动修的硬伤类规则（省略号 / 多余空行 / 首尾空白），
+                  自动修复请在编辑器内使用单页「检查 → 一键修复」。
+                </p>
+              </FinalGroup>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
+  );
+}
+
+/** 终检结果分组：标题 + 数量徽标 + 可滚动行列表 */
+function FinalGroup({
+  title,
+  count,
+  children,
+}: {
+  title: string;
+  count: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <h3 className="mb-1.5 flex items-center gap-2 text-xs font-medium text-ink-200">
+        {title}
+        <span className="rounded bg-blush/15 px-1.5 py-0.5 text-[10px] text-blush">{count}</span>
+      </h3>
+      <div className="max-h-48 space-y-1.5 overflow-y-auto">{children}</div>
+    </div>
+  );
+}
+
+/** 终检结果行：页名 + 标号 + 摘要或问题明细，点击跳转对应标注 */
+function FinalRow({
+  itemId,
+  itemTitle,
+  annotationId,
+  orderIndex,
+  summary,
+  issues,
+  onJump,
+}: {
+  itemId: number;
+  itemTitle: string | null;
+  annotationId: number;
+  orderIndex: number;
+  summary?: string;
+  issues?: Array<{ rule: string; message: string; snippet: string }>;
+  onJump: (itemId: number, annotationId: number) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="block w-full rounded-lg border border-ink-700 p-2.5 text-left transition-colors hover:border-sky"
+      onClick={() => onJump(itemId, annotationId)}
+      title="跳转到标注编辑器"
+    >
+      <span className="text-xs font-medium text-sky-deep">
+        {itemTitle || '未命名页'} · 标号 {orderIndex + 1}
+      </span>
+      {issues ? (
+        <ul className="mt-1 space-y-0.5">
+          {issues.map((issue, index) => (
+            <li key={index} className="text-[11px] text-ink-200">
+              <span className="mr-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] text-amber-600">
+                {issue.rule}
+              </span>
+              {issue.message}
+              <span className="ml-1 text-ink-500">{issue.snippet}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-1 truncate text-[11px] text-ink-300">{summary}</p>
+      )}
+    </button>
   );
 }

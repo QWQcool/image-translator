@@ -3,6 +3,7 @@ import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { hardDeleteItems } from '@/lib/hard-delete';
 import { normalizeGlossaryInput, normalizeStyles } from '@/lib/labelplus';
+import { notifySpaceParticipants } from '@/lib/notify';
 import { logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { PROGRESS_LABEL, isSpaceProgress, type SpaceProgress } from '@/lib/progress';
@@ -409,6 +410,16 @@ export async function PATCH(request: Request, { params }: Params) {
   }
   if (changed.length > 0) {
     logOp(user.id, 'update', 'space', id, before.name, `修改空间${changed.join('、')}`);
+  }
+
+  // 进度流转通知：只发给空间其他参与者（操作者本人排除；单人/试用场景排除后为空自然不发）。
+  // 无具体条目，铃铛点击跳空间详情。
+  if (progress !== undefined && progress !== before.progress) {
+    notifySpaceParticipants({
+      spaceId: id,
+      actorId: user.id,
+      body: `${user.username} 把《${before.name}》进度推进到 ${PROGRESS_LABEL[progress]}`,
+    });
   }
 
   const updated = db.prepare('SELECT * FROM spaces WHERE id = ?').get(id) as Space;

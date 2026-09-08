@@ -4,6 +4,7 @@ import { getCurrentUser } from '@/lib/auth';
 import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import { saveGuard } from '@/lib/room';
+import { notifySpaceParticipants } from '@/lib/notify';
 import type { Annotation } from '@/lib/types';
 
 type Params = { params: Promise<{ id: string }> };
@@ -249,6 +250,16 @@ export async function PUT(request: Request, { params }: Params) {
   const deleteById = db.prepare('DELETE FROM annotations WHERE id = ? AND item_id = ?');
   const touch = db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`);
 
+  // 保存前的存疑基线（按 order_index 对齐）：全量替换路径会删除重建标注行（id 会变），
+  // 不能按 id 对比新旧存疑状态；order_index 在保存前后语义一致，两种保存路径通用
+  const preDoubtfulOrders = new Set(
+    (
+      db
+        .prepare('SELECT order_index FROM annotations WHERE item_id = ? AND doubtful = 1')
+        .all(itemId) as Array<{ order_index: number }>
+    ).map((row) => row.order_index),
+  );
+
   db.transaction(() => {
     if (baseList === null) {
       // 原语义：全量替换
@@ -322,6 +333,31 @@ export async function PUT(request: Request, { params }: Params) {
   })();
 
   const itemName = itemDisplayName(itemId);
+
+  // 存疑标记通知：本次保存新出现的存疑标号，一页汇总成一条（防逐号刷屏）。
+  // 只发给空间其他参与者（排除操作者本人；单人/试用场景排除后为空自然不发）。
+  const nowDoubtfulOrders = (
+    db
+      .prepare('SELECT order_index FROM annotations WHERE item_id = ? AND doubtful = 1')
+      .all(itemId) as Array<{ order_index: number }>
+  ).map((row) => row.order_index);
+  const newDoubtfulCount = nowDoubtfulOrders.filter(
+    (order) => !preDoubtfulOrders.has(order),
+  ).length;
+  if (newDoubtfulCount > 0) {
+    const spaceName = (
+      db.prepare('SELECT name FROM spaces WHERE id = ?').get(owned.space_id) as
+        | { name: string }
+        | undefined
+    )?.name;
+    notifySpaceParticipants({
+      spaceId: owned.space_id,
+      actorId: user.id,
+      itemId,
+      body: `${user.username} 在《${spaceName ?? ''}》的「${itemName ?? '未命名页'}」新标记 ${newDoubtfulCount} 个存疑标号`,
+    });
+  }
+
   logOp(user.id, 'update', 'item', itemId, itemName, `标注保存（${normalized.length} 条）`);
 
   const annotations = db
