@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import { getCurrentUser } from '@/lib/auth';
 import { db } from '@/lib/db';
 import { hardDeleteItems } from '@/lib/hard-delete';
-import { logOp } from '@/lib/oplog';
+import { parseGlossary } from '@/lib/labelplus';
+import { itemDisplayName, logOp } from '@/lib/oplog';
 import { accessError, getSpaceAccess } from '@/lib/permissions';
 import type { Asset, Space, SpaceAccess, SpaceItem } from '@/lib/types';
 
@@ -141,8 +142,10 @@ export async function GET(_request: Request, { params }: Params) {
     items: siblings,
   };
 
-  const spaceRow = db.prepare('SELECT lp_groups, lp_phrases, lp_styles FROM spaces WHERE id = ?').get(item.space_id) as
-    | { lp_groups: string | null; lp_phrases: string | null; lp_styles: string | null }
+  const spaceRow = db
+    .prepare('SELECT lp_groups, lp_phrases, lp_styles, lp_glossary FROM spaces WHERE id = ?')
+    .get(item.space_id) as
+    | { lp_groups: string | null; lp_phrases: string | null; lp_styles: string | null; lp_glossary: string | null }
     | undefined;
 
   return NextResponse.json({
@@ -155,6 +158,8 @@ export async function GET(_request: Request, { params }: Params) {
       groups: spaceRow?.lp_groups ?? null,
       phrases: spaceRow?.lp_phrases ?? null,
       styles: spaceRow?.lp_styles ?? null,
+      // 术语表直接 parse 成数组下发（编辑器用于「原文命中术语」提示 chips）
+      glossary: parseGlossary(spaceRow?.lp_glossary),
     },
   });
 }
@@ -174,7 +179,7 @@ export async function PATCH(request: Request, { params }: Params) {
   }
   const item = accessible.item;
 
-  let body: { title?: string; sortOrder?: number };
+  let body: { title?: string; sortOrder?: number; assignee?: 'me' | null };
   try {
     body = await request.json();
   } catch {
@@ -194,6 +199,26 @@ export async function PATCH(request: Request, { params }: Params) {
       return NextResponse.json({ error: '排序值必须是整数' }, { status: 400 });
     }
     db.prepare('UPDATE space_items SET sort_order = ? WHERE id = ?').run(body.sortOrder, id);
+  }
+
+  // 页级认领：me=当前用户认领（可接手他人），null=取消认领。
+  // 扁平权限：任何登录用户都可认领/取消；值未变化时静默跳过（不刷日志）
+  if (body.assignee !== undefined) {
+    if (body.assignee !== 'me' && body.assignee !== null) {
+      return NextResponse.json({ error: 'assignee 只能是 "me" 或 null' }, { status: 400 });
+    }
+    const nextAssigneeId = body.assignee === 'me' ? user.id : null;
+    if ((item.assignee_id ?? null) !== nextAssigneeId) {
+      db.prepare('UPDATE space_items SET assignee_id = ? WHERE id = ?').run(nextAssigneeId, id);
+      logOp(
+        user.id,
+        'update',
+        'item',
+        id,
+        itemDisplayName(id),
+        nextAssigneeId ? '认领页面' : '取消认领',
+      );
+    }
   }
 
   db.prepare(`UPDATE spaces SET updated_at = datetime('now') WHERE id = ?`).run(item.space_id);

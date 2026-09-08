@@ -34,7 +34,8 @@ export async function GET(request: Request, { params }: Params) {
   const spaceOut = { ...space, tags: parseSpaceTags(space.tags) };
 
   // 空间内搜索：LIKE 匹配条目标题 / 素材原始文件名 / 标注译文与原文（全文搜索）
-  const keyword = (new URL(request.url).searchParams.get('q') ?? '').trim();
+  const url = new URL(request.url);
+  const keyword = (url.searchParams.get('q') ?? '').trim();
   const searchClause = keyword
     ? `AND (IFNULL(si.title, '') LIKE ? OR IFNULL(a.original_name, '') LIKE ? OR EXISTS (
          SELECT 1 FROM annotations an
@@ -43,11 +44,16 @@ export async function GET(request: Request, { params }: Params) {
   const searchArgs = keyword
     ? [`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`]
     : [];
+  // 「只看我认领的」页级筛选：服务端过滤（列表全量在客户端虚拟滚动，这里过滤最省）
+  const assigneeOnly = url.searchParams.get('assignee') === 'me';
+  const assigneeClause = assigneeOnly ? 'AND si.assignee_id = ?' : '';
+  const assigneeArgs = assigneeOnly ? [user.id] : [];
 
   const items = db
     .prepare(
       `SELECT si.*,
               (SELECT COUNT(*) FROM annotations an WHERE an.item_id = si.id) AS annotation_count,
+              au.username    AS assignee_username,
               a.id            AS a_id,
               a.owner_id      AS a_owner_id,
               a.filename      AS a_filename,
@@ -65,12 +71,14 @@ export async function GET(request: Request, { params }: Params) {
               a.created_at    AS a_created_at
          FROM space_items si
          JOIN assets a ON a.id = si.asset_id
-        WHERE si.space_id = ? ${searchClause}
+         LEFT JOIN users au ON au.id = si.assignee_id
+        WHERE si.space_id = ? ${assigneeClause} ${searchClause}
         ORDER BY si.sort_order, si.id`,
     )
-    .all(id, ...searchArgs) as Array<
+    .all(id, ...assigneeArgs, ...searchArgs) as Array<
     SpaceItem & {
       annotation_count: number;
+      assignee_username: string | null;
       a_id: number;
       a_owner_id: number;
       a_filename: string;
@@ -97,6 +105,8 @@ export async function GET(request: Request, { params }: Params) {
     sort_order: row.sort_order,
     created_at: row.created_at,
     annotation_count: row.annotation_count,
+    assignee_id: (row.assignee_id as number | null) ?? null,
+    assignee_username: row.assignee_username ?? null,
     asset: {
       id: row.a_id,
       owner_id: row.a_owner_id,

@@ -430,6 +430,14 @@ function migrate(database: Database.Database): void {
     `DELETE FROM room_ops WHERE created_at < datetime('now', '-14 days')`,
   );
 
+  // 页级认领：这一页由谁负责（翻译组分工）。扁平权限：任何人可认领/取消；
+  // 用户注销时置空而不是级联删条目，页面数据不受影响
+  safeAddColumn(
+    'space_items',
+    'assignee_id',
+    `assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL`,
+  );
+
   // 管理员标记（0/1）：站点唯一保留的权限差异——管理员可发放邀请码，与空间无关。
   // 管理员不自动授予（避免公网部署被抢注），由 CLI 命令手动指定：
   //   npm run admin -- list            查看全部用户与管理员状态

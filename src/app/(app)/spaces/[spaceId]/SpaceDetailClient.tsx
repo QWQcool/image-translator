@@ -172,6 +172,11 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
   const [finalOpen, setFinalOpen] = useState(false);
   const [finalLoading, setFinalLoading] = useState(false);
   const [finalResult, setFinalResult] = useState<FinalCheckResult | null>(null);
+  // —— 页级认领 ——
+  // 当前登录人（判断「我认领的」与认领/取消按钮文案）
+  const [me, setMe] = useState<{ id: number } | null>(null);
+  // 只看我认领的（服务端 ?assignee=me 过滤，与搜索并存）
+  const [onlyMine, setOnlyMine] = useState(false);
 
   const canEdit = access?.canEdit ?? false;
   const searching = debouncedQuery.length > 0;
@@ -182,7 +187,10 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
     async (q: string = '') => {
       setLoading(true);
       try {
-        const suffix = q ? `?q=${encodeURIComponent(q)}` : '';
+        const params = new URLSearchParams();
+        if (q) params.set('q', q);
+        if (onlyMine) params.set('assignee', 'me');
+        const suffix = params.toString() ? `?${params.toString()}` : '';
         const res = await fetch(`/api/spaces/${spaceId}${suffix}`);
         if (res.status === 404 || res.status === 403) {
           router.replace('/spaces');
@@ -203,7 +211,7 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
         setLoading(false);
       }
     },
-    [spaceId, router],
+    [spaceId, router, onlyMine],
   );
 
   useEffect(() => {
@@ -211,6 +219,18 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       router.replace('/spaces');
     }
   }, [spaceId, router]);
+
+  // 当前登录人（认领按钮文案与「只看我认领的」判断用）；失败静默，仅影响认领 UI
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch('/api/auth/me');
+        if (res.ok) setMe((await res.json()).user ?? null);
+      } catch {
+        // 静默
+      }
+    })();
+  }, []);
 
   // 搜索防抖：输入停顿后按 q 参数重新拉取
   useEffect(() => {
@@ -444,6 +464,27 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
       setFinalOpen(false);
     } finally {
       setFinalLoading(false);
+    }
+  }
+
+  /** 认领 / 取消认领（扁平权限：任何人可认领或接手）；成功后刷新列表拿最新认领人 */
+  async function toggleClaim(item: SpaceItem) {
+    const next = item.assignee_id === me?.id ? null : 'me';
+    try {
+      const res = await fetch(`/api/items/${item.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignee: next }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error ?? '认领操作失败');
+        return;
+      }
+      setError(null);
+      await load(debouncedQuery);
+    } catch {
+      setError('网络异常，认领操作失败');
     }
   }
 
@@ -1054,6 +1095,18 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
+            {/* 页级筛选：只看我认领的（服务端 assignee=me 过滤，与搜索并存） */}
+            <label
+              className="flex cursor-pointer items-center gap-1 text-xs text-ink-400"
+              title="只显示我认领的页面"
+            >
+              <input
+                type="checkbox"
+                checked={onlyMine}
+                onChange={(e) => setOnlyMine(e.target.checked)}
+              />
+              只看我认领的
+            </label>
             {canEdit && (
               <>
                 <button
@@ -1412,6 +1465,22 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                       : ''}
                   </p>
 
+                  {/* 页级认领人徽标（未认领不显示） */}
+                  {item.assignee_username && (
+                    <p className="mt-1">
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] ${
+                          item.assignee_id === me?.id
+                            ? 'bg-sky/15 font-medium text-sky-deep'
+                            : 'bg-ink-800 text-ink-300'
+                        }`}
+                        title="页级认领人"
+                      >
+                        {item.assignee_id === me?.id ? '我认领' : item.assignee_username}
+                      </span>
+                    </p>
+                  )}
+
                   {searching && (item.matched_texts ?? []).length > 0 && (
                     <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-sky-deep">
                       {item.matched_texts!.map((snippet) => `「${snippet.slice(0, 40)}」`).join(' ')}
@@ -1454,6 +1523,24 @@ export default function SpaceDetailClient({ spaceId }: { spaceId: number }) {
                           </button>
                         </>
                       )}
+                      {/* 页级认领：我认领的显示「取消认领」，他人/未认领显示「认领」（可接手） */}
+                      <button
+                        type="button"
+                        className={`btn-ghost px-2.5 py-1 text-xs ${
+                          item.assignee_id && item.assignee_id !== me?.id ? 'text-amber-600' : ''
+                        }`}
+                        disabled={mtRunning}
+                        title={
+                          item.assignee_id === me?.id
+                            ? '取消认领这一页'
+                            : item.assignee_id
+                              ? `接手（当前认领人：${item.assignee_username}）`
+                              : '认领这一页'
+                        }
+                        onClick={() => void toggleClaim(item)}
+                      >
+                        {item.assignee_id === me?.id ? '取消认领' : '认领'}
+                      </button>
                       <button
                         type="button"
                         className="btn-danger ml-auto px-2.5 py-1 text-xs"

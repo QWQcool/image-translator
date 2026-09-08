@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import EmptyState from '@/components/EmptyState';
 import Modal from '@/components/Modal';
 import { isPin, type DraftAnnotation } from '@/lib/annotation';
-import { groupColor } from '@/lib/labelplus';
+import { groupColor, type GlossaryEntry } from '@/lib/labelplus';
 import { checkText, fixText, type TextIssue } from '@/lib/text-check';
 import type { LabelPlusGroup } from '@/lib/types';
 
@@ -21,6 +21,8 @@ export default function LabelPlusPanel({
   onToggleDoubtful,
   groups,
   phrases,
+  glossary = [],
+  tm,
   defaultGroupId,
   reviewMode,
   phraseMenuOpen,
@@ -43,6 +45,10 @@ export default function LabelPlusPanel({
   onToggleDoubtful?: (key: string) => void;
   groups: LabelPlusGroup[];
   phrases: string[];
+  /** 空间术语表（原文命中时展示译词 chips） */
+  glossary?: GlossaryEntry[];
+  /** 空间翻译记忆（原文 → 译文），译文为空且命中时提示一键采用 */
+  tm?: Record<string, string>;
   defaultGroupId: number;
   reviewMode: boolean;
   phraseMenuOpen: boolean;
@@ -455,6 +461,45 @@ export default function LabelPlusPanel({
               onChange={(event) => patch(pin.key, { source_text: event.target.value })}
               onFocus={() => onSelect(pin.key)}
             />
+            {/* 术语命中 chips：原文包含术语表的 from 词时展示「译词 → 备注」，点击追加译词到译文 */}
+            {!readOnly &&
+              glossary
+                .filter((entry) => pin.source_text.includes(entry.from))
+                .map((entry) => (
+                  <button
+                    key={`${pin.key}-${entry.from}`}
+                    type="button"
+                    className="mt-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600 hover:border-amber-500"
+                    title={entry.note ? `插入「${entry.to}」（${entry.note}）` : `插入「${entry.to}」`}
+                    onClick={() => patch(pin.key, { text: `${pin.text}${entry.to}` })}
+                  >
+                    {entry.to}
+                    {entry.note ? ` → ${entry.note}` : ''}
+                  </button>
+                ))}
+            {/* 翻译记忆命中：原文非空且译文为空时提示，采用即整段写入译文（点击走 applyChange 可撤销） */}
+            {!readOnly && !pin.text && tm?.[pin.source_text.trim()] && (
+              <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px]">
+                <span className="text-ink-500">
+                  记忆命中：{tm[pin.source_text.trim()].slice(0, 40)}
+                  {tm[pin.source_text.trim()].length > 40 ? '…' : ''}
+                </span>
+                <button
+                  type="button"
+                  className="rounded-md border border-sky/40 bg-sky/10 px-1.5 py-0.5 text-sky-deep hover:border-sky"
+                  onClick={() => patch(pin.key, { text: tm[pin.source_text.trim()] })}
+                >
+                  采用
+                </button>
+              </div>
+            )}
+            {/* 只读态也展示命中信息（校对参考），但无采用按钮 */}
+            {readOnly && !pin.text && tm?.[pin.source_text.trim()] && (
+              <p className="mt-1 text-[11px] text-ink-400">
+                记忆命中：{tm[pin.source_text.trim()].slice(0, 40)}
+                {tm[pin.source_text.trim()].length > 40 ? '…' : ''}
+              </p>
+            )}
             <label className="mb-1 mt-2 block text-[11px] text-ink-500">译文</label>
             <textarea
               className="input min-h-[68px] resize-y text-xs disabled:opacity-60"

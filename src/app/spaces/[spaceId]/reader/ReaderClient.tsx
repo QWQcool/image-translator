@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { originalUrl } from '@/lib/media';
-import type { Annotation, Space, SpaceItem } from '@/lib/types';
+import type { Annotation, Asset, Space, SpaceItem } from '@/lib/types';
 
 /**
  * 空间阅读模式：全屏翻页阅读器。
@@ -62,6 +62,9 @@ export default function ReaderClient({ spaceId }: { spaceId: number }) {
   const [imgIndex, setImgIndex] = useState<number | null>(null);
   const [annotationsByItem, setAnnotationsByItem] = useState<Record<number, Annotation[]>>({});
   const [naturalSizes, setNaturalSizes] = useState<Record<number, { w: number; h: number }>>({});
+  // 成品切换：itemId → 最新一版成品 asset（复用空间 outputs 接口，新→旧首个即最新）
+  const [outputByItem, setOutputByItem] = useState<Record<number, Asset>>({});
+  const [viewMode, setViewMode] = useState<'original' | 'output'>('original');
   const scrollRef = useRef<HTMLDivElement>(null);
   const wheelLock = useRef(false);
   const restored = useRef(false);
@@ -88,6 +91,28 @@ export default function ReaderClient({ spaceId }: { spaceId: number }) {
       }
     })();
   }, [spaceId, router]);
+
+  // 成品列表一次性拉取（与条目同权限接口，失败静默：无成品照常阅读原图）
+  useEffect(() => {
+    if (items.length === 0) return;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/spaces/${spaceId}/outputs`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const map: Record<number, Asset> = {};
+        // outputs 新→旧排序，每条目首个即最新一版
+        for (const output of data.outputs ?? []) {
+          if (output.asset?.filename && !(output.item_id in map)) {
+            map[output.item_id] = output.asset;
+          }
+        }
+        setOutputByItem(map);
+      } catch {
+        // 静默
+      }
+    })();
+  }, [items, spaceId]);
 
   // 恢复上次读到的序号（按空间存）
   useEffect(() => {
@@ -236,6 +261,8 @@ export default function ReaderClient({ spaceId }: { spaceId: number }) {
     total === 0 ? '0 / 0' : pageItems.length > 1 ? `${firstNo}-${lastNo} / ${total}` : `${firstNo} / ${total}`;
   const canPrev = imgIndex !== null && imgIndex > 0;
   const canNext = imgIndex !== null && imgIndex + chunk < total;
+  // 当前页（含对页）任一页有成品才显示「原图 | 成品」切换
+  const pageHasOutput = pageItems.some((item) => Boolean(outputByItem[item.id]));
 
   if (loading && !space) {
     return <div className="fixed inset-0 z-50 grid place-items-center bg-ink-950 text-sm text-ink-400">加载中…</div>;
@@ -252,6 +279,25 @@ export default function ReaderClient({ spaceId }: { spaceId: number }) {
           ← 退出阅读
         </button>
         <span className="min-w-0 truncate text-xs text-ink-400">{space?.name ?? ''}</span>
+        {/* 原图 | 成品 切换：仅当前页有成品时显示；成品已嵌字，不再叠加译文 */}
+        {pageHasOutput && (
+          <div className="seg" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className={`seg-btn ${viewMode === 'original' ? 'seg-btn-on' : ''}`}
+              onClick={() => setViewMode('original')}
+            >
+              原图
+            </button>
+            <button
+              type="button"
+              className={`seg-btn ${viewMode === 'output' ? 'seg-btn-on' : ''}`}
+              onClick={() => setViewMode('output')}
+            >
+              成品
+            </button>
+          </div>
+        )}
         <button
           type="button"
           className="btn-ghost ml-auto px-2.5 py-1 text-xs"
@@ -337,6 +383,7 @@ export default function ReaderClient({ spaceId }: { spaceId: number }) {
                   annotations={settings.showText ? (annotationsByItem[item.id] ?? null) : null}
                   natural={naturalSizes[item.id] ?? null}
                   onNatural={rememberNatural}
+                  outputAsset={viewMode === 'output' ? (outputByItem[item.id] ?? null) : null}
                 />
               ))}
             </div>
@@ -373,21 +420,23 @@ export default function ReaderClient({ spaceId }: { spaceId: number }) {
   );
 }
 
-/** 单页图片 + 译文叠加层 */
+/** 单页图片 + 译文叠加层（outputAsset 非空时显示嵌字成品，成品上不再叠加译文） */
 function PageImage({
   item,
   settings,
   annotations,
   natural,
   onNatural,
+  outputAsset,
 }: {
   item: SpaceItem;
   settings: ReaderSettings;
   annotations: Annotation[] | null;
   natural: { w: number; h: number } | null;
   onNatural: (itemId: number, w: number, h: number) => void;
+  outputAsset: Asset | null;
 }) {
-  const asset = item.asset;
+  const asset = outputAsset ?? item.asset;
   if (!asset) return null;
   const fitWidth = settings.fit === 'width';
 
@@ -414,7 +463,7 @@ function PageImage({
               : 'mx-auto block max-h-[calc(100vh-8rem)] w-auto max-w-full'
           }
         />
-        {annotations && annotations.length > 0 && (
+        {annotations && annotations.length > 0 && !outputAsset && (
           <TextOverlay annotations={annotations} aspect={aspect} />
         )}
       </div>

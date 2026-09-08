@@ -7,7 +7,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import EmptyState from '@/components/EmptyState';
 import { originalUrl, previewUrl, thumbUrl } from '@/lib/media';
 import { isPin, newKey, parseRuns, type DraftAnnotation } from '@/lib/annotation';
-import { groupColor, parseGroups, parsePhrases } from '@/lib/labelplus';
+import { groupColor, parseGroups, parsePhrases, type GlossaryEntry } from '@/lib/labelplus';
 import { useCollabRoom } from '@/lib/use-collab-room';
 import type { Asset, LabelPlusGroup, SpaceAccess, SpaceItem } from '@/lib/types';
 import AnnotationCanvas, { type EditorMode } from './AnnotationCanvas';
@@ -80,6 +80,10 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
   const [defaultGroupId, setDefaultGroupId] = useState(1);
   const [groups, setGroups] = useState<LabelPlusGroup[]>([]);
   const [phrases, setPhrases] = useState<string[]>([]);
+  // 空间术语表：原文命中时展示「译词 → 备注」chips（随 detail.labelplus 一次下发）
+  const [glossary, setGlossary] = useState<GlossaryEntry[]>([]);
+  // 空间翻译记忆（原文 → 译文映射）：进编辑器时一次性拉取，静态使用不实时
+  const [tm, setTm] = useState<Record<string, string>>({});
   const [phraseMenuOpen, setPhraseMenuOpen] = useState(false);
   const phraseCursor = useRef(0);
   // 乐观并发基线：最近一次「加载 / 保存成功 / 协作者同步」时服务器返回的标注快照，
@@ -196,6 +200,21 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
       setSelectedKeys([]);
       setGroups(parseGroups(detail.labelplus?.groups));
       setPhrases(parsePhrases(detail.labelplus?.phrases));
+      setGlossary(Array.isArray(detail.labelplus?.glossary) ? detail.labelplus.glossary : []);
+      // TM 拉取失败静默：命中提示只是效率增强，不能阻塞编辑器主流程
+      if (detail.item?.space_id) {
+        void (async () => {
+          try {
+            const tmRes = await fetch(`/api/spaces/${detail.item.space_id}/translation-memory`);
+            if (tmRes.ok) {
+              const tmData = await tmRes.json();
+              setTm(tmData.memory ?? {});
+            }
+          } catch {
+            // 静默
+          }
+        })();
+      }
       setNeighbors({
         prevId: detail.neighbors?.prevId ?? null,
         nextId: detail.neighbors?.nextId ?? null,
@@ -961,6 +980,8 @@ export default function AnnotationEditor({ itemId }: { itemId: number }) {
                 onToggleDoubtful={(key) => toggleDoubtful([key])}
                 groups={groups}
                 phrases={phrases}
+                glossary={glossary}
+                tm={tm}
                 defaultGroupId={defaultGroupId}
                 reviewMode={mode === 'review'}
                 phraseMenuOpen={phraseMenuOpen}

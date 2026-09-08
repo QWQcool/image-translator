@@ -118,6 +118,9 @@ export type SpaceItem = {
   annotation_count?: number;
   /** AI 图像解析出的内容描述（人物/场景/剧情提示），AI 翻译时作为上下文 */
   ai_context?: string | null;
+  /** 页级认领人（NULL=未认领；联表查询时附带认领人用户名） */
+  assignee_id?: number | null;
+  assignee_username?: string | null;
   /** 关键词搜索时附带：该条目命中的标注文本片段（最多 3 条，非搜索请求为空数组） */
   matched_texts?: string[];
 };
