@@ -148,3 +148,126 @@ export function createPointSmoother(strengthPercent: number): (pt: BrushPoint) =
 export function lerpPoint(a: BrushPoint, b: BrushPoint, t: number): BrushPoint {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 }
+
+// ---- 批次 2：确定性 PRNG 与笔刷动态（压感/散布/抖动/椭圆笔尖） ----
+
+/**
+ * mulberry32 确定性 PRNG：同种子必得同一输出序列（协作重放一致性的根基）。
+ * 种子由操作者落笔时生成一次并随 PaintOp 广播，重放端逐章推进同一序列；
+ * 重放路径本身禁止 Math.random / Date.now（种子生成发生在本地输入侧，不属重放）。
+ */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 压感最小比例：size = size×(1-minRatio+minRatio×p)，p∈[0,1] → [0.65,1]×size */
+export const PRESSURE_MIN_RATIO = 0.35;
+
+/**
+ * 压感→比例系数（大小/不透明度通用映射）：p 缺省/非法按 0.5 兜底
+ * （旧 points 无 p 字段、以及不支持压感的设备按下报 0 时都用 0.5）。
+ */
+export function pressureFactor(p: number | undefined): number {
+  const v = p == null || !Number.isFinite(p) ? 0.5 : clamp(p, 0, 1);
+  return 1 - PRESSURE_MIN_RATIO + PRESSURE_MIN_RATIO * v;
+}
+
+/** 笔尖角度 0~180 度（椭圆长轴相对水平方向的旋转），缺省 0 */
+export function normalizeAngleDeg(raw: unknown): number {
+  if (raw == null) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) ? clamp(n, 0, 180) : 0;
+}
+
+/** 圆度 1~100（100=正圆，越小越扁），缺省 100 */
+export function normalizeRoundness(raw: unknown): number {
+  if (raw == null) return 100;
+  const n = Number(raw);
+  return Number.isFinite(n) ? clamp(n, 1, 100) : 100;
+}
+
+/** 散布 0~500%（章位置随机偏移幅度上限 = 基础大小×散布%，逐轴均匀），缺省 0 */
+export function normalizeScatterPercent(raw: unknown): number {
+  if (raw == null) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) ? clamp(n, 0, 500) : 0;
+}
+
+/** 大小抖动 0~100%（章大小在 [1-j,1]×基础大小 内随机），缺省 0 */
+export function normalizeJitterPercent(raw: unknown): number {
+  if (raw == null) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) ? clamp(n, 0, 100) : 0;
+}
+
+/** 笔画动态参数（PaintOp 可选字段清洗后的结果；全默认 = 旧行为：正圆、无散布、无压感） */
+export type StrokeDynamics = {
+  pressureSize: boolean;
+  pressureOpacity: boolean;
+  angleDeg: number;
+  roundness: number;
+  scatter: number;
+  jitter: number;
+};
+
+/** PaintOp 可选动态字段 → 清洗后的 StrokeDynamics（重放端二次防御，远端可发任意值） */
+export function resolveDynamics(raw: {
+  pressureSize?: unknown;
+  pressureOpacity?: unknown;
+  angle?: unknown;
+  roundness?: unknown;
+  scatter?: unknown;
+  jitter?: unknown;
+}): StrokeDynamics {
+  return {
+    pressureSize: raw.pressureSize === true,
+    pressureOpacity: raw.pressureOpacity === true,
+    angleDeg: normalizeAngleDeg(raw.angle),
+    roundness: normalizeRoundness(raw.roundness),
+    scatter: normalizeScatterPercent(raw.scatter),
+    jitter: normalizeJitterPercent(raw.jitter),
+  };
+}
+
+/** 是否需要随机动态（散布/抖动任一开启才创建 rng；压感由点数据驱动不消耗 rng） */
+export function dynamicsNeedRng(dyn: StrokeDynamics): boolean {
+  return dyn.scatter > 0 || dyn.jitter > 0;
+}
+
+/** 单章动态解析（确定性）：
+ * - rng 存在时每章固定消费 3 个数（dx、dy、大小抖动系数），本地与远端按同一序列推进；
+ *   消费与散布/抖动是否为 0 无关（为 0 时结果恒为 0/1，序列推进不产生可见差异），
+ *   只要求两端「消费时机与数量」一致——由同一份 stampAlong/stampOne 保证。
+ * - 压感系数来自插值点的 p（两端点 p 线性插值后传入），大小/不透明度按开关分别映射。
+ */
+export function resolveStampDynamics(
+  base: { x: number; y: number },
+  p: number | undefined,
+  size: number,
+  alpha: number,
+  dyn: StrokeDynamics,
+  rng: (() => number) | null,
+): { x: number; y: number; size: number; alpha: number } {
+  let x = base.x;
+  let y = base.y;
+  let sizeF = 1;
+  if (rng) {
+    const maxOff = size * (dyn.scatter / 100);
+    x += (rng() * 2 - 1) * maxOff;
+    y += (rng() * 2 - 1) * maxOff;
+    sizeF *= 1 - rng() * (dyn.jitter / 100);
+  }
+  const pf = dyn.pressureSize || dyn.pressureOpacity ? pressureFactor(p) : 1;
+  return {
+    x,
+    y,
+    size: size * (dyn.pressureSize ? pf : 1) * sizeF,
+    alpha: alpha * (dyn.pressureOpacity ? pf : 1),
+  };
+}

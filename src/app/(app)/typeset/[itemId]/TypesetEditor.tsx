@@ -8,12 +8,17 @@ import EmptyState from '@/components/EmptyState';
 import { isPin } from '@/lib/annotation';
 import {
   createPointSmoother,
+  dynamicsNeedRng,
   hardnessToInnerRatio,
   lerpPoint,
+  mulberry32,
   planStrokeFlow,
+  resolveDynamics,
+  resolveStampDynamics,
   resolveStrokeHardness,
   stampSpacing,
   type BrushPoint,
+  type StrokeDynamics,
   type StrokeFlowPlan,
 } from '@/lib/brush-engine';
 import type { LpStyle } from '@/lib/labelplus';
@@ -107,7 +112,21 @@ type PaintOp =
       flow?: number;
       /** 章间距百分比 1~500：缺省 25 = 旧硬编码 size/4 */
       spacing?: number;
-      points: { x: number; y: number }[];
+      /** 确定性 PRNG 种子（落笔时生成一次，整数）；散布/抖动重放序列的根基 */
+      seed?: number;
+      /** 大小压感开关：开 = 章大小按 size×(1-0.35+0.35×p) 映射 */
+      pressureSize?: boolean;
+      /** 不透明度压感开关：开 = 笔章 alpha 同式乘压感系数 */
+      pressureOpacity?: boolean;
+      /** 椭圆笔尖旋转角 0~180 度，缺省 0 */
+      angle?: number;
+      /** 圆度 1~100（100=正圆），缺省 100 */
+      roundness?: number;
+      /** 散布 0~500%，缺省 0 */
+      scatter?: number;
+      /** 大小抖动 0~100%，缺省 0 */
+      jitter?: number;
+      points: { x: number; y: number; p?: number }[];
     }
   | {
       type: 'clone';
@@ -242,6 +261,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   const [smoothing, setSmoothing] = useState(0);
   /** 「更多设置」折叠开关（间距/平滑低频参数，收起降低面板密度） */
   const [showMoreBrush, setShowMoreBrush] = useState(false);
+  /** 笔尖与动态（批次2）：角度/圆度/散布/大小抖动 + 压感开关，同样只存个人偏好 */
+  const [angle, setAngle] = useState(0);
+  const [roundness, setRoundness] = useState(100);
+  const [scatter, setScatter] = useState(0);
+  const [jitter, setJitter] = useState(0);
+  const [pressureSize, setPressureSize] = useState(false);
+  const [pressureOpacity, setPressureOpacity] = useState(false);
   /** 参考线开关（仅预览辅助，不进层数据、不导出；localStorage 记忆） */
   const [showGuides, setShowGuides] = useState(false);
   /** 删除文字层前的二次确认 */
@@ -348,6 +374,18 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   spacingRef.current = spacing;
   const smoothingRef = useRef(smoothing);
   smoothingRef.current = smoothing;
+  const angleRef = useRef(angle);
+  angleRef.current = angle;
+  const roundnessRef = useRef(roundness);
+  roundnessRef.current = roundness;
+  const scatterRef = useRef(scatter);
+  scatterRef.current = scatter;
+  const jitterRef = useRef(jitter);
+  jitterRef.current = jitter;
+  const pressureSizeRef = useRef(pressureSize);
+  pressureSizeRef.current = pressureSize;
+  const pressureOpacityRef = useRef(pressureOpacity);
+  pressureOpacityRef.current = pressureOpacity;
   const adjustRef = useRef(adjust);
   adjustRef.current = adjust;
 
@@ -361,9 +399,21 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     hardness: number;
     flow: number;
     spacing: number;
-    points: { x: number; y: number }[];
+    /** 批次2 动态：种子落笔生成一次，其余为开关/滑条快照 */
+    seed: number;
+    pressureSize: boolean;
+    pressureOpacity: boolean;
+    angle: number;
+    roundness: number;
+    scatter: number;
+    jitter: number;
+    points: { x: number; y: number; p?: number }[];
     from?: { x: number; y: number };
   } | null>(null);
+
+  /** 当前笔画的动态清洗快照与确定性 rng（散布/抖动任一开启才有 rng），远端重放按 op 字段重建同一套 */
+  const strokeDyn = useRef<StrokeDynamics | null>(null);
+  const strokeRng = useRef<(() => number) | null>(null);
 
   /**
    * 当前笔画的流量两段式方案（flow<100 时非 null）：笔章先进离屏层堆积，
@@ -460,6 +510,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     setFlow(num('typeset-brush-flow', 100, 1, 100));
     setSpacing(num('typeset-brush-spacing', 25, 1, 500));
     setSmoothing(num('typeset-brush-smoothing', 0, 0, 95));
+    // 批次2 笔尖与动态
+    setAngle(num('typeset-brush-angle', 0, 0, 180));
+    setRoundness(num('typeset-brush-roundness', 100, 1, 100));
+    setScatter(num('typeset-brush-scatter', 0, 0, 500));
+    setJitter(num('typeset-brush-jitter', 0, 0, 100));
+    if (localStorage.getItem('typeset-brush-pressure-size') === '1') setPressureSize(true);
+    if (localStorage.getItem('typeset-brush-pressure-opacity') === '1') setPressureOpacity(true);
   }, []);
 
   // 手感参数变更即写回 localStorage（滑条拖动频率低，直接整组写无压力）
@@ -468,7 +525,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     localStorage.setItem('typeset-brush-flow', String(flow));
     localStorage.setItem('typeset-brush-spacing', String(spacing));
     localStorage.setItem('typeset-brush-smoothing', String(smoothing));
-  }, [hardness, flow, spacing, smoothing]);
+    localStorage.setItem('typeset-brush-angle', String(angle));
+    localStorage.setItem('typeset-brush-roundness', String(roundness));
+    localStorage.setItem('typeset-brush-scatter', String(scatter));
+    localStorage.setItem('typeset-brush-jitter', String(jitter));
+    localStorage.setItem('typeset-brush-pressure-size', pressureSize ? '1' : '0');
+    localStorage.setItem('typeset-brush-pressure-opacity', pressureOpacity ? '1' : '0');
+  }, [hardness, flow, spacing, smoothing, angle, roundness, scatter, jitter, pressureSize, pressureOpacity]);
 
   const saveRef = useRef<() => Promise<void>>(async () => {});
   const undoRef = useRef<() => Promise<void>>(async () => {});
@@ -621,6 +684,11 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     };
   }
 
+  /** pointer 压力读取：0~1；不支持压感的设备按下报 0（含鼠标）统一兜底 0.5 */
+  function readPressure(event: { pressure: number }): number {
+    return event.pressure > 0 ? Math.min(1, Math.max(0, event.pressure)) : 0.5;
+  }
+
   function paintCtx() {
     return paintRef.current?.getContext('2d') ?? null;
   }
@@ -644,6 +712,10 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       hardness?: number;
       /** 直接指定笔章 alpha（流量两段式用）；缺省由 opacity 换算 */
       alpha?: number;
+      /** 椭圆笔尖旋转角 0~180 度（缺省 0 = 不旋转） */
+      angleDeg?: number;
+      /** 圆度 1~100（缺省 100 = 正圆） */
+      roundness?: number;
       cloneFrom?: { x: number; y: number };
     },
   ) {
@@ -667,19 +739,33 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       // 不回落本端硬度滑条——否则旧对端的笔画会被本端重放出不同的边
       const hardness = opts.cloneFrom ? 100 : resolveStrokeHardness(opts.hardness, opts.soft);
       const inner = hardnessToInnerRatio(hardness);
+      // 椭圆笔尖（批次2）：圆度<100 或角度非 0 时「平移→旋转→纵轴压扁」后以原点画圆，
+      // 软边径向渐变在同一变换空间内同步椭圆化；图章（cloneFrom）恒硬边正圆不受影响
+      const roundness = opts.cloneFrom ? 100 : Math.min(100, Math.max(1, opts.roundness ?? 100));
+      const angleDeg = opts.cloneFrom ? 0 : Math.min(180, Math.max(0, opts.angleDeg ?? 0));
+      const squash = roundness / 100;
+      const rot = (angleDeg * Math.PI) / 180;
+      const useEllipse = squash < 1 || rot !== 0;
+      if (useEllipse) {
+        ctx.translate(x, y);
+        ctx.rotate(rot);
+        ctx.scale(1, squash);
+      }
+      const cx = useEllipse ? 0 : x;
+      const cy = useEllipse ? 0 : y;
       if (inner >= 1) {
         // 硬边：纯色圆（与旧 soft:false 逐像素一致）
         ctx.fillStyle = col;
       } else {
         // 硬度渐变：内圈（r×inner）全强度向边缘渐隐；inner=0.5 时与旧 soft:true 的
         // createRadialGradient(x,y,r*0.5,x,y,r) 逐像素一致；橡皮 destination-out 同理渐隐
-        const g = ctx.createRadialGradient(x, y, r * inner, x, y, r);
+        const g = ctx.createRadialGradient(cx, cy, r * inner, cx, cy, r);
         g.addColorStop(0, withAlpha(col, 1));
         g.addColorStop(1, withAlpha(col, 0));
         ctx.fillStyle = g;
       }
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
@@ -687,12 +773,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
 
   /**
    * 沿 prev→cur 按间距插值盖章：本地拖动与远端重放共用同一份循环，保证两端一致。
-   * 章数 = 距离/间距 向下取整（至少 1 章，旧行为）；间距 = stampSpacing（缺省 25% = 旧 size/4）。
+   * 章数 = 距离/间距 向下取整（至少 1 章，旧行为）；间距 = stampSpacing（缺省 25% = 旧 size/4，
+   * 以基础大小计，不随压感/抖动的单章大小变化）。dyn/rng 存在时每章做散布/抖动/压感动态解析。
    */
   function stampAlong(
     target: CanvasRenderingContext2D,
-    prev: { x: number; y: number },
-    cur: { x: number; y: number },
+    prev: { x: number; y: number; p?: number },
+    cur: { x: number; y: number; p?: number },
     opts: {
       erase?: boolean;
       color?: string;
@@ -702,15 +789,75 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       spacing?: number;
       alpha?: number;
       cloneFrom?: { x: number; y: number };
+      dyn?: StrokeDynamics;
+      rng?: (() => number) | null;
     },
   ) {
     const dist = Math.hypot(cur.x - prev.x, cur.y - prev.y);
     const steps = Math.max(1, Math.floor(dist / stampSpacing(opts.size, opts.spacing)));
+    const baseAlpha = opts.alpha ?? Math.min(1, Math.max(0.05, (opts.opacity ?? 100) / 100));
+    const dyn = opts.dyn;
+    const p0 = prev.p ?? 0.5;
+    const p1 = cur.p ?? 0.5;
     for (let s = 1; s <= steps; s += 1) {
       const t = s / steps;
-      const p = lerpPoint(prev, cur, t);
-      stampWith(target, p.x, p.y, opts);
+      const pos = lerpPoint(prev, cur, t);
+      if (opts.cloneFrom) {
+        // 图章：硬边正圆、无动态
+        stampWith(target, pos.x, pos.y, opts);
+        continue;
+      }
+      const r =
+        dyn && (opts.rng || dyn.pressureSize || dyn.pressureOpacity)
+          ? resolveStampDynamics(pos, p0 + (p1 - p0) * t, opts.size, baseAlpha, dyn, opts.rng ?? null)
+          : { x: pos.x, y: pos.y, size: opts.size, alpha: baseAlpha };
+      stampWith(target, r.x, r.y, {
+        erase: opts.erase,
+        color: opts.color,
+        size: r.size,
+        alpha: r.alpha,
+        hardness: opts.hardness,
+        angleDeg: dyn?.angleDeg,
+        roundness: dyn?.roundness,
+      });
     }
+  }
+
+  /**
+   * 笔画单章落墨（含动态解析）：笔画首章与远端重放首章共用，保证 rng 消费序列一致。
+   * 旧行为（无 dyn/rng）= 直接按基础大小/不透明度落章。
+   */
+  function stampOne(
+    target: CanvasRenderingContext2D,
+    pt: { x: number; y: number; p?: number },
+    opts: {
+      erase?: boolean;
+      color?: string;
+      size: number;
+      opacity?: number;
+      alpha?: number;
+      hardness?: number;
+      cloneFrom?: { x: number; y: number };
+      dyn?: StrokeDynamics;
+      rng?: (() => number) | null;
+    },
+  ) {
+    const baseAlpha = opts.alpha ?? Math.min(1, Math.max(0.05, (opts.opacity ?? 100) / 100));
+    const dyn = opts.dyn;
+    const r =
+      dyn && (opts.rng || dyn.pressureSize || dyn.pressureOpacity)
+        ? resolveStampDynamics(pt, pt.p, opts.size, baseAlpha, dyn, opts.rng ?? null)
+        : { x: pt.x, y: pt.y, size: opts.size, alpha: baseAlpha };
+    stampWith(target, r.x, r.y, {
+      erase: opts.erase,
+      color: opts.color,
+      size: r.size,
+      alpha: r.alpha,
+      hardness: opts.hardness,
+      angleDeg: dyn?.angleDeg,
+      roundness: dyn?.roundness,
+      cloneFrom: opts.cloneFrom,
+    });
   }
 
   /** 取（或创建）与涂改层同尺寸的离屏层；笔画间复用同一块，落笔时由调用方清空 */
@@ -787,26 +934,19 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
   /**
    * 当前笔画单章落墨：流量两段式时画进离屏层（以 flow alpha，一律 source-over 累积——
    * 画笔累积墨量、橡皮累积「擦除覆盖量」，合成阶段才决定方向）；
-   * 否则直画涂改层（旧行为：不透明度 alpha 逐章叠加）。
+   * 否则直画涂改层（旧行为：不透明度 alpha 逐章叠加）。dyn/rng 存在时做动态解析。
    */
-  function stampStrokeAt(ctx: CanvasRenderingContext2D, x: number, y: number, erase: boolean) {
+  function stampStrokeAt(ctx: CanvasRenderingContext2D, pt: { x: number; y: number; p?: number }, erase: boolean) {
     const plan = strokeFlow.current;
-    if (plan) {
-      stampWith(ctx, x, y, {
-        erase: false,
-        color: erase ? '#000000' : colorRef.current,
-        size: sizeRef.current,
-        hardness: hardnessRef.current,
-        alpha: plan.stampAlpha,
-      });
-      return;
-    }
-    stampWith(ctx, x, y, {
-      erase,
-      color: colorRef.current,
+    stampOne(ctx, pt, {
+      erase: plan ? false : erase,
+      color: plan && erase ? '#000000' : colorRef.current,
       size: sizeRef.current,
-      opacity: opacityRef.current,
+      alpha: plan?.stampAlpha,
+      opacity: plan ? undefined : opacityRef.current,
       hardness: hardnessRef.current,
+      dyn: strokeDyn.current ?? undefined,
+      rng: strokeRng.current,
     });
   }
 
@@ -981,10 +1121,25 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       // 流量方案：flow<100 走两段式（离屏层逐章堆积，松手整体合成）；缺省/100 直画（旧行为）
       const plan = planStrokeFlow(flowRef.current, opacityRef.current);
       if (plan.twoStage) beginFlowStroke(plan, erase);
+      // 动态清洗快照 + 确定性 rng：种子落笔生成一次并随 op 广播
+      //（Math.random 只出现在本地输入侧，重放端一律用种子 PRNG，确定性不受影响）
+      const dyn = resolveDynamics({
+        pressureSize: pressureSizeRef.current,
+        pressureOpacity: pressureOpacityRef.current,
+        angle: angleRef.current,
+        roundness: roundnessRef.current,
+        scatter: scatterRef.current,
+        jitter: jitterRef.current,
+      });
+      const seed = (Math.random() * 0xffffffff) >>> 0;
+      strokeDyn.current = dyn;
+      strokeRng.current = dynamicsNeedRng(dyn) ? mulberry32(seed) : null;
       // 平滑稳定器：落笔重建（强度 0 时输出=输入）；平滑后的点直接进 points，广播即重放
       strokeSmoother.current = createPointSmoother(smoothingRef.current);
-      const spt = strokeSmoother.current(pt);
-      stampStrokeAt(ctx, spt.x, spt.y, erase);
+      const raw = { x: pt.x, y: pt.y, p: readPressure(event) };
+      const sm = strokeSmoother.current(raw);
+      const spt = { x: sm.x, y: sm.y, p: raw.p };
+      stampStrokeAt(ctx, spt, erase);
       setDirty(true);
       liveStroke.current = {
         tool,
@@ -994,6 +1149,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         hardness: hardnessRef.current,
         flow: flowRef.current,
         spacing: spacingRef.current,
+        seed,
+        pressureSize: dyn.pressureSize,
+        pressureOpacity: dyn.pressureOpacity,
+        angle: dyn.angleDeg,
+        roundness: dyn.roundness,
+        scatter: dyn.scatter,
+        jitter: dyn.jitter,
         points: [spt],
       };
     }
@@ -1019,6 +1181,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         hardness: 100,
         flow: 100,
         spacing: 25,
+        seed: 0,
+        pressureSize: false,
+        pressureOpacity: false,
+        angle: 0,
+        roundness: 100,
+        scatter: 0,
+        jitter: 0,
         points: [pt],
         from: { ...cloneOrigin.current },
       };
@@ -1061,8 +1230,10 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
     if (!ctx) return;
     if (tool === 'brush' || tool === 'eraser') {
       const erase = tool === 'eraser';
-      // 输入点先过 EMA 平滑（稳定器关闭时 = 原点）；平滑后的点同时用于盖章与广播
-      const spt = strokeSmoother.current ? strokeSmoother.current(pt) : pt;
+      // 输入点先过 EMA 平滑（稳定器关闭时 = 原点），压感随点记录；平滑后的点同时用于盖章与广播
+      const raw = { x: pt.x, y: pt.y, p: readPressure(event) };
+      const sm = strokeSmoother.current ? strokeSmoother.current(raw) : raw;
+      const spt = { x: sm.x, y: sm.y, p: raw.p };
       const prev = lastPt.current;
       const plan = strokeFlow.current;
       if (prev) {
@@ -1077,6 +1248,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 hardness: hardnessRef.current,
                 spacing: spacingRef.current,
                 alpha: plan.stampAlpha,
+                dyn: strokeDyn.current ?? undefined,
+                rng: strokeRng.current,
               }
             : {
                 erase,
@@ -1085,6 +1258,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
                 opacity: opacityRef.current,
                 hardness: hardnessRef.current,
                 spacing: spacingRef.current,
+                dyn: strokeDyn.current ?? undefined,
+                rng: strokeRng.current,
               });
         }
       }
@@ -1159,6 +1334,9 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
       // 硬度：新字段优先，旧数据回落 soft 映射（true→50 / 缺省→100），保证旧笔画重放逐像素一致
       const hardness = resolveStrokeHardness(op.type === 'stroke' ? op.hardness : undefined, op.soft);
       const spacing = op.type === 'stroke' ? op.spacing : undefined;
+      // 动态（批次2）：远端可发任意值，resolveDynamics 二次清洗；散布/抖动用 op.seed 确定性重放
+      const dyn = op.type === 'stroke' ? resolveDynamics(op) : undefined;
+      const rng = dyn && dynamicsNeedRng(dyn) ? mulberry32(op.type === 'stroke' ? op.seed ?? 0 : 0) : null;
       const plan = op.type === 'stroke' ? planStrokeFlow(op.flow, op.opacity) : null;
       if (op.type === 'stroke' && plan?.twoStage) {
         // 两段式重放（与本地绘制同一套逻辑）：笔章以 flow alpha 进临时离屏层逐章堆积，
@@ -1175,8 +1353,10 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
             hardness,
             spacing,
             alpha: plan.stampAlpha,
+            dyn,
+            rng,
           };
-          stampWith(lctx, pts[0].x, pts[0].y, segOpts);
+          stampOne(lctx, pts[0], segOpts);
           for (let i = 1; i < pts.length; i += 1) {
             stampAlong(lctx, pts[i - 1], pts[i], segOpts);
           }
@@ -1189,14 +1369,16 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
         }
         return;
       }
-      // 直画重放（旧行为路径：flow 缺省或 100，逐章以不透明度叠加）
-      stampWith(ctx, pts[0].x, pts[0].y, {
+      // 直画重放（旧行为路径：flow 缺省或 100，逐章以不透明度叠加）；旧 op 无动态字段时 dyn 全默认 = 与升级前一致
+      stampOne(ctx, pts[0], {
         erase,
         color: op.type === 'stroke' ? op.color : undefined,
         size: op.size,
         opacity: op.opacity,
         hardness,
         cloneFrom,
+        dyn,
+        rng,
       });
       for (let i = 1; i < pts.length; i += 1) {
         stampAlong(ctx, pts[i - 1], pts[i], {
@@ -1207,6 +1389,8 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           hardness,
           spacing,
           cloneFrom,
+          dyn,
+          rng,
         });
       }
       setDirty(true);
@@ -1294,7 +1478,7 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           });
         }
       } else {
-        // 实际值随 op 广播（远端按 op 重放，不读本端滑条）
+        // 实际值随 op 广播（远端按 op 重放，不读本端滑条）；seed 供散布/抖动确定性重放
         broadcastPaint({
           type: 'stroke',
           tool: stroke.tool,
@@ -1304,6 +1488,13 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
           hardness: stroke.hardness,
           flow: stroke.flow,
           spacing: stroke.spacing,
+          seed: stroke.seed,
+          pressureSize: stroke.pressureSize,
+          pressureOpacity: stroke.pressureOpacity,
+          angle: stroke.angle,
+          roundness: stroke.roundness,
+          scatter: stroke.scatter,
+          jitter: stroke.jitter,
           points: stroke.points,
         });
       }
@@ -2662,8 +2853,69 @@ export default function TypesetEditor({ itemId }: { itemId: number }) {
               </label>
             </>
           )}
+          <p className="text-[11px] font-medium text-ink-400">笔尖与动态</p>
+          <label className="text-[11px] text-ink-500">
+            角度 {angle}°
+            <input
+              type="range"
+              min={0}
+              max={180}
+              value={angle}
+              onChange={(e) => setAngle(Number(e.target.value))}
+              className="mt-1 w-full accent-sky"
+            />
+          </label>
+          <label className="text-[11px] text-ink-500">
+            圆度 {roundness}%
+            <input
+              type="range"
+              min={1}
+              max={100}
+              value={roundness}
+              onChange={(e) => setRoundness(Number(e.target.value))}
+              className="mt-1 w-full accent-sky"
+            />
+          </label>
+          <label className="text-[11px] text-ink-500">
+            散布 {scatter}%
+            <input
+              type="range"
+              min={0}
+              max={500}
+              value={scatter}
+              onChange={(e) => setScatter(Number(e.target.value))}
+              className="mt-1 w-full accent-sky"
+            />
+          </label>
+          <label className="text-[11px] text-ink-500">
+            大小抖动 {jitter}%
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={jitter}
+              onChange={(e) => setJitter(Number(e.target.value))}
+              className="mt-1 w-full accent-sky"
+            />
+          </label>
+          <label className="flex items-center gap-1 text-[11px] text-ink-500">
+            <input
+              type="checkbox"
+              checked={pressureSize}
+              onChange={(e) => setPressureSize(e.target.checked)}
+            />
+            大小压感
+          </label>
+          <label className="flex items-center gap-1 text-[11px] text-ink-500">
+            <input
+              type="checkbox"
+              checked={pressureOpacity}
+              onChange={(e) => setPressureOpacity(e.target.checked)}
+            />
+            不透明度压感
+          </label>
           <p className="text-[11px] text-ink-400">
-            原图层已锁定。橡皮只擦涂改层。图章(S)：Alt+点击取源，拖动复制背景；硬度/流量/间距/平滑对画笔/橡皮生效，图章保持硬边。
+            原图层已锁定。橡皮只擦涂改层。图章(S)：Alt+点击取源，拖动复制背景；硬度/流量/间距/平滑/压感/散布/椭圆笔尖对画笔/橡皮生效，图章保持硬边。
             液化：拖动把背景内容沿拖动方向推挤（结果画进涂改层，非破坏；大小=影响域，不透明度=强度）。
             矩形/套索拖出选区后，用顶部「填充选区」上色或「选区去字」去字（Esc 取消选区）。
           </p>
